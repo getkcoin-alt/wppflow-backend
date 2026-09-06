@@ -6,8 +6,13 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import wppconnect from '@wppconnect-team/wppconnect';
+import { initDatabase, getDatabaseStatus } from './db.js';
+import authRoutes from './routes/authRoutes.js';
 
 dotenv.config();
+
+// Initialize DB schema & connection
+initDatabase().catch(err => console.error('Database init error:', err));
 
 const PORT = process.env.PORT || 8080;
 const TOKEN_DIR = process.env.TOKEN_DIR || './tokens';
@@ -170,7 +175,8 @@ async function startSession(sessionName) {
   }
 }
 
-// --- REST API Endpoints ---
+// Mount Auth & User Management Routes
+app.use('/api/auth', authRoutes);
 
 // Healthcheck for Railway / Kubernetes probes
 app.get('/health', (req, res) => {
@@ -178,6 +184,7 @@ app.get('/health', (req, res) => {
     status: 'ok',
     engine: 'wppflow-omniengine',
     version: '2.4.0',
+    database: getDatabaseStatus(),
     activeSessions: sessions.size,
     uptime: Math.floor(process.uptime()),
     timestamp: new Date().toISOString()
