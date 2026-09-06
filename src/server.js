@@ -203,7 +203,7 @@ async function startSession(sessionName) {
 
   const sd = {
     client: null, status: 'STARTING', qrcode: null,
-    error: null,
+    error: null, qrScanned: false,
     phone: null, battery: 100, antiBanHealth: 98,
     warmupDay: 14, lastActive: new Date().toISOString()
   };
@@ -217,6 +217,7 @@ async function startSession(sessionName) {
         console.log(`📸 [${sessionName}] QR attempt ${attempts}`);
         const qr = base64Qr?.startsWith('data:image') ? base64Qr : `data:image/png;base64,${base64Qr}`;
         sd.qrcode = qr;
+        sd.qrScanned = false;
         sd.status = 'QRCODE';
         io.emit('session:qr', { session: sessionName, qrcode: qr, attempts });
         io.emit('session:status', { session: sessionName, status: 'QRCODE' });
@@ -224,11 +225,25 @@ async function startSession(sessionName) {
       statusFind: (statusSession, session) => {
         console.log(`🔄 [${session}] ${statusSession}`);
 
-        if (['isLogged', 'inChat', 'qrReadSuccess', 'chatsAvailable'].includes(statusSession)) {
-          // Successfully connected
+        if (statusSession === 'qrReadSuccess') {
+          // The code was accepted, but WhatsApp is still synchronizing.
+          sd.qrScanned = true;
+          sd.status = 'AUTHENTICATING';
+          sd.qrcode = null;
+          io.emit('session:status', { session, status: 'AUTHENTICATING' });
+
+        } else if (['isLogged', 'inChat'].includes(statusSession) && sd.qrScanned) {
+          // A QR was accepted and the client is now ready.
           sd.status = 'CONNECTED';
           sd.qrcode = null;
+          sd.error = null;
+          setSessionRegistered(sessionName, true);
           io.emit('session:status', { session, status: 'CONNECTED' });
+
+        } else if (['isLogged', 'inChat'].includes(statusSession)) {
+          // Existing profiles can briefly report logged-in while WhatsApp Web is
+          // still deciding that they are unpaired. Do not complete the UI yet.
+          io.emit('session:status', { session, status: 'AUTHENTICATING' });
 
         } else if (statusSession === 'notLogged' || statusSession === 'disconnectedMobile') {
           // Normal intermediate states — WhatsApp Web loaded, QR incoming
@@ -265,10 +280,23 @@ async function startSession(sessionName) {
     });
 
     sd.client = client;
-    sd.status = 'CONNECTED';
-    sd.qrcode = null;
-    sd.error = null;
-    setSessionRegistered(sessionName, true);
+
+    // For a restored, genuinely connected profile there is no QR scan event.
+    // Give WhatsApp Web time to invalidate stale registration before accepting
+    // it as connected, then verify both registered and main-ready state.
+    await sleep(10000);
+    if (sd.status !== 'QRCODE' && sd.status !== 'EXPIRED' && sd.status !== 'FAILED') {
+      const ready = await client.page.evaluate(() =>
+        Boolean(WPP?.conn?.isRegistered?.() && WPP?.conn?.isMainReady?.())
+      ).catch(() => false);
+      if (ready) {
+        sd.status = 'CONNECTED';
+        sd.qrcode = null;
+        sd.error = null;
+        setSessionRegistered(sessionName, true);
+        io.emit('session:status', { session: sessionName, status: 'CONNECTED' });
+      }
+    }
 
     try {
       const host = await client.getHostDevice();
@@ -277,8 +305,10 @@ async function startSession(sessionName) {
       if (typeof bat === 'number') sd.battery = bat;
     } catch (e) { console.warn(`⚠️  Telemetry [${sessionName}]:`, e.message); }
 
-    console.log(`✅ [${sessionName}] Connected! Phone: ${sd.phone}`);
-    io.emit('session:status', { session: sessionName, status: 'CONNECTED', phone: sd.phone, battery: sd.battery });
+    if (sd.status === 'CONNECTED') {
+      console.log(`✅ [${sessionName}] Connected! Phone: ${sd.phone}`);
+      io.emit('session:status', { session: sessionName, status: 'CONNECTED', phone: sd.phone, battery: sd.battery });
+    }
 
     client.onMessage(async (msg) => {
       const result = await handleInboundMessage(sessionName, msg);
