@@ -10,7 +10,11 @@ import {
 } from '../db.js';
 
 const router = express.Router();
-const JWT_SECRET = process.env.JWT_SECRET || 'wppflow_super_secret_jwt_key_2026_x99';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  console.error('❌ FATAL: JWT_SECRET environment variable is not set. Refusing to start.');
+  process.exit(1);
+}
 
 // Middleware to authenticate Bearer token
 export function authenticateToken(req, res, next) {

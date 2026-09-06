@@ -8,6 +8,7 @@ import fs from 'fs';
 import wppconnect from '@wppconnect-team/wppconnect';
 import { initDatabase, getDatabaseStatus } from './db.js';
 import authRoutes from './routes/authRoutes.js';
+import { authenticateToken } from './routes/authRoutes.js';
 
 dotenv.config();
 
@@ -233,7 +234,7 @@ app.get('/health', (req, res) => {
 });
 
 // List all managed sessions
-app.get('/api/sessions', (req, res) => {
+app.get('/api/sessions', authenticateToken, (req, res) => {
   const result = Array.from(sessions.entries()).map(([name, data]) => ({
     sessionKey: name,
     status: data.status,
@@ -248,7 +249,7 @@ app.get('/api/sessions', (req, res) => {
 });
 
 // Start or recover a session
-app.post('/api/sessions/start', async (req, res) => {
+app.post('/api/sessions/start', authenticateToken, async (req, res) => {
   const { sessionName } = req.body;
   if (!sessionName) {
     return res.status(400).json({ status: 'error', message: 'sessionName is required' });
@@ -267,7 +268,7 @@ app.post('/api/sessions/start', async (req, res) => {
 });
 
 // Get QR code for a session
-app.get('/api/sessions/:session/qr', (req, res) => {
+app.get('/api/sessions/:session/qr', authenticateToken, (req, res) => {
   const { session } = req.params;
   const sess = sessions.get(session);
   if (!sess) {
@@ -283,7 +284,7 @@ app.get('/api/sessions/:session/qr', (req, res) => {
 });
 
 // Get session status
-app.get('/api/sessions/:session/status', (req, res) => {
+app.get('/api/sessions/:session/status', authenticateToken, (req, res) => {
   const { session } = req.params;
   const sess = sessions.get(session);
   if (!sess) {
@@ -301,7 +302,7 @@ app.get('/api/sessions/:session/status', (req, res) => {
 });
 
 // Send text message
-app.post('/api/sessions/:session/send-message', async (req, res) => {
+app.post('/api/sessions/:session/send-message', authenticateToken, async (req, res) => {
   const { session } = req.params;
   const { phone, message } = req.body;
 
@@ -331,7 +332,7 @@ app.post('/api/sessions/:session/send-message', async (req, res) => {
 });
 
 // Send buttons
-app.post('/api/sessions/:session/send-buttons', async (req, res) => {
+app.post('/api/sessions/:session/send-buttons', authenticateToken, async (req, res) => {
   const { session } = req.params;
   const { phone, title, buttons } = req.body;
 
@@ -357,7 +358,7 @@ app.post('/api/sessions/:session/send-buttons', async (req, res) => {
 });
 
 // List chats
-app.get('/api/sessions/:session/chats', async (req, res) => {
+app.get('/api/sessions/:session/chats', authenticateToken, async (req, res) => {
   const { session } = req.params;
   const sess = sessions.get(session);
   if (!sess || !sess.client) {
@@ -373,7 +374,7 @@ app.get('/api/sessions/:session/chats', async (req, res) => {
 });
 
 // Close / disconnect a session
-app.post('/api/sessions/:session/close', async (req, res) => {
+app.post('/api/sessions/:session/close', authenticateToken, async (req, res) => {
   const { session } = req.params;
   const sess = sessions.get(session);
   if (sess && sess.client) {
