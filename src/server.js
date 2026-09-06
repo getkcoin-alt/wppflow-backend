@@ -28,6 +28,7 @@ initDatabase().catch(err => console.error('Database init error:', err));
 
 const PORT = process.env.PORT || 8080;
 const TOKEN_DIR = process.env.TOKEN_DIR || './tokens';
+const SESSION_REGISTRY = path.join(TOKEN_DIR, '.connected-sessions.json');
 
 if (!fs.existsSync(TOKEN_DIR)) {
   fs.mkdirSync(TOKEN_DIR, { recursive: true });
@@ -62,6 +63,30 @@ console.log(`📋 Node: ${process.version}`);
 
 // ─────────────────────────────────────────────────────────────────────────────
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+function readConnectedSessionNames() {
+  try {
+    const value = JSON.parse(fs.readFileSync(SESSION_REGISTRY, 'utf8'));
+    return Array.isArray(value) ? value.filter(name => typeof name === 'string') : [];
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.warn(`⚠️  Could not read session registry: ${e.message}`);
+    return [];
+  }
+}
+
+function setSessionRegistered(sessionName, registered) {
+  const names = new Set(readConnectedSessionNames());
+  if (registered) names.add(sessionName);
+  else names.delete(sessionName);
+  const temporaryFile = `${SESSION_REGISTRY}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(temporaryFile, JSON.stringify([...names].sort()));
+    fs.renameSync(temporaryFile, SESSION_REGISTRY);
+  } catch (e) {
+    console.warn(`⚠️  Could not update session registry: ${e.message}`);
+    try { fs.unlinkSync(temporaryFile); } catch {}
+  }
+}
 
 function clearChromiumLocks(sessionName) {
   const sessionDir = path.join(TOKEN_DIR, sessionName);
@@ -242,6 +267,8 @@ async function startSession(sessionName) {
     sd.client = client;
     sd.status = 'CONNECTED';
     sd.qrcode = null;
+    sd.error = null;
+    setSessionRegistered(sessionName, true);
 
     try {
       const host = await client.getHostDevice();
@@ -282,12 +309,14 @@ async function startSession(sessionName) {
 
 async function recoverPersistedSessions() {
   try {
-    if (!fs.existsSync(TOKEN_DIR)) return;
-    const dirs = fs.readdirSync(TOKEN_DIR, { withFileTypes: true })
-      .filter(e => e.isDirectory()).map(e => e.name);
-    if (!dirs.length) { console.log('ℹ️  No persisted sessions.'); return; }
-    console.log(`🔄 Recovering: ${dirs.join(', ')}`);
-    for (const name of dirs) {
+    // Browser profile directories are created before a QR is scanned. Recovering
+    // every directory starts one Chromium process per abandoned QR attempt and
+    // can exhaust the container. Only sessions that previously connected are
+    // recorded in this registry and eligible for automatic recovery.
+    const names = readConnectedSessionNames();
+    if (!names.length) { console.log('ℹ️  No connected sessions to recover.'); return; }
+    console.log(`🔄 Recovering connected sessions: ${names.join(', ')}`);
+    for (const name of names) {
       await sleep(3000);
       startSession(name)
         .then(() => console.log(`♻️  Recovered: ${name}`))
@@ -344,6 +373,7 @@ app.delete('/api/sessions/:session', authenticateToken, async (req, res) => {
   const s = sessions.get(req.params.session);
   if (s?.client) { try { await s.client.close(); } catch {} }
   sessions.delete(req.params.session);
+  setSessionRegistered(req.params.session, false);
   io.emit('session:status', { session: req.params.session, status: 'DISCONNECTED' });
   res.json({ status: 'success', message: `Session '${req.params.session}' removed` });
 });
@@ -391,6 +421,7 @@ app.post('/api/sessions/:session/close', authenticateToken, async (req, res) => 
   const s = sessions.get(req.params.session);
   if (s?.client) { try { await s.client.close(); } catch (e) { console.warn('close:', e.message); } }
   sessions.delete(req.params.session);
+  setSessionRegistered(req.params.session, false);
   io.emit('session:status', { session: req.params.session, status: 'DISCONNECTED' });
   res.json({ status: 'success', message: `Session '${req.params.session}' closed` });
 });
