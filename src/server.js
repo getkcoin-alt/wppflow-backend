@@ -24,130 +24,105 @@ import dataRoutes from './routes/dataRoutes.js';
 
 dotenv.config();
 
-// Initialize DB schema & connection
 initDatabase().catch(err => console.error('Database init error:', err));
 
 const PORT = process.env.PORT || 8080;
 const TOKEN_DIR = process.env.TOKEN_DIR || './tokens';
-const PUPPETEER_EXECUTABLE_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
 
-// Ensure token storage directory exists (Railway persistent volume)
+// Alpine Linux uses 'chromium-browser', Debian uses 'chromium'
+// Detect whichever is present
+function detectChromium() {
+  const candidates = [
+    process.env.PUPPETEER_EXECUTABLE_PATH,
+    '/usr/bin/chromium-browser',
+    '/usr/bin/chromium',
+    '/usr/bin/google-chrome',
+  ].filter(Boolean);
+
+  for (const p of candidates) {
+    if (fs.existsSync(p)) {
+      console.log(`🌐 Found Chromium at: ${p}`);
+      return p;
+    }
+  }
+  console.warn('⚠️  No Chromium binary found in standard paths — Puppeteer will use its bundled binary.');
+  return undefined;
+}
+
+const CHROMIUM_PATH = detectChromium();
+
 if (!fs.existsSync(TOKEN_DIR)) {
   fs.mkdirSync(TOKEN_DIR, { recursive: true });
 }
 
 const app = express();
 
-// Robust CORS — reflect the request origin so credentials work from any domain
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (origin) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-  } else {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-  }
+  if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
+  else res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD');
-  res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Cache-Control, Pragma, sec-ch-ua, sec-ch-ua-mobile, sec-ch-ua-platform');
+  res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Cache-Control, Pragma');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Max-Age', '86400');
   if (req.method === 'OPTIONS') return res.status(204).end();
   next();
 });
 
-app.use(cors({
-  origin: true,
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD'],
-  allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization', 'Cache-Control', 'Pragma', 'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform']
-}));
-
+app.use(cors({ origin: true, credentials: true }));
 app.options('*', (req, res) => res.status(204).end());
 app.use(express.json({ limit: '50mb' }));
 
 const server = http.createServer(app);
 const io = new SocketIOServer(server, { cors: { origin: '*' } });
 
-// In-memory active session tracking
 const sessions = new Map();
 
 console.log('🚀 WppFlow Core Backend Engine starting...');
-console.log(`📁 Persistent tokens directory: ${path.resolve(TOKEN_DIR)}`);
-console.log(`🖥️  DISPLAY env: ${process.env.DISPLAY || '(not set)'}`);
-if (PUPPETEER_EXECUTABLE_PATH) {
-  console.log(`🌐 Using system Chromium: ${PUPPETEER_EXECUTABLE_PATH}`);
-}
+console.log(`📁 Token dir: ${path.resolve(TOKEN_DIR)}`);
+console.log(`🌐 Chromium: ${CHROMIUM_PATH || 'bundled'}`);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 /**
- * Remove stale Chromium profile locks left by the previous container.
- * Without this, Chromium refuses to start on Railway after a redeploy because
- * it sees the lock from a different hostname and throws:
- *   "The profile appears to be in use by another Chromium process on another computer"
+ * Remove stale Chromium profile lock files left by a previous container.
+ * Without this, Chromium throws "profile in use by another process" after redeploy.
  */
 function clearChromiumLocks(sessionName) {
   const sessionDir = path.join(TOKEN_DIR, sessionName);
   if (!fs.existsSync(sessionDir)) return;
-
-  const lockFiles = [
-    'SingletonLock',
-    'SingletonCookie',
-    'SingletonSocket',
-  ];
-
-  for (const lockFile of lockFiles) {
-    const lockPath = path.join(sessionDir, lockFile);
-    if (fs.existsSync(lockPath)) {
-      try {
-        fs.unlinkSync(lockPath);
-        console.log(`🔓 [${sessionName}] Removed stale lock: ${lockFile}`);
-      } catch (e) {
-        console.warn(`⚠️  Could not remove ${lockFile}: ${e.message}`);
-      }
+  for (const f of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+    const p = path.join(sessionDir, f);
+    if (fs.existsSync(p)) {
+      try { fs.unlinkSync(p); console.log(`🔓 [${sessionName}] Removed stale lock: ${f}`); }
+      catch (e) { console.warn(`⚠️  Could not remove ${f}: ${e.message}`); }
     }
   }
-
-  // Also clear any .com.google.Chrome.* temp lock files
   try {
-    const entries = fs.readdirSync(sessionDir);
-    for (const entry of entries) {
+    for (const entry of fs.readdirSync(sessionDir)) {
       if (entry.startsWith('.com.google.Chrome') || entry.startsWith('.org.chromium')) {
-        try {
-          fs.unlinkSync(path.join(sessionDir, entry));
-          console.log(`🔓 [${sessionName}] Removed temp lock: ${entry}`);
-        } catch {}
+        try { fs.unlinkSync(path.join(sessionDir, entry)); } catch {}
       }
     }
   } catch {}
 }
 
-/**
- * Find the DB user that owns a given session.
- * Falls back to first admin, then first user.
- */
 async function resolveSessionOwner(sessionName) {
   try {
     const pool = getPool();
     if (pool) {
-      const { rows } = await pool.query(
-        `SELECT DISTINCT user_id FROM chats WHERE channel = $1 LIMIT 1`,
-        [sessionName]
-      );
-      if (rows.length > 0) return rows[0].user_id;
-      const adminRows = await pool.query(
-        `SELECT id FROM users WHERE role = 'admin' ORDER BY id ASC LIMIT 1`
-      );
-      if (adminRows.rows.length > 0) return adminRows.rows[0].id;
-      const anyUser = await pool.query(`SELECT id FROM users ORDER BY id ASC LIMIT 1`);
-      if (anyUser.rows.length > 0) return anyUser.rows[0].id;
+      const { rows } = await pool.query(`SELECT DISTINCT user_id FROM chats WHERE channel = $1 LIMIT 1`, [sessionName]);
+      if (rows.length) return rows[0].user_id;
+      const { rows: adminRows } = await pool.query(`SELECT id FROM users WHERE role='admin' ORDER BY id ASC LIMIT 1`);
+      if (adminRows.length) return adminRows[0].id;
+      const { rows: any } = await pool.query(`SELECT id FROM users ORDER BY id ASC LIMIT 1`);
+      if (any.length) return any[0].id;
     }
-  } catch (e) {
-    console.warn('resolveSessionOwner error:', e.message);
-  }
+  } catch (e) { console.warn('resolveSessionOwner:', e.message); }
   return null;
 }
 
@@ -157,72 +132,33 @@ async function resolveSessionOwner(sessionName) {
 
 async function runAutomationEngine(sessionName, userId, message, client) {
   try {
-    const automations = await getAutomations(userId);
-    const enabledRules = automations.filter(a => a.isEnabled);
-
-    for (const rule of enabledRules) {
+    const rules = (await getAutomations(userId)).filter(a => a.isEnabled);
+    for (const rule of rules) {
       const body = (message.body || '').trim();
       let matched = false;
-
       switch (rule.triggerType) {
-        case 'keyword': {
-          const keyword = (rule.triggerCondition || '').trim().toLowerCase();
-          matched = keyword.length > 0 && body.toLowerCase().includes(keyword);
-          break;
-        }
-        case 'contains':
-          matched = body.toLowerCase().includes((rule.triggerCondition || '').toLowerCase());
-          break;
-        case 'exact':
-          matched = body.toLowerCase() === (rule.triggerCondition || '').toLowerCase();
-          break;
-        case 'regex': {
-          try {
-            matched = new RegExp(rule.triggerCondition, 'i').test(body);
-          } catch { matched = false; }
-          break;
-        }
-        case 'any_message':
-          matched = body.length > 0;
-          break;
-        default:
-          matched = false;
+        case 'keyword':   matched = body.toLowerCase().includes((rule.triggerCondition || '').toLowerCase()); break;
+        case 'contains':  matched = body.toLowerCase().includes((rule.triggerCondition || '').toLowerCase()); break;
+        case 'exact':     matched = body.toLowerCase() === (rule.triggerCondition || '').toLowerCase(); break;
+        case 'regex':     try { matched = new RegExp(rule.triggerCondition, 'i').test(body); } catch { matched = false; } break;
+        case 'any_message': matched = body.length > 0; break;
       }
-
       if (!matched) continue;
-
-      console.log(`⚡ [${sessionName}] Automation '${rule.name}' triggered (rule: ${rule.id})`);
-
+      console.log(`⚡ [${sessionName}] Automation '${rule.name}' triggered`);
       try {
         if (rule.actionType === 'reply_text' && rule.actionSummary) {
           await client.sendText(message.from, rule.actionSummary);
-          console.log(`✉️  [${sessionName}] Auto-reply sent to ${message.from}`);
         } else if (rule.actionType === 'reply_buttons' && rule.actionSummary) {
           const parts = rule.actionSummary.split('|||');
-          const title = parts[0] || 'Choose an option';
-          const buttons = parts.slice(1).map((text, i) => ({ id: `btn_${i}`, text }));
-          if (buttons.length > 0) await client.sendButtonList(message.from, title, buttons);
+          const btns = parts.slice(1).map((t, i) => ({ id: `btn_${i}`, text: t }));
+          if (btns.length) await client.sendButtonList(message.from, parts[0], btns);
         }
-
         const pool = getPool();
-        if (pool) {
-          await pool.query(
-            `UPDATE automations SET executions_count = executions_count + 1 WHERE id = $1`,
-            [rule.id]
-          );
-        }
-
-        io.emit('automation:fired', {
-          session: sessionName, ruleId: rule.id,
-          ruleName: rule.name, from: message.from, trigger: body
-        });
-      } catch (actionErr) {
-        console.error(`❌ Automation action failed for rule '${rule.name}':`, actionErr.message);
-      }
+        if (pool) await pool.query(`UPDATE automations SET executions_count = executions_count + 1 WHERE id = $1`, [rule.id]);
+        io.emit('automation:fired', { session: sessionName, ruleId: rule.id, ruleName: rule.name, from: message.from });
+      } catch (e) { console.error(`❌ Automation '${rule.name}' action failed:`, e.message); }
     }
-  } catch (err) {
-    console.error(`Automation engine error for session ${sessionName}:`, err.message);
-  }
+  } catch (e) { console.error(`Automation engine error [${sessionName}]:`, e.message); }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -231,70 +167,25 @@ async function runAutomationEngine(sessionName, userId, message, client) {
 
 async function handleInboundMessage(sessionName, message) {
   if (message.fromMe || message.isGroupMsg) return;
-
   const userId = await resolveSessionOwner(sessionName);
-  if (!userId) {
-    console.warn(`⚠️  [${sessionName}] Could not resolve owner — inbound message not persisted.`);
-    return;
-  }
-
+  if (!userId) { console.warn(`⚠️  [${sessionName}] No owner found — message not persisted.`); return; }
   try {
     const senderPhone = message.from.replace('@c.us', '');
     const senderName = message.sender?.name || message.notifyName || senderPhone;
-
-    const existingChats = await getChats(userId);
-    let chat = existingChats.find(c => c.phone === senderPhone || c.phone === message.from);
-
+    const existing = await getChats(userId);
+    let chat = existing.find(c => c.phone === senderPhone || c.phone === message.from);
     if (!chat) {
-      chat = await createChat(userId, {
-        contactName: senderName,
-        phone: senderPhone,
-        avatar: '',
-        channel: sessionName,
-        assignedTo: '',
-        isGroup: false,
-        lastMessage: {
-          text: message.body || '',
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          status: 'delivered',
-          fromMe: false
-        },
-        tags: []
-      });
-      console.log(`💬 [${sessionName}] New chat thread created: ${chat.id} for ${senderName}`);
+      const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      chat = await createChat(userId, { contactName: senderName, phone: senderPhone, avatar: '', channel: sessionName, assignedTo: '', isGroup: false, lastMessage: { text: message.body || '', timestamp: ts, status: 'delivered', fromMe: false }, tags: [] });
+      console.log(`💬 [${sessionName}] New chat: ${chat.id} for ${senderName}`);
       io.emit('chat:created', { session: sessionName, chat });
     }
-
-    const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    const savedMessage = await createMessage(chat.id, {
-      sender: 'customer',
-      agentName: senderName,
-      text: message.body || '',
-      type: message.type || 'text',
-      status: 'delivered',
-      timestamp
-    });
-
-    await updateChat(userId, chat.id, {
-      unreadCount: (chat.unreadCount || 0) + 1,
-      lastMessage: { text: message.body || '', timestamp, status: 'delivered', fromMe: false }
-    });
-
-    io.emit('session:message', {
-      session: sessionName,
-      chatId: chat.id,
-      message: {
-        id: message.id, from: message.from, senderName,
-        body: message.body, type: message.type,
-        timestamp, isGroup: false, savedMessageId: savedMessage.id
-      }
-    });
-
+    const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const saved = await createMessage(chat.id, { sender: 'customer', agentName: senderName, text: message.body || '', type: message.type || 'text', status: 'delivered', timestamp: ts });
+    await updateChat(userId, chat.id, { unreadCount: (chat.unreadCount || 0) + 1, lastMessage: { text: message.body || '', timestamp: ts, status: 'delivered', fromMe: false } });
+    io.emit('session:message', { session: sessionName, chatId: chat.id, message: { id: message.id, from: message.from, senderName, body: message.body, type: message.type, timestamp: ts, savedMessageId: saved.id } });
     return { userId, chat };
-  } catch (err) {
-    console.error(`Error handling inbound message [${sessionName}]:`, err.message);
-    return null;
-  }
+  } catch (e) { console.error(`Inbound message error [${sessionName}]:`, e.message); return null; }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -302,12 +193,9 @@ async function handleInboundMessage(sessionName, message) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 io.on('connection', (socket) => {
-  console.log(`⚡ WebSocket client connected: ${socket.id}`);
-  const summary = Array.from(sessions.entries()).map(([name, data]) => ({
-    name, status: data.status, phone: data.phone, hasQr: !!data.qrcode
-  }));
-  socket.emit('sessions:init', summary);
-  socket.on('disconnect', () => console.log(`🔌 WebSocket client disconnected: ${socket.id}`));
+  console.log(`⚡ Socket connected: ${socket.id}`);
+  socket.emit('sessions:init', Array.from(sessions.entries()).map(([name, d]) => ({ name, status: d.status, phone: d.phone, hasQr: !!d.qrcode })));
+  socket.on('disconnect', () => console.log(`🔌 Socket disconnected: ${socket.id}`));
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -316,46 +204,35 @@ io.on('connection', (socket) => {
 
 async function startSession(sessionName) {
   if (sessions.has(sessionName)) {
-    const existing = sessions.get(sessionName);
-    if (['CONNECTED', 'STARTING', 'QRCODE'].includes(existing.status)) return existing;
+    const ex = sessions.get(sessionName);
+    if (['CONNECTED', 'STARTING', 'QRCODE'].includes(ex.status)) return ex;
   }
 
-  // ── FIX: clear stale Chromium profile locks before every launch ──────────
   clearChromiumLocks(sessionName);
 
-  const sessionData = {
-    client: null, status: 'STARTING', qrcode: null,
-    phone: null, battery: 100, antiBanHealth: 98,
-    warmupDay: 14, lastActive: new Date().toISOString()
-  };
-
-  sessions.set(sessionName, sessionData);
+  const sd = { client: null, status: 'STARTING', qrcode: null, phone: null, battery: 100, antiBanHealth: 98, warmupDay: 14, lastActive: new Date().toISOString() };
+  sessions.set(sessionName, sd);
   io.emit('session:status', { session: sessionName, status: 'STARTING' });
 
   try {
     const client = await wppconnect.create({
       session: sessionName,
-      catchQR: (base64Qr, asciiQR, attempts) => {
-        console.log(`📸 [${sessionName}] QR Code received (attempt ${attempts})`);
-        const formattedQr = base64Qr
-          ? (base64Qr.startsWith('data:image') ? base64Qr : `data:image/png;base64,${base64Qr}`)
-          : null;
-        sessionData.qrcode = formattedQr;
-        sessionData.status = 'QRCODE';
-        io.emit('session:qr', { session: sessionName, qrcode: formattedQr, attempts });
+      catchQR: (base64Qr, _ascii, attempts) => {
+        console.log(`📸 [${sessionName}] QR attempt ${attempts}`);
+        sd.qrcode = base64Qr?.startsWith('data:image') ? base64Qr : `data:image/png;base64,${base64Qr}`;
+        sd.status = 'QRCODE';
+        io.emit('session:qr', { session: sessionName, qrcode: sd.qrcode, attempts });
         io.emit('session:status', { session: sessionName, status: 'QRCODE' });
       },
-      statusFind: (statusSession, session) => {
-        console.log(`🔄 [${session}] State change: ${statusSession}`);
-        if (['isLogged', 'inChat', 'qrReadSuccess', 'chatsAvailable'].includes(statusSession)) {
-          sessionData.status = 'CONNECTED';
-          sessionData.qrcode = null;
+      statusFind: (status, session) => {
+        console.log(`🔄 [${session}] ${status}`);
+        if (['isLogged', 'inChat', 'qrReadSuccess', 'chatsAvailable'].includes(status)) {
+          sd.status = 'CONNECTED'; sd.qrcode = null;
         } else {
-          sessionData.status = statusSession;
+          sd.status = status;
         }
-        io.emit('session:status', { session, status: sessionData.status });
+        io.emit('session:status', { session, status: sd.status });
       },
-      // WPPConnect auto-close timeout — increase to 120s to give the user time to scan
       autoClose: 120000,
       folderNameToken: TOKEN_DIR,
       headless: true,
@@ -368,82 +245,56 @@ async function startSession(sessionName) {
         '--no-first-run',
         '--no-zygote',
         '--disable-gpu',
-        '--single-process',
+        '--disable-web-security',
+        '--disable-features=VizDisplayCompositor',
       ],
-      puppeteerOptions: PUPPETEER_EXECUTABLE_PATH
-        ? { executablePath: PUPPETEER_EXECUTABLE_PATH }
-        : {}
+      puppeteerOptions: CHROMIUM_PATH ? { executablePath: CHROMIUM_PATH } : {}
     });
 
-    sessionData.client = client;
-    sessionData.status = 'CONNECTED';
-    sessionData.qrcode = null;
+    sd.client = client;
+    sd.status = 'CONNECTED';
+    sd.qrcode = null;
 
     try {
-      const hostDevice = await client.getHostDevice();
-      if (hostDevice?.id) {
-        sessionData.phone = hostDevice.id.user || hostDevice.id._serialized;
-      }
-      const batteryLevel = await client.getBatteryLevel();
-      if (typeof batteryLevel === 'number') sessionData.battery = batteryLevel;
-    } catch (err) {
-      console.warn(`⚠️  Device telemetry unavailable for ${sessionName}:`, err.message);
-    }
+      const host = await client.getHostDevice();
+      if (host?.id) sd.phone = host.id.user || host.id._serialized;
+      const bat = await client.getBatteryLevel();
+      if (typeof bat === 'number') sd.battery = bat;
+    } catch (e) { console.warn(`⚠️  Telemetry unavailable [${sessionName}]:`, e.message); }
 
-    console.log(`✅ [${sessionName}] WhatsApp connected! Phone: ${sessionData.phone}`);
-    io.emit('session:status', {
-      session: sessionName, status: 'CONNECTED',
-      phone: sessionData.phone, battery: sessionData.battery
+    console.log(`✅ [${sessionName}] Connected! Phone: ${sd.phone}`);
+    io.emit('session:status', { session: sessionName, status: 'CONNECTED', phone: sd.phone, battery: sd.battery });
+
+    client.onMessage(async (msg) => {
+      console.log(`📩 [${sessionName}] from ${msg.from}: ${msg.body}`);
+      const result = await handleInboundMessage(sessionName, msg);
+      if (result?.userId) await runAutomationEngine(sessionName, result.userId, msg, client);
     });
 
-    client.onMessage(async (message) => {
-      console.log(`📩 [${sessionName}] Message from ${message.from}: ${message.body}`);
-      const result = await handleInboundMessage(sessionName, message);
-      if (result?.userId) await runAutomationEngine(sessionName, result.userId, message, client);
+    client.onAck((ack) => {
+      io.emit('session:ack', { session: sessionName, id: ack.id._serialized || ack.id, ack: ack.ack });
     });
 
-    client.onAck(async (ack) => {
-      io.emit('session:ack', {
-        session: sessionName,
-        id: ack.id._serialized || ack.id,
-        ack: ack.ack
-      });
-    });
-
-    return sessionData;
-  } catch (error) {
-    console.error(`❌ [${sessionName}] Failed to initialize session:`, error.message);
-    sessionData.status = 'FAILED';
-    io.emit('session:status', { session: sessionName, status: 'FAILED', error: error.message });
-    throw error;
+    return sd;
+  } catch (err) {
+    console.error(`❌ [${sessionName}] Session failed:`, err.message);
+    sd.status = 'FAILED';
+    io.emit('session:status', { session: sessionName, status: 'FAILED', error: err.message });
+    throw err;
   }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// BOOT: SESSION RECOVERY
-// ─────────────────────────────────────────────────────────────────────────────
 
 async function recoverPersistedSessions() {
   try {
     if (!fs.existsSync(TOKEN_DIR)) return;
-    const entries = fs.readdirSync(TOKEN_DIR, { withFileTypes: true });
-    const sessionFolders = entries.filter(e => e.isDirectory()).map(e => e.name);
-
-    if (sessionFolders.length === 0) {
-      console.log('ℹ️  No persisted sessions found — clean start.');
-      return;
+    const dirs = fs.readdirSync(TOKEN_DIR, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name);
+    if (!dirs.length) { console.log('ℹ️  No persisted sessions — clean start.'); return; }
+    console.log(`🔄 Recovering sessions: ${dirs.join(', ')}`);
+    for (const name of dirs) {
+      await sleep(3000);
+      startSession(name).then(() => console.log(`♻️  Recovered: ${name}`)).catch(e => console.warn(`⚠️  Could not recover '${name}': ${e.message}`));
     }
-
-    console.log(`🔄 Recovering ${sessionFolders.length} persisted session(s): ${sessionFolders.join(', ')}`);
-    for (const sessionName of sessionFolders) {
-      await sleep(3000); // stagger to avoid hammering Chromium
-      startSession(sessionName)
-        .then(() => console.log(`♻️  Recovered: ${sessionName}`))
-        .catch(err => console.warn(`⚠️  Could not recover '${sessionName}': ${err.message}`));
-    }
-  } catch (err) {
-    console.error('Session recovery scan error:', err.message);
-  }
+  } catch (e) { console.error('Recovery error:', e.message); }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -453,102 +304,69 @@ async function recoverPersistedSessions() {
 app.use('/api/auth', authRoutes);
 app.use('/api', dataRoutes);
 
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    engine: 'wppflow-omniengine',
-    version: '2.5.1',
-    database: getDatabaseStatus(),
-    activeSessions: sessions.size,
-    display: process.env.DISPLAY || 'not-set',
-    uptime: Math.floor(process.uptime()),
-    timestamp: new Date().toISOString()
-  });
-});
+app.get('/health', (req, res) => res.json({
+  status: 'ok', engine: 'wppflow-omniengine', version: '2.5.2',
+  database: getDatabaseStatus(), activeSessions: sessions.size,
+  chromium: CHROMIUM_PATH || 'bundled',
+  uptime: Math.floor(process.uptime()), timestamp: new Date().toISOString()
+}));
 
 app.get('/api/sessions', authenticateToken, (req, res) => {
-  const result = Array.from(sessions.entries()).map(([name, data]) => ({
-    sessionKey: name, status: data.status, phone: data.phone,
-    battery: data.battery, antiBanHealth: data.antiBanHealth,
-    warmupDay: data.warmupDay, hasQr: !!data.qrcode, lastActive: data.lastActive
-  }));
-  res.json({ status: 'success', sessions: result });
+  res.json({ status: 'success', sessions: Array.from(sessions.entries()).map(([name, d]) => ({ sessionKey: name, status: d.status, phone: d.phone, battery: d.battery, antiBanHealth: d.antiBanHealth, warmupDay: d.warmupDay, hasQr: !!d.qrcode, lastActive: d.lastActive })) });
 });
 
 app.post('/api/sessions/start', authenticateToken, async (req, res) => {
   const { sessionName } = req.body;
   if (!sessionName) return res.status(400).json({ status: 'error', message: 'sessionName is required' });
-
-  startSession(sessionName).catch(err =>
-    console.error(`Background startSession error for ${sessionName}:`, err.message)
-  );
-
+  startSession(sessionName).catch(e => console.error(`startSession error [${sessionName}]:`, e.message));
   res.json({ status: 'success', message: `Session '${sessionName}' initialization requested`, session: sessionName });
 });
 
 app.get('/api/sessions/:session/qr', authenticateToken, (req, res) => {
-  const sess = sessions.get(req.params.session);
-  if (!sess) return res.status(404).json({ status: 'error', message: 'Session not found' });
-  res.json({ status: 'success', session: req.params.session, sessionStatus: sess.status, qrcode: sess.qrcode });
+  const s = sessions.get(req.params.session);
+  if (!s) return res.status(404).json({ status: 'error', message: 'Session not found' });
+  res.json({ status: 'success', session: req.params.session, sessionStatus: s.status, qrcode: s.qrcode });
 });
 
 app.get('/api/sessions/:session/status', authenticateToken, (req, res) => {
-  const sess = sessions.get(req.params.session);
-  if (!sess) return res.status(404).json({ status: 'error', message: 'Session not found' });
-  res.json({ status: 'success', session: req.params.session, sessionStatus: sess.status, phone: sess.phone, battery: sess.battery, antiBanHealth: sess.antiBanHealth });
+  const s = sessions.get(req.params.session);
+  if (!s) return res.status(404).json({ status: 'error', message: 'Session not found' });
+  res.json({ status: 'success', session: req.params.session, sessionStatus: s.status, phone: s.phone, battery: s.battery, antiBanHealth: s.antiBanHealth });
 });
 
 app.post('/api/sessions/:session/send-message', authenticateToken, async (req, res) => {
-  const { session } = req.params;
-  const { phone, message } = req.body;
-  const sess = sessions.get(session);
-  if (!sess?.client) return res.status(400).json({ status: 'error', message: `Session '${session}' is not connected` });
-
+  const s = sessions.get(req.params.session);
+  if (!s?.client) return res.status(400).json({ status: 'error', message: `Session '${req.params.session}' not connected` });
   try {
-    const target = phone.includes('@') ? phone : `${phone.replace(/\D/g, '')}@c.us`;
-    const result = await sess.client.sendText(target, message);
-    res.json({ status: 'success', response: { id: result.id, to: target, body: message, timestamp: Math.floor(Date.now() / 1000) } });
-  } catch (error) {
-    res.status(500).json({ status: 'error', message: error.message });
-  }
+    const target = req.body.phone.includes('@') ? req.body.phone : `${req.body.phone.replace(/\D/g, '')}@c.us`;
+    const result = await s.client.sendText(target, req.body.message);
+    res.json({ status: 'success', response: { id: result.id, to: target, body: req.body.message, timestamp: Math.floor(Date.now() / 1000) } });
+  } catch (e) { res.status(500).json({ status: 'error', message: e.message }); }
 });
 
 app.post('/api/sessions/:session/send-buttons', authenticateToken, async (req, res) => {
-  const { session } = req.params;
-  const { phone, title, buttons } = req.body;
-  const sess = sessions.get(session);
-  if (!sess?.client) return res.status(400).json({ status: 'error', message: `Session '${session}' is not connected` });
-
+  const s = sessions.get(req.params.session);
+  if (!s?.client) return res.status(400).json({ status: 'error', message: `Session '${req.params.session}' not connected` });
   try {
-    const target = phone.includes('@') ? phone : `${phone.replace(/\D/g, '')}@c.us`;
-    const formattedButtons = buttons.map((b, i) => ({ id: b.id || `btn_${i}`, text: b.text || b.label }));
-    const result = await sess.client.sendButtonList(target, title, formattedButtons);
+    const target = req.body.phone.includes('@') ? req.body.phone : `${req.body.phone.replace(/\D/g, '')}@c.us`;
+    const result = await s.client.sendButtonList(target, req.body.title, req.body.buttons.map((b, i) => ({ id: b.id || `btn_${i}`, text: b.text || b.label })));
     res.json({ status: 'success', response: result });
-  } catch (error) {
-    res.status(500).json({ status: 'error', message: error.message });
-  }
+  } catch (e) { res.status(500).json({ status: 'error', message: e.message }); }
 });
 
 app.get('/api/sessions/:session/chats', authenticateToken, async (req, res) => {
-  const sess = sessions.get(req.params.session);
-  if (!sess?.client) return res.status(400).json({ status: 'error', message: `Session '${req.params.session}' is not connected` });
-  try {
-    const chats = await sess.client.listChats({ count: 20 });
-    res.json({ status: 'success', chats });
-  } catch (error) {
-    res.status(500).json({ status: 'error', message: error.message });
-  }
+  const s = sessions.get(req.params.session);
+  if (!s?.client) return res.status(400).json({ status: 'error', message: `Session '${req.params.session}' not connected` });
+  try { res.json({ status: 'success', chats: await s.client.listChats({ count: 20 }) }); }
+  catch (e) { res.status(500).json({ status: 'error', message: e.message }); }
 });
 
 app.post('/api/sessions/:session/close', authenticateToken, async (req, res) => {
-  const { session } = req.params;
-  const sess = sessions.get(session);
-  if (sess?.client) {
-    try { await sess.client.close(); } catch (e) { console.warn('Error closing client:', e.message); }
-  }
-  sessions.delete(session);
-  io.emit('session:status', { session, status: 'DISCONNECTED' });
-  res.json({ status: 'success', message: `Session '${session}' closed` });
+  const s = sessions.get(req.params.session);
+  if (s?.client) { try { await s.client.close(); } catch (e) { console.warn('close error:', e.message); } }
+  sessions.delete(req.params.session);
+  io.emit('session:status', { session: req.params.session, status: 'DISCONNECTED' });
+  res.json({ status: 'success', message: `Session '${req.params.session}' closed` });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -556,76 +374,35 @@ app.post('/api/sessions/:session/close', authenticateToken, async (req, res) => 
 // ─────────────────────────────────────────────────────────────────────────────
 
 app.post('/api/campaigns/:id/send', authenticateToken, async (req, res) => {
-  const campaignId = req.params.id;
   const userId = req.user.id;
-
   const campaigns = await getCampaigns(userId);
-  const campaign = campaigns.find(c => c.id === campaignId);
+  const campaign = campaigns.find(c => c.id === req.params.id);
   if (!campaign) return res.status(404).json({ status: 'error', message: 'Campaign not found' });
-
-  const connectedSession = Array.from(sessions.entries()).find(
-    ([, data]) => data.status === 'CONNECTED' && data.client
-  );
-  if (!connectedSession) {
-    return res.status(400).json({
-      status: 'error',
-      message: 'No connected WhatsApp session available. Please connect a session first.'
-    });
-  }
-
-  const [sessionName, sessionData] = connectedSession;
+  const connected = Array.from(sessions.entries()).find(([, d]) => d.status === 'CONNECTED' && d.client);
+  if (!connected) return res.status(400).json({ status: 'error', message: 'No connected WhatsApp session available.' });
+  const [sessionName, sd] = connected;
   const delayMs = (campaign.antiBanDelaySeconds || 4) * 1000;
-
-  res.json({
-    status: 'success',
-    message: `Campaign '${campaign.name}' broadcast started via session '${sessionName}'`,
-    campaignId, totalRecipients: campaign.totalRecipients
-  });
-
+  res.json({ status: 'success', message: `Broadcast started via '${sessionName}'`, campaignId: req.params.id });
   ;(async () => {
     const pool = getPool();
-    let sentCount = 0;
-    let failedCount = 0;
+    let sent = 0, failed = 0;
     try {
-      const contacts = await getContacts(userId);
-      const recipients = contacts.filter(c => c.phone);
-      if (recipients.length === 0) {
-        console.warn(`Campaign ${campaignId}: no contacts for user ${userId}`);
-        return;
+      const contacts = (await getContacts(userId)).filter(c => c.phone);
+      if (!contacts.length) { console.warn(`Campaign ${req.params.id}: no contacts`); return; }
+      if (pool) await pool.query(`UPDATE campaigns SET status='sending' WHERE id=$1 AND user_id=$2`, [req.params.id, userId]);
+      for (let i = 0; i < contacts.length; i++) {
+        const target = contacts[i].phone.includes('@') ? contacts[i].phone : `${contacts[i].phone.replace(/\D/g, '')}@c.us`;
+        try { await sd.client.sendText(target, campaign.templateText); sent++; }
+        catch (e) { failed++; console.error(`Campaign send failed → ${target}: ${e.message}`); }
+        io.emit('campaign:progress', { campaignId: req.params.id, sent, failed, total: contacts.length });
+        if (i < contacts.length - 1) await sleep(delayMs);
       }
-
-      console.log(`📢 Campaign '${campaign.name}' → ${recipients.length} recipients via [${sessionName}]`);
-      if (pool) await pool.query(`UPDATE campaigns SET status = 'sending' WHERE id = $1 AND user_id = $2`, [campaignId, userId]);
-
-      for (let i = 0; i < recipients.length; i++) {
-        const contact = recipients[i];
-        const target = contact.phone.includes('@') ? contact.phone : `${contact.phone.replace(/\D/g, '')}@c.us`;
-        try {
-          await sessionData.client.sendText(target, campaign.templateText);
-          sentCount++;
-          console.log(`✅ Campaign [${campaignId}] → ${target} (${sentCount}/${recipients.length})`);
-        } catch (err) {
-          failedCount++;
-          console.error(`❌ Campaign [${campaignId}] → ${target} failed: ${err.message}`);
-        }
-
-        io.emit('campaign:progress', { campaignId, sent: sentCount, failed: failedCount, total: recipients.length });
-        if (i < recipients.length - 1) await sleep(delayMs);
-      }
-
-      if (pool) {
-        await pool.query(
-          `UPDATE campaigns SET status = 'completed', sent_count = $1, failed_count = $2,
-           delivered_count = $3, read_count = $4, replied_count = $5 WHERE id = $6 AND user_id = $7`,
-          [sentCount, failedCount, Math.floor(sentCount * 0.97), Math.floor(sentCount * 0.85), Math.floor(sentCount * 0.15), campaignId, userId]
-        );
-      }
-      io.emit('campaign:completed', { campaignId, sent: sentCount, failed: failedCount });
-      console.log(`🎉 Campaign '${campaign.name}' done: ${sentCount} sent, ${failedCount} failed`);
-    } catch (err) {
-      console.error(`Campaign broadcast error [${campaignId}]:`, err.message);
-      if (pool) await pool.query(`UPDATE campaigns SET status = 'failed' WHERE id = $1 AND user_id = $2`, [campaignId, userId]);
-      io.emit('campaign:error', { campaignId, error: err.message });
+      if (pool) await pool.query(`UPDATE campaigns SET status='completed', sent_count=$1, failed_count=$2, delivered_count=$3, read_count=$4, replied_count=$5 WHERE id=$6 AND user_id=$7`, [sent, failed, Math.floor(sent * 0.97), Math.floor(sent * 0.85), Math.floor(sent * 0.15), req.params.id, userId]);
+      io.emit('campaign:completed', { campaignId: req.params.id, sent, failed });
+    } catch (e) {
+      console.error(`Broadcast error [${req.params.id}]:`, e.message);
+      if (pool) await pool.query(`UPDATE campaigns SET status='failed' WHERE id=$1 AND user_id=$2`, [req.params.id, userId]);
+      io.emit('campaign:error', { campaignId: req.params.id, error: e.message });
     }
   })();
 });
@@ -634,9 +411,8 @@ app.post('/api/campaigns/:id/send', authenticateToken, async (req, res) => {
 // BOOT
 // ─────────────────────────────────────────────────────────────────────────────
 
-server.listen(PORT, async () => {
-  console.log(`✨ WppFlow Core Backend v2.5.1 listening on port ${PORT}`);
-  console.log(`👉 Healthcheck: http://localhost:${PORT}/health`);
-  // Wait for DB to fully initialise, then recover persisted sessions
+server.listen(PORT, () => {
+  console.log(`✨ WppFlow v2.5.2 on port ${PORT}`);
+  console.log(`👉 Health: http://localhost:${PORT}/health`);
   setTimeout(recoverPersistedSessions, 5000);
 });
