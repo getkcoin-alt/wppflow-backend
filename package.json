@@ -1,0 +1,22 @@
+{
+  "name": "wppflow-backend",
+  "version": "2.4.0",
+  "description": "High-performance multi-session WhatsApp automation backend engine for WppFlow",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "@wppconnect-team/wppconnect": "^1.35.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "qrcode": "^1.5.3",
+    "socket.io": "^4.7.5"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
