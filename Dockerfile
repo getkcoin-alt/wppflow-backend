@@ -29,9 +29,6 @@ RUN npm install --omit=dev
 # Copy application source code
 COPY . .
 
-# Persistent storage mount point for WhatsApp session tokens & browser profiles
-VOLUME ["/app/tokens"]
-
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/bin/dumb-init", "--"]
