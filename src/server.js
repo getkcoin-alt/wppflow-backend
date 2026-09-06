@@ -9,6 +9,7 @@ import wppconnect from '@wppconnect-team/wppconnect';
 import { initDatabase, getDatabaseStatus } from './db.js';
 import authRoutes from './routes/authRoutes.js';
 import { authenticateToken } from './routes/authRoutes.js';
+import dataRoutes from './routes/dataRoutes.js';
 
 dotenv.config();
 
@@ -219,6 +220,9 @@ async function startSession(sessionName) {
 
 // Mount Auth & User Management Routes
 app.use('/api/auth', authRoutes);
+
+// Mount Data Routes (contacts, chats, messages, campaigns, automations)
+app.use('/api', dataRoutes);
 
 // Healthcheck for Railway / Kubernetes probes
 app.get('/health', (req, res) => {
