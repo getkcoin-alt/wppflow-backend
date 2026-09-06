@@ -36,11 +36,17 @@ export function authenticateToken(req, res, next) {
 
 /**
  * POST /api/auth/signup
- * Register a new organization / user
+ * Register a new organisation / user.
+ *
+ * Role assignment rules (most restrictive wins):
+ *  1. Only the very first account in an empty database becomes admin.
+ *  2. An explicit role='admin' body param is accepted ONLY when an existing
+ *     admin is making the request (req.user present and role === 'admin').
+ *  3. All other signups are forced to 'user' — no email-string sniffing.
  */
 router.post('/signup', async (req, res) => {
   try {
-    const { email, password, name, companyName, role } = req.body;
+    const { email, password, name, companyName, role: requestedRole } = req.body;
 
     if (!email || !password || !name) {
       return res.status(400).json({ 
@@ -64,8 +70,19 @@ router.post('/signup', async (req, res) => {
       });
     }
 
-    // Determine role (first user or admin email becomes admin)
-    const assignedRole = role === 'admin' || email.toLowerCase().includes('admin') ? 'admin' : 'user';
+    // Determine role — never trust the client unless an authenticated admin asked
+    const isAdminRequest = req.user && req.user.role === 'admin';
+    let assignedRole = 'user';
+    if (isAdminRequest && requestedRole === 'admin') {
+      assignedRole = 'admin';
+    }
+
+    // First-ever account (empty DB) becomes the initial admin
+    const allUsers = await getAllUsers();
+    if (allUsers.length === 0) {
+      assignedRole = 'admin';
+    }
+
     const plan = assignedRole === 'admin' ? 'Enterprise' : 'Growth';
     const sessions_limit = assignedRole === 'admin' ? 25 : 5;
 

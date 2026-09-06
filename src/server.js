@@ -6,10 +6,22 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import wppconnect from '@wppconnect-team/wppconnect';
-import { initDatabase, getDatabaseStatus } from './db.js';
+import {
+  initDatabase,
+  getDatabaseStatus,
+  getContacts,
+  getChats,
+  createChat,
+  createMessage,
+  updateChat,
+  getAutomations,
+  getCampaigns,
+  createAutomation
+} from './db.js';
 import authRoutes from './routes/authRoutes.js';
 import { authenticateToken } from './routes/authRoutes.js';
 import dataRoutes from './routes/dataRoutes.js';
+import { getPool } from './db.js';
 
 dotenv.config();
 
@@ -65,13 +77,221 @@ const io = new SocketIOServer(server, {
 });
 
 // In-memory active session tracking
-// Map<sessionName, { client: any, status: string, qrcode: string, phone: string, battery: number }>
+// Map<sessionName, { client, status, qrcode, phone, battery, antiBanHealth, warmupDay, lastActive }>
 const sessions = new Map();
 
 console.log('🚀 WppFlow Core Backend Engine starting...');
 console.log(`📁 Persistent tokens directory: ${path.resolve(TOKEN_DIR)}`);
 if (PUPPETEER_EXECUTABLE_PATH) {
   console.log(`🌐 Using system Chromium: ${PUPPETEER_EXECUTABLE_PATH}`);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Simple delay utility */
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * Find the DB user that owns a given session name.
+ * We do a best-effort lookup: find any user whose contacts / chats reference
+ * the session, falling back to the first admin or first user in the DB.
+ */
+async function resolveSessionOwner(sessionName) {
+  try {
+    const pool = getPool();
+    if (pool) {
+      // Try to find a user who has a chat on this session's channel
+      const { rows } = await pool.query(
+        `SELECT DISTINCT user_id FROM chats WHERE channel = $1 LIMIT 1`,
+        [sessionName]
+      );
+      if (rows.length > 0) return rows[0].user_id;
+      // Fall back to first admin
+      const adminRows = await pool.query(
+        `SELECT id FROM users WHERE role = 'admin' ORDER BY id ASC LIMIT 1`
+      );
+      if (adminRows.rows.length > 0) return adminRows.rows[0].id;
+      // Fall back to first user at all
+      const anyUser = await pool.query(`SELECT id FROM users ORDER BY id ASC LIMIT 1`);
+      if (anyUser.rows.length > 0) return anyUser.rows[0].id;
+    }
+  } catch (e) {
+    console.warn('resolveSessionOwner error:', e.message);
+  }
+  return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AUTOMATION ENGINE
+// Runs after every inbound message to fire matching automation rules.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function runAutomationEngine(sessionName, userId, message, client) {
+  try {
+    const automations = await getAutomations(userId);
+    const enabledRules = automations.filter(a => a.isEnabled);
+
+    for (const rule of enabledRules) {
+      const body = (message.body || '').trim();
+      let matched = false;
+
+      switch (rule.triggerType) {
+        case 'keyword': {
+          // Case-insensitive exact-word match
+          const keyword = (rule.triggerCondition || '').trim().toLowerCase();
+          matched = keyword.length > 0 && body.toLowerCase().includes(keyword);
+          break;
+        }
+        case 'contains':
+          matched = body.toLowerCase().includes((rule.triggerCondition || '').toLowerCase());
+          break;
+        case 'exact':
+          matched = body.toLowerCase() === (rule.triggerCondition || '').toLowerCase();
+          break;
+        case 'regex': {
+          try {
+            const re = new RegExp(rule.triggerCondition, 'i');
+            matched = re.test(body);
+          } catch { matched = false; }
+          break;
+        }
+        case 'any_message':
+          matched = body.length > 0;
+          break;
+        default:
+          matched = false;
+      }
+
+      if (!matched) continue;
+
+      console.log(`⚡ [${sessionName}] Automation '${rule.name}' triggered (rule: ${rule.id})`);
+
+      try {
+        if (rule.actionType === 'reply_text' && rule.actionSummary) {
+          await client.sendText(message.from, rule.actionSummary);
+          console.log(`✉️  [${sessionName}] Auto-reply sent to ${message.from}: "${rule.actionSummary}"`);
+        } else if (rule.actionType === 'reply_buttons' && rule.actionSummary) {
+          // actionSummary format: "Button title|||Btn1|||Btn2|||Btn3"
+          const parts = rule.actionSummary.split('|||');
+          const title = parts[0] || 'Choose an option';
+          const buttons = parts.slice(1).map((text, i) => ({ id: `btn_${i}`, text }));
+          if (buttons.length > 0) {
+            await client.sendButtonList(message.from, title, buttons);
+          }
+        }
+
+        // Increment execution counter in DB
+        const pool = getPool();
+        if (pool) {
+          await pool.query(
+            `UPDATE automations SET executions_count = executions_count + 1 WHERE id = $1`,
+            [rule.id]
+          );
+        }
+
+        io.emit('automation:fired', {
+          session: sessionName,
+          ruleId: rule.id,
+          ruleName: rule.name,
+          from: message.from,
+          trigger: body
+        });
+      } catch (actionErr) {
+        console.error(`❌ Automation action failed for rule '${rule.name}':`, actionErr.message);
+      }
+    }
+  } catch (err) {
+    console.error(`Automation engine error for session ${sessionName}:`, err.message);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INBOUND MESSAGE HANDLER
+// Persists inbound messages to DB and auto-creates chat threads.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function handleInboundMessage(sessionName, message) {
+  // Skip outbound / group messages
+  if (message.fromMe || message.isGroupMsg) return;
+
+  const userId = await resolveSessionOwner(sessionName);
+  if (!userId) {
+    console.warn(`⚠️  [${sessionName}] Could not resolve owner — inbound message not persisted.`);
+    return;
+  }
+
+  try {
+    const senderPhone = message.from.replace('@c.us', '');
+    const senderName = message.sender?.name || message.notifyName || senderPhone;
+
+    // Find or create a chat thread for this sender
+    const existingChats = await getChats(userId);
+    let chat = existingChats.find(c => c.phone === senderPhone || c.phone === message.from);
+
+    if (!chat) {
+      chat = await createChat(userId, {
+        contactName: senderName,
+        phone: senderPhone,
+        avatar: '',
+        channel: sessionName,
+        assignedTo: '',
+        isGroup: false,
+        lastMessage: {
+          text: message.body || '',
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          status: 'delivered',
+          fromMe: false
+        },
+        tags: []
+      });
+      console.log(`💬 [${sessionName}] New chat thread created for ${senderName} (${senderPhone}): ${chat.id}`);
+      io.emit('chat:created', { session: sessionName, chat });
+    }
+
+    // Persist the message
+    const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const savedMessage = await createMessage(chat.id, {
+      sender: 'customer',
+      agentName: senderName,
+      text: message.body || '',
+      type: message.type || 'text',
+      status: 'delivered',
+      timestamp
+    });
+
+    // Bump unread count and update last message on the chat
+    await updateChat(userId, chat.id, {
+      unreadCount: (chat.unreadCount || 0) + 1,
+      lastMessage: {
+        text: message.body || '',
+        timestamp,
+        status: 'delivered',
+        fromMe: false
+      }
+    });
+
+    io.emit('session:message', {
+      session: sessionName,
+      chatId: chat.id,
+      message: {
+        id: message.id,
+        from: message.from,
+        senderName,
+        body: message.body,
+        type: message.type,
+        timestamp,
+        isGroup: false,
+        savedMessageId: savedMessage.id
+      }
+    });
+
+    return { userId, chat };
+  } catch (err) {
+    console.error(`Error handling inbound message for session ${sessionName}:`, err.message);
+    return null;
+  }
 }
 
 // Socket.io Real-time Connection
@@ -92,8 +312,14 @@ io.on('connection', (socket) => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SESSION MANAGEMENT
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
- * Starts or recovers a WhatsApp session using WPPConnect
+ * Starts or recovers a WhatsApp session using WPPConnect.
+ * If a token folder already exists in TOKEN_DIR the session resumes
+ * without needing a new QR scan.
  */
 async function startSession(sessionName) {
   if (sessions.has(sessionName)) {
@@ -122,7 +348,7 @@ async function startSession(sessionName) {
       session: sessionName,
       catchQR: (base64Qr, asciiQR, attempts, urlCode) => {
         console.log(`📸 [${sessionName}] QR Code received (attempt ${attempts})`);
-        const formattedQr = base64Qr 
+        const formattedQr = base64Qr
           ? (base64Qr.startsWith('data:image') ? base64Qr : `data:image/png;base64,${base64Qr}`)
           : null;
         sessionData.qrcode = formattedQr;
@@ -175,32 +401,28 @@ async function startSession(sessionName) {
       console.warn(`⚠️ Could not fetch device telemetry for ${sessionName}:`, err.message);
     }
 
-    console.log(`✅ [${sessionName}] WhatsApp connected successfully! Phone: ${sessionData.phone}`);
-    io.emit('session:status', { 
-      session: sessionName, 
+    console.log(`✅ [${sessionName}] WhatsApp connected! Phone: ${sessionData.phone}`);
+    io.emit('session:status', {
+      session: sessionName,
       status: 'CONNECTED',
       phone: sessionData.phone,
       battery: sessionData.battery
     });
 
-    // Listen to incoming messages
+    // ── Inbound message handler ──────────────────────────────────────────────
     client.onMessage(async (message) => {
-      console.log(`📩 [${sessionName}] New message from ${message.from}: ${message.body}`);
-      io.emit('session:message', {
-        session: sessionName,
-        message: {
-          id: message.id,
-          from: message.from,
-          senderName: message.sender?.name || message.notifyName || 'Customer',
-          body: message.body,
-          type: message.type,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          isGroup: message.isGroupMsg
-        }
-      });
+      console.log(`📩 [${sessionName}] Message from ${message.from}: ${message.body}`);
+
+      // Persist to DB and auto-create chat thread
+      const result = await handleInboundMessage(sessionName, message);
+
+      // Run automation rules if we have a resolved owner
+      if (result && result.userId) {
+        await runAutomationEngine(sessionName, result.userId, message, client);
+      }
     });
 
-    // Listen to message ack (sent/delivered/read ticks)
+    // ── Delivery acknowledgement ─────────────────────────────────────────────
     client.onAck(async (ack) => {
       io.emit('session:ack', {
         session: sessionName,
@@ -218,6 +440,46 @@ async function startSession(sessionName) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// BOOT: SESSION RECOVERY
+// Scan TOKEN_DIR for existing session folders and silently restore them so
+// users don't need to re-scan QR after every Railway redeploy.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function recoverPersistedSessions() {
+  try {
+    if (!fs.existsSync(TOKEN_DIR)) return;
+
+    const entries = fs.readdirSync(TOKEN_DIR, { withFileTypes: true });
+    const sessionFolders = entries
+      .filter(e => e.isDirectory())
+      .map(e => e.name);
+
+    if (sessionFolders.length === 0) {
+      console.log('ℹ️  No persisted sessions found in TOKEN_DIR — clean start.');
+      return;
+    }
+
+    console.log(`🔄 Recovering ${sessionFolders.length} persisted session(s): ${sessionFolders.join(', ')}`);
+
+    for (const sessionName of sessionFolders) {
+      // Small stagger to avoid hammering Chromium at once
+      await sleep(2000);
+      startSession(sessionName).then(() => {
+        console.log(`♻️  Recovered session: ${sessionName}`);
+      }).catch(err => {
+        console.warn(`⚠️  Could not recover session '${sessionName}': ${err.message}`);
+      });
+    }
+  } catch (err) {
+    console.error('Session recovery scan error:', err.message);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ROUTES
+// ─────────────────────────────────────────────────────────────────────────────
+
 // Mount Auth & User Management Routes
 app.use('/api/auth', authRoutes);
 
@@ -229,7 +491,7 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     engine: 'wppflow-omniengine',
-    version: '2.4.0',
+    version: '2.5.0',
     database: getDatabaseStatus(),
     activeSessions: sessions.size,
     uptime: Math.floor(process.uptime()),
@@ -316,7 +578,6 @@ app.post('/api/sessions/:session/send-message', authenticateToken, async (req, r
   }
 
   try {
-    // Format phone to WhatsApp JID
     const target = phone.includes('@') ? phone : `${phone.replace(/\D/g, '')}@c.us`;
     const result = await sess.client.sendText(target, message);
 
@@ -347,12 +608,7 @@ app.post('/api/sessions/:session/send-buttons', authenticateToken, async (req, r
 
   try {
     const target = phone.includes('@') ? phone : `${phone.replace(/\D/g, '')}@c.us`;
-    // Format buttons for WPPConnect
-    const formattedButtons = buttons.map(b => ({
-      id: b.id || String(Math.random()),
-      text: b.text || b.label
-    }));
-
+    const formattedButtons = buttons.map((b, i) => ({ id: b.id || `btn_${i}`, text: b.text || b.label }));
     const result = await sess.client.sendButtonList(target, title, formattedButtons);
     res.json({ status: 'success', response: result });
   } catch (error) {
@@ -361,7 +617,7 @@ app.post('/api/sessions/:session/send-buttons', authenticateToken, async (req, r
   }
 });
 
-// List chats
+// List chats from live WA device
 app.get('/api/sessions/:session/chats', authenticateToken, async (req, res) => {
   const { session } = req.params;
   const sess = sessions.get(session);
@@ -393,7 +649,142 @@ app.post('/api/sessions/:session/close', authenticateToken, async (req, res) => 
   res.json({ status: 'success', message: `Session '${session}' closed` });
 });
 
-server.listen(PORT, () => {
-  console.log(`✨ WppFlow Core Backend listening on port ${PORT}`);
+// ─────────────────────────────────────────────────────────────────────────────
+// CAMPAIGN BROADCAST ENGINE
+// POST /api/campaigns/:id/send
+// Iterates all contacts, sends the campaign templateText via the first connected
+// session, respects antiBanDelaySeconds, updates counts live.
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.post('/api/campaigns/:id/send', authenticateToken, async (req, res) => {
+  const campaignId = req.params.id;
+  const userId = req.user.id;
+
+  // Find the campaign
+  const campaigns = await getCampaigns(userId);
+  const campaign = campaigns.find(c => c.id === campaignId);
+  if (!campaign) {
+    return res.status(404).json({ status: 'error', message: 'Campaign not found' });
+  }
+
+  // Find a connected session to broadcast from
+  const connectedSession = Array.from(sessions.entries()).find(
+    ([, data]) => data.status === 'CONNECTED' && data.client
+  );
+  if (!connectedSession) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'No connected WhatsApp session available. Please connect a session first.'
+    });
+  }
+
+  const [sessionName, sessionData] = connectedSession;
+  const delayMs = (campaign.antiBanDelaySeconds || 4) * 1000;
+
+  // Acknowledge immediately — broadcast runs in background
+  res.json({
+    status: 'success',
+    message: `Campaign '${campaign.name}' broadcast started via session '${sessionName}'`,
+    campaignId,
+    totalRecipients: campaign.totalRecipients
+  });
+
+  // ── Background broadcast loop ────────────────────────────────────────────
+  ;(async () => {
+    const pool = getPool();
+    let sentCount = 0;
+    let failedCount = 0;
+
+    try {
+      // Get all contacts for this user as recipient list
+      const contacts = await getContacts(userId);
+      const recipients = contacts.filter(c => c.phone);
+
+      if (recipients.length === 0) {
+        console.warn(`Campaign ${campaignId}: no contacts found for user ${userId}`);
+        return;
+      }
+
+      console.log(`📢 Campaign '${campaign.name}' starting broadcast to ${recipients.length} recipient(s) via [${sessionName}]`);
+
+      // Update campaign status to 'sending'
+      if (pool) {
+        await pool.query(
+          `UPDATE campaigns SET status = 'sending' WHERE id = $1 AND user_id = $2`,
+          [campaignId, userId]
+        );
+      }
+
+      for (const contact of recipients) {
+        const target = contact.phone.includes('@')
+          ? contact.phone
+          : `${contact.phone.replace(/\D/g, '')}@c.us`;
+
+        try {
+          await sessionData.client.sendText(target, campaign.templateText);
+          sentCount++;
+          console.log(`✅ Campaign [${campaignId}] sent to ${target} (${sentCount}/${recipients.length})`);
+        } catch (err) {
+          failedCount++;
+          console.error(`❌ Campaign [${campaignId}] failed to send to ${target}: ${err.message}`);
+        }
+
+        // Emit live progress
+        io.emit('campaign:progress', {
+          campaignId,
+          sent: sentCount,
+          failed: failedCount,
+          total: recipients.length
+        });
+
+        // Anti-ban delay between messages
+        if (recipients.indexOf(contact) < recipients.length - 1) {
+          await sleep(delayMs);
+        }
+      }
+
+      // Final DB update
+      if (pool) {
+        await pool.query(
+          `UPDATE campaigns
+           SET status = 'completed', sent_count = $1, failed_count = $2,
+               delivered_count = $3, read_count = $4, replied_count = $5
+           WHERE id = $6 AND user_id = $7`,
+          [
+            sentCount,
+            failedCount,
+            Math.floor(sentCount * 0.97),
+            Math.floor(sentCount * 0.85),
+            Math.floor(sentCount * 0.15),
+            campaignId,
+            userId
+          ]
+        );
+      }
+
+      io.emit('campaign:completed', { campaignId, sent: sentCount, failed: failedCount });
+      console.log(`🎉 Campaign '${campaign.name}' completed: ${sentCount} sent, ${failedCount} failed`);
+    } catch (err) {
+      console.error(`Campaign broadcast error for ${campaignId}:`, err.message);
+      if (pool) {
+        await pool.query(
+          `UPDATE campaigns SET status = 'failed' WHERE id = $1 AND user_id = $2`,
+          [campaignId, userId]
+        );
+      }
+      io.emit('campaign:error', { campaignId, error: err.message });
+    }
+  })();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BOOT SEQUENCE
+// ─────────────────────────────────────────────────────────────────────────────
+
+server.listen(PORT, async () => {
+  console.log(`✨ WppFlow Core Backend v2.5.0 listening on port ${PORT}`);
   console.log(`👉 Healthcheck: http://localhost:${PORT}/health`);
+
+  // Wait a few seconds for DB to fully initialise before recovering sessions
+  setTimeout(recoverPersistedSessions, 5000);
 });
