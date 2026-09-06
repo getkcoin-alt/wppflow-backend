@@ -94,8 +94,11 @@ io.on('connection', (socket) => {
  * Starts or recovers a WhatsApp session using WPPConnect
  */
 async function startSession(sessionName) {
-  if (sessions.has(sessionName) && sessions.get(sessionName).status === 'CONNECTED') {
-    return sessions.get(sessionName);
+  if (sessions.has(sessionName)) {
+    const existing = sessions.get(sessionName);
+    if (existing.status === 'CONNECTED' || existing.status === 'STARTING' || existing.status === 'QRCODE') {
+      return existing;
+    }
   }
 
   const sessionData = {
@@ -117,15 +120,23 @@ async function startSession(sessionName) {
       session: sessionName,
       catchQR: (base64Qr, asciiQR, attempts, urlCode) => {
         console.log(`📸 [${sessionName}] QR Code received (attempt ${attempts})`);
-        sessionData.qrcode = base64Qr;
+        const formattedQr = base64Qr 
+          ? (base64Qr.startsWith('data:image') ? base64Qr : `data:image/png;base64,${base64Qr}`)
+          : null;
+        sessionData.qrcode = formattedQr;
         sessionData.status = 'QRCODE';
-        io.emit('session:qr', { session: sessionName, qrcode: base64Qr, attempts });
+        io.emit('session:qr', { session: sessionName, qrcode: formattedQr, attempts });
         io.emit('session:status', { session: sessionName, status: 'QRCODE' });
       },
       statusFind: (statusSession, session) => {
         console.log(`🔄 [${session}] State change: ${statusSession}`);
-        sessionData.status = statusSession;
-        io.emit('session:status', { session, status: statusSession });
+        if (['isLogged', 'inChat', 'qrReadSuccess', 'chatsAvailable'].includes(statusSession)) {
+          sessionData.status = 'CONNECTED';
+          sessionData.qrcode = null;
+        } else {
+          sessionData.status = statusSession;
+        }
+        io.emit('session:status', { session, status: sessionData.status });
       },
       folderNameToken: TOKEN_DIR,
       headless: true,
