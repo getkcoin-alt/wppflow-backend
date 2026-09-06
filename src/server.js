@@ -401,6 +401,12 @@ app.post('/api/sessions/start', authenticateToken, async (req, res) => {
 
 app.delete('/api/sessions/:session', authenticateToken, async (req, res) => {
   const s = sessions.get(req.params.session);
+  if (s && !s.client && ['STARTING', 'QRCODE', 'AUTHENTICATING'].includes(s.status)) {
+    return res.status(409).json({
+      status: 'error',
+      message: `Session '${req.params.session}' is still initializing and cannot be removed yet`
+    });
+  }
   if (s?.client) { try { await s.client.close(); } catch {} }
   sessions.delete(req.params.session);
   setSessionRegistered(req.params.session, false);
