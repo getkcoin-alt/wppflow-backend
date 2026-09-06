@@ -1,10 +1,20 @@
 [build]
-builder = "DOCKERFILE"
-dockerfilePath = "Dockerfile"
+# Use nixpacks (Railway native) instead of Dockerfile since Railway's Docker
+# cache was preventing the Alpine image from being built correctly.
+# The wppconnect library is installed via npm; Chromium is provided by the
+# PUPPETEER_SKIP_CHROMIUM_DOWNLOAD + system chromium approach via nixpacks.
+builder = "NIXPACKS"
 
 [deploy]
-# No startCommand override — let Dockerfile CMD run
+startCommand = "node src/server.js"
 healthcheckPath = "/health"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
+
+[build.nixpacksPlan.phases.setup]
+nixPkgs = ["nodejs_20", "chromium", "nss", "freetype", "harfbuzz", "glib", "dbus", "at-spi2-atk", "cups", "libdrm", "libxkbcommon", "mesa"]
+
+[build.nixpacksPlan.phases.setup.envs]
+PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "true"
+PUPPETEER_EXECUTABLE_PATH = "/run/current-system/sw/bin/chromium"
