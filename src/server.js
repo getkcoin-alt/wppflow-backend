@@ -29,28 +29,6 @@ initDatabase().catch(err => console.error('Database init error:', err));
 const PORT = process.env.PORT || 8080;
 const TOKEN_DIR = process.env.TOKEN_DIR || './tokens';
 
-// Alpine Linux uses 'chromium-browser', Debian uses 'chromium'
-// Detect whichever is present
-function detectChromium() {
-  const candidates = [
-    process.env.PUPPETEER_EXECUTABLE_PATH,
-    '/usr/bin/chromium-browser',
-    '/usr/bin/chromium',
-    '/usr/bin/google-chrome',
-  ].filter(Boolean);
-
-  for (const p of candidates) {
-    if (fs.existsSync(p)) {
-      console.log(`🌐 Found Chromium at: ${p}`);
-      return p;
-    }
-  }
-  console.warn('⚠️  No Chromium binary found in standard paths — Puppeteer will use its bundled binary.');
-  return undefined;
-}
-
-const CHROMIUM_PATH = detectChromium();
-
 if (!fs.existsSync(TOKEN_DIR)) {
   fs.mkdirSync(TOKEN_DIR, { recursive: true });
 }
@@ -80,7 +58,7 @@ const sessions = new Map();
 
 console.log('🚀 WppFlow Core Backend Engine starting...');
 console.log(`📁 Token dir: ${path.resolve(TOKEN_DIR)}`);
-console.log(`🌐 Chromium: ${CHROMIUM_PATH || 'bundled'}`);
+console.log(`📋 Node: ${process.version}`);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPERS
@@ -119,8 +97,8 @@ async function resolveSessionOwner(sessionName) {
       if (rows.length) return rows[0].user_id;
       const { rows: adminRows } = await pool.query(`SELECT id FROM users WHERE role='admin' ORDER BY id ASC LIMIT 1`);
       if (adminRows.length) return adminRows[0].id;
-      const { rows: any } = await pool.query(`SELECT id FROM users ORDER BY id ASC LIMIT 1`);
-      if (any.length) return any[0].id;
+      const { rows: anyRows } = await pool.query(`SELECT id FROM users ORDER BY id ASC LIMIT 1`);
+      if (anyRows.length) return anyRows[0].id;
     }
   } catch (e) { console.warn('resolveSessionOwner:', e.message); }
   return null;
@@ -137,7 +115,7 @@ async function runAutomationEngine(sessionName, userId, message, client) {
       const body = (message.body || '').trim();
       let matched = false;
       switch (rule.triggerType) {
-        case 'keyword':   matched = body.toLowerCase().includes((rule.triggerCondition || '').toLowerCase()); break;
+        case 'keyword':
         case 'contains':  matched = body.toLowerCase().includes((rule.triggerCondition || '').toLowerCase()); break;
         case 'exact':     matched = body.toLowerCase() === (rule.triggerCondition || '').toLowerCase(); break;
         case 'regex':     try { matched = new RegExp(rule.triggerCondition, 'i').test(body); } catch { matched = false; } break;
@@ -156,7 +134,7 @@ async function runAutomationEngine(sessionName, userId, message, client) {
         const pool = getPool();
         if (pool) await pool.query(`UPDATE automations SET executions_count = executions_count + 1 WHERE id = $1`, [rule.id]);
         io.emit('automation:fired', { session: sessionName, ruleId: rule.id, ruleName: rule.name, from: message.from });
-      } catch (e) { console.error(`❌ Automation '${rule.name}' action failed:`, e.message); }
+      } catch (e) { console.error(`❌ Automation '${rule.name}' failed:`, e.message); }
     }
   } catch (e) { console.error(`Automation engine error [${sessionName}]:`, e.message); }
 }
@@ -205,50 +183,62 @@ io.on('connection', (socket) => {
 async function startSession(sessionName) {
   if (sessions.has(sessionName)) {
     const ex = sessions.get(sessionName);
+    // Allow restart if FAILED — otherwise skip if already running
     if (['CONNECTED', 'STARTING', 'QRCODE'].includes(ex.status)) return ex;
   }
 
+  // Clear stale Chromium lock files from previous container
   clearChromiumLocks(sessionName);
 
-  const sd = { client: null, status: 'STARTING', qrcode: null, phone: null, battery: 100, antiBanHealth: 98, warmupDay: 14, lastActive: new Date().toISOString() };
+  const sd = {
+    client: null, status: 'STARTING', qrcode: null,
+    phone: null, battery: 100, antiBanHealth: 98,
+    warmupDay: 14, lastActive: new Date().toISOString()
+  };
   sessions.set(sessionName, sd);
   io.emit('session:status', { session: sessionName, status: 'STARTING' });
 
   try {
+    // ─── Exactly as per official docs ───────────────────────────────────────
+    // https://wppconnect.io/docs/tutorial/basics/creating-client
+    // useChrome: true  →  lets wppconnect find Chrome or Chromium automatically
+    // browserArgs: ['--no-sandbox']  →  the only flag shown in official docs
+    // puppeteerOptions: {}  →  no executablePath override; wppconnect resolves it
+    // ────────────────────────────────────────────────────────────────────────
     const client = await wppconnect.create({
       session: sessionName,
-      catchQR: (base64Qr, _ascii, attempts) => {
+      catchQR: (base64Qr, asciiQR, attempts, urlCode) => {
         console.log(`📸 [${sessionName}] QR attempt ${attempts}`);
-        sd.qrcode = base64Qr?.startsWith('data:image') ? base64Qr : `data:image/png;base64,${base64Qr}`;
+        const qr = base64Qr?.startsWith('data:image')
+          ? base64Qr
+          : `data:image/png;base64,${base64Qr}`;
+        sd.qrcode = qr;
         sd.status = 'QRCODE';
-        io.emit('session:qr', { session: sessionName, qrcode: sd.qrcode, attempts });
+        io.emit('session:qr', { session: sessionName, qrcode: qr, attempts });
         io.emit('session:status', { session: sessionName, status: 'QRCODE' });
       },
-      statusFind: (status, session) => {
-        console.log(`🔄 [${session}] ${status}`);
-        if (['isLogged', 'inChat', 'qrReadSuccess', 'chatsAvailable'].includes(status)) {
-          sd.status = 'CONNECTED'; sd.qrcode = null;
+      statusFind: (statusSession, session) => {
+        console.log(`🔄 [${session}] Status: ${statusSession}`);
+        // Official docs statuses: isLogged, notLogged, browserClose,
+        // qrReadSuccess, qrReadFail, autocloseCalled, desconnectedMobile, deleteToken
+        if (['isLogged', 'inChat', 'qrReadSuccess', 'chatsAvailable'].includes(statusSession)) {
+          sd.status = 'CONNECTED';
+          sd.qrcode = null;
+        } else if (statusSession === 'browserClose' || statusSession === 'autocloseCalled') {
+          sd.status = 'FAILED';
         } else {
-          sd.status = status;
+          sd.status = statusSession;
         }
         io.emit('session:status', { session, status: sd.status });
       },
-      autoClose: 120000,
+      headless: true,           // Official docs: headless chrome
+      useChrome: true,          // Official docs default: use Chrome, fall back to Chromium
+      devtools: false,          // Official docs: false by default
+      logQR: true,              // Official docs: logs QR in terminal (good for debugging)
+      autoClose: 120000,        // 2 min to scan QR (official default is 60s, we extend)
       folderNameToken: TOKEN_DIR,
-      headless: true,
-      useChrome: false,
-      browserArgs: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--disable-gpu',
-        '--disable-web-security',
-        '--disable-features=VizDisplayCompositor',
-      ],
-      puppeteerOptions: CHROMIUM_PATH ? { executablePath: CHROMIUM_PATH } : {}
+      browserArgs: ['--no-sandbox'],  // Official docs show only this flag
+      puppeteerOptions: {},           // Official docs: empty — let wppconnect resolve binary
     });
 
     sd.client = client;
@@ -260,24 +250,35 @@ async function startSession(sessionName) {
       if (host?.id) sd.phone = host.id.user || host.id._serialized;
       const bat = await client.getBatteryLevel();
       if (typeof bat === 'number') sd.battery = bat;
-    } catch (e) { console.warn(`⚠️  Telemetry unavailable [${sessionName}]:`, e.message); }
+    } catch (e) {
+      console.warn(`⚠️  Telemetry unavailable [${sessionName}]:`, e.message);
+    }
 
     console.log(`✅ [${sessionName}] Connected! Phone: ${sd.phone}`);
-    io.emit('session:status', { session: sessionName, status: 'CONNECTED', phone: sd.phone, battery: sd.battery });
+    io.emit('session:status', {
+      session: sessionName, status: 'CONNECTED',
+      phone: sd.phone, battery: sd.battery
+    });
 
+    // Inbound messages → persist + run automations
     client.onMessage(async (msg) => {
       console.log(`📩 [${sessionName}] from ${msg.from}: ${msg.body}`);
       const result = await handleInboundMessage(sessionName, msg);
       if (result?.userId) await runAutomationEngine(sessionName, result.userId, msg, client);
     });
 
+    // Delivery acks
     client.onAck((ack) => {
-      io.emit('session:ack', { session: sessionName, id: ack.id._serialized || ack.id, ack: ack.ack });
+      io.emit('session:ack', {
+        session: sessionName,
+        id: ack.id._serialized || ack.id,
+        ack: ack.ack  // 1=sent, 2=delivered, 3=read
+      });
     });
 
     return sd;
   } catch (err) {
-    console.error(`❌ [${sessionName}] Session failed:`, err.message);
+    console.error(`❌ [${sessionName}] Session failed: ${err.message}`);
     sd.status = 'FAILED';
     io.emit('session:status', { session: sessionName, status: 'FAILED', error: err.message });
     throw err;
@@ -287,12 +288,15 @@ async function startSession(sessionName) {
 async function recoverPersistedSessions() {
   try {
     if (!fs.existsSync(TOKEN_DIR)) return;
-    const dirs = fs.readdirSync(TOKEN_DIR, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name);
+    const dirs = fs.readdirSync(TOKEN_DIR, { withFileTypes: true })
+      .filter(e => e.isDirectory()).map(e => e.name);
     if (!dirs.length) { console.log('ℹ️  No persisted sessions — clean start.'); return; }
-    console.log(`🔄 Recovering sessions: ${dirs.join(', ')}`);
+    console.log(`🔄 Recovering ${dirs.length} session(s): ${dirs.join(', ')}`);
     for (const name of dirs) {
       await sleep(3000);
-      startSession(name).then(() => console.log(`♻️  Recovered: ${name}`)).catch(e => console.warn(`⚠️  Could not recover '${name}': ${e.message}`));
+      startSession(name)
+        .then(() => console.log(`♻️  Recovered: ${name}`))
+        .catch(e => console.warn(`⚠️  Could not recover '${name}': ${e.message}`));
     }
   } catch (e) { console.error('Recovery error:', e.message); }
 }
@@ -305,14 +309,23 @@ app.use('/api/auth', authRoutes);
 app.use('/api', dataRoutes);
 
 app.get('/health', (req, res) => res.json({
-  status: 'ok', engine: 'wppflow-omniengine', version: '2.5.2',
-  database: getDatabaseStatus(), activeSessions: sessions.size,
-  chromium: CHROMIUM_PATH || 'bundled',
-  uptime: Math.floor(process.uptime()), timestamp: new Date().toISOString()
+  status: 'ok', engine: 'wppflow-omniengine', version: '2.6.0',
+  database: getDatabaseStatus(),
+  activeSessions: sessions.size,
+  sessions: Array.from(sessions.entries()).map(([name, d]) => ({ name, status: d.status })),
+  uptime: Math.floor(process.uptime()),
+  timestamp: new Date().toISOString()
 }));
 
 app.get('/api/sessions', authenticateToken, (req, res) => {
-  res.json({ status: 'success', sessions: Array.from(sessions.entries()).map(([name, d]) => ({ sessionKey: name, status: d.status, phone: d.phone, battery: d.battery, antiBanHealth: d.antiBanHealth, warmupDay: d.warmupDay, hasQr: !!d.qrcode, lastActive: d.lastActive })) });
+  res.json({
+    status: 'success',
+    sessions: Array.from(sessions.entries()).map(([name, d]) => ({
+      sessionKey: name, status: d.status, phone: d.phone,
+      battery: d.battery, antiBanHealth: d.antiBanHealth,
+      warmupDay: d.warmupDay, hasQr: !!d.qrcode, lastActive: d.lastActive
+    }))
+  });
 });
 
 app.post('/api/sessions/start', authenticateToken, async (req, res) => {
@@ -320,6 +333,18 @@ app.post('/api/sessions/start', authenticateToken, async (req, res) => {
   if (!sessionName) return res.status(400).json({ status: 'error', message: 'sessionName is required' });
   startSession(sessionName).catch(e => console.error(`startSession error [${sessionName}]:`, e.message));
   res.json({ status: 'success', message: `Session '${sessionName}' initialization requested`, session: sessionName });
+});
+
+// NEW: clear a FAILED session from memory so it can be retried cleanly
+app.delete('/api/sessions/:session', authenticateToken, async (req, res) => {
+  const { session } = req.params;
+  const s = sessions.get(session);
+  if (s?.client) {
+    try { await s.client.close(); } catch {}
+  }
+  sessions.delete(session);
+  io.emit('session:status', { session, status: 'DISCONNECTED' });
+  res.json({ status: 'success', message: `Session '${session}' removed from memory` });
 });
 
 app.get('/api/sessions/:session/qr', authenticateToken, (req, res) => {
@@ -393,11 +418,14 @@ app.post('/api/campaigns/:id/send', authenticateToken, async (req, res) => {
       for (let i = 0; i < contacts.length; i++) {
         const target = contacts[i].phone.includes('@') ? contacts[i].phone : `${contacts[i].phone.replace(/\D/g, '')}@c.us`;
         try { await sd.client.sendText(target, campaign.templateText); sent++; }
-        catch (e) { failed++; console.error(`Campaign send failed → ${target}: ${e.message}`); }
+        catch (e) { failed++; console.error(`Campaign → ${target} failed: ${e.message}`); }
         io.emit('campaign:progress', { campaignId: req.params.id, sent, failed, total: contacts.length });
         if (i < contacts.length - 1) await sleep(delayMs);
       }
-      if (pool) await pool.query(`UPDATE campaigns SET status='completed', sent_count=$1, failed_count=$2, delivered_count=$3, read_count=$4, replied_count=$5 WHERE id=$6 AND user_id=$7`, [sent, failed, Math.floor(sent * 0.97), Math.floor(sent * 0.85), Math.floor(sent * 0.15), req.params.id, userId]);
+      if (pool) await pool.query(
+        `UPDATE campaigns SET status='completed', sent_count=$1, failed_count=$2, delivered_count=$3, read_count=$4, replied_count=$5 WHERE id=$6 AND user_id=$7`,
+        [sent, failed, Math.floor(sent * 0.97), Math.floor(sent * 0.85), Math.floor(sent * 0.15), req.params.id, userId]
+      );
       io.emit('campaign:completed', { campaignId: req.params.id, sent, failed });
     } catch (e) {
       console.error(`Broadcast error [${req.params.id}]:`, e.message);
@@ -412,7 +440,7 @@ app.post('/api/campaigns/:id/send', authenticateToken, async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 server.listen(PORT, () => {
-  console.log(`✨ WppFlow v2.5.2 on port ${PORT}`);
+  console.log(`✨ WppFlow v2.6.0 on port ${PORT}`);
   console.log(`👉 Health: http://localhost:${PORT}/health`);
   setTimeout(recoverPersistedSessions, 5000);
 });
