@@ -68,9 +68,15 @@ function clearChromiumLocks(sessionName) {
   if (!fs.existsSync(sessionDir)) return;
   for (const f of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
     const p = path.join(sessionDir, f);
-    if (fs.existsSync(p)) {
-      try { fs.unlinkSync(p); console.log(`🔓 [${sessionName}] Removed stale lock: ${f}`); }
-      catch (e) { console.warn(`⚠️  Could not remove ${f}: ${e.message}`); }
+    // Chromium creates these entries as symlinks. existsSync() follows a
+    // symlink and returns false when its target belonged to an old container,
+    // which is exactly the stale-lock case after a Railway redeploy.
+    try {
+      fs.lstatSync(p);
+      fs.unlinkSync(p);
+      console.log(`🔓 [${sessionName}] Removed stale lock: ${f}`);
+    } catch (e) {
+      if (e.code !== 'ENOENT') console.warn(`⚠️  Could not remove ${f}: ${e.message}`);
     }
   }
   try {
@@ -172,6 +178,7 @@ async function startSession(sessionName) {
 
   const sd = {
     client: null, status: 'STARTING', qrcode: null,
+    error: null,
     phone: null, battery: 100, antiBanHealth: 98,
     warmupDay: 14, lastActive: new Date().toISOString()
   };
@@ -266,6 +273,7 @@ async function startSession(sessionName) {
     } else {
       console.error(`❌ [${sessionName}] Session failed: ${err.message}`);
       sd.status = 'FAILED';
+      sd.error = err.message;
       io.emit('session:status', { session: sessionName, status: 'FAILED', error: err.message });
     }
     throw err;
@@ -296,6 +304,15 @@ async function recoverPersistedSessions() {
 // ─────────────────────────────────────────────────────────────────────────────
 app.use('/api/auth', authRoutes);
 app.use('/api', dataRoutes);
+
+// Session and QR state changes continuously. Prevent browsers and Vercel's
+// proxy from revalidating these polling responses into misleading 304s.
+app.use('/api/sessions', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
 
 app.get('/health', (req, res) => res.json({
   status: 'ok', engine: 'wppflow-omniengine', version: '2.7.0',
@@ -334,13 +351,13 @@ app.delete('/api/sessions/:session', authenticateToken, async (req, res) => {
 app.get('/api/sessions/:session/qr', authenticateToken, (req, res) => {
   const s = sessions.get(req.params.session);
   if (!s) return res.status(404).json({ status: 'error', message: 'Session not found' });
-  res.json({ status: 'success', session: req.params.session, sessionStatus: s.status, qrcode: s.qrcode });
+  res.json({ status: 'success', session: req.params.session, sessionStatus: s.status, qrcode: s.qrcode, error: s.error });
 });
 
 app.get('/api/sessions/:session/status', authenticateToken, (req, res) => {
   const s = sessions.get(req.params.session);
   if (!s) return res.status(404).json({ status: 'error', message: 'Session not found' });
-  res.json({ status: 'success', session: req.params.session, sessionStatus: s.status, phone: s.phone, battery: s.battery, antiBanHealth: s.antiBanHealth });
+  res.json({ status: 'success', session: req.params.session, sessionStatus: s.status, phone: s.phone, battery: s.battery, antiBanHealth: s.antiBanHealth, error: s.error });
 });
 
 app.post('/api/sessions/:session/send-message', authenticateToken, async (req, res) => {
