@@ -13,6 +13,7 @@ import {
   getChats,
   createChat,
   createMessage,
+  getMessages,
   updateChat,
   getAutomations,
   getCampaigns,
@@ -191,6 +192,22 @@ async function handleInboundMessage(sessionName, message) {
       chat = await createChat(userId, { contactName: senderName, phone: senderPhone, avatar: '', channel: sessionName, assignedTo: '', isGroup: false, lastMessage: { text: message.body || '', timestamp: ts, status: 'delivered', fromMe: false }, tags: [] });
       console.log(`💬 [${sessionName}] New chat: ${chat.id}`);
       io.to(`workspace:${userId}`).emit('chat:created', { session: sessionName, chat });
+      try {
+        const history = await client.getAllMessagesInChat(remoteId, true, false);
+        for (const item of (Array.isArray(history) ? history : []).slice(-50)) {
+          const itemTimestamp = item.t ? new Date(Number(item.t) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : timestamp;
+          await createMessage(chat.id, {
+            sender: item.fromMe ? 'agent' : 'customer',
+            agentName: item.fromMe ? 'WhatsApp Agent' : (item.sender?.name || contactName),
+            text: item.body || '',
+            type: item.type === 'chat' ? 'text' : (item.type || 'text'),
+            status: item.fromMe ? 'sent' : 'delivered',
+            timestamp: itemTimestamp,
+          });
+        }
+      } catch (error) {
+        console.warn(`⚠️  [${sessionName}] History sync skipped for ${remoteId}:`, error.message);
+      }
     }
     const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const saved = await createMessage(chat.id, { sender: 'customer', agentName: senderName, text: message.body || '', type: message.type || 'text', status: 'delivered', timestamp: ts });
@@ -227,11 +244,26 @@ async function syncRemoteChats(sessionName, client) {
         tags: [],
       });
       io.to(`workspace:${userId}`).emit('chat:created', { session: sessionName, chat });
-    } else if (last.body) {
-      await updateChat(userId, chat.id, {
-        unreadCount: Number(remote.unreadCount || chat.unreadCount || 0),
-        lastMessage: { text: last.body, timestamp, status: 'delivered', fromMe: Boolean(last.fromMe) },
-      });
+    } else {
+      if (last.body) {
+        await updateChat(userId, chat.id, {
+          unreadCount: Number(remote.unreadCount || chat.unreadCount || 0),
+          lastMessage: { text: last.body, timestamp, status: 'delivered', fromMe: Boolean(last.fromMe) },
+        });
+      }
+      if (!last.body && !(await getMessages(chat.id)).length) {
+        try {
+          const history = await client.getAllMessagesInChat(remoteId, true, false);
+          for (const item of (Array.isArray(history) ? history : []).slice(-50)) {
+            const itemTimestamp = item.t ? new Date(Number(item.t) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : timestamp;
+            await createMessage(chat.id, {
+              sender: item.fromMe ? 'agent' : 'customer', agentName: item.fromMe ? 'WhatsApp Agent' : (item.sender?.name || contactName),
+              text: item.body || '', type: item.type === 'chat' ? 'text' : (item.type || 'text'),
+              status: item.fromMe ? 'sent' : 'delivered', timestamp: itemTimestamp,
+            });
+          }
+        } catch (error) { console.warn(`⚠️  [${sessionName}] Existing history sync skipped for ${remoteId}:`, error.message); }
+      }
     }
   }
   console.log(`🔄 [${sessionName}] Synced ${remoteChats?.length || 0} WhatsApp chats into the shared inbox`);
