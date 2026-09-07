@@ -15,6 +15,7 @@ import {
   createMessage,
   getMessages,
   updateChat,
+  deleteChatsByChannel,
   getAutomations,
   getCampaigns,
   getPool,
@@ -66,6 +67,12 @@ async function canAccessSession(userId, sessionName, session) {
   if (!ownerId) return true;
   const workspaceIds = await getWorkspaceUserIds(userId);
   return workspaceIds.includes(Number(ownerId));
+}
+
+async function emitSessionEvent(event, sessionName, payload, ownerOverride = null) {
+  const ownerId = ownerOverride || sessions.get(sessionName)?.ownerId || await resolveSessionOwner(sessionName);
+  if (ownerId) io.to(`workspace:${ownerId}`).emit(event, payload);
+  else io.emit(event, payload);
 }
 
 console.log('🚀 WppFlow Core Backend Engine starting...');
@@ -127,6 +134,51 @@ function clearChromiumLocks(sessionName) {
       }
     }
   } catch {}
+}
+
+function isSafeSessionName(sessionName) {
+  return typeof sessionName === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(sessionName);
+}
+
+function sessionTokenPath(sessionName) {
+  if (!isSafeSessionName(sessionName)) return null;
+  const tokenRoot = path.resolve(TOKEN_DIR);
+  const sessionDir = path.resolve(tokenRoot, sessionName);
+  return path.dirname(sessionDir) === tokenRoot ? sessionDir : null;
+}
+
+/** Close a session and remove only its own browser profile and inbox data. */
+async function cleanupSession(sessionName, session = sessions.get(sessionName)) {
+  if (session?.cleaningUp) return { filesRemoved: true, chatsDeleted: 0 };
+  if (session) session.cleaningUp = true;
+  const ownerId = session?.ownerId || await resolveSessionOwner(sessionName);
+
+  if (session?.client) {
+    try { await session.client.close(); } catch (error) {
+      console.warn(`⚠️  [${sessionName}] Client close during cleanup:`, error.message);
+    }
+  }
+  sessions.delete(sessionName);
+  setSessionRegistered(sessionName, false);
+
+  let chatsDeleted = 0;
+  try { chatsDeleted = await deleteChatsByChannel(sessionName); }
+  catch (error) { console.warn(`⚠️  [${sessionName}] Inbox cleanup failed:`, error.message); }
+
+  const profilePath = sessionTokenPath(sessionName);
+  let filesRemoved = false;
+  if (profilePath) {
+    try {
+      fs.rmSync(profilePath, { recursive: true, force: true });
+      filesRemoved = !fs.existsSync(profilePath);
+    } catch (error) {
+      console.warn(`⚠️  [${sessionName}] Token cleanup failed:`, error.message);
+    }
+  }
+
+  await emitSessionEvent('session:status', sessionName, { session: sessionName, status: 'DISCONNECTED', filesRemoved, chatsDeleted }, ownerId);
+  console.log(`🧹 [${sessionName}] Cleanup complete: filesRemoved=${filesRemoved}, chatsDeleted=${chatsDeleted}`);
+  return { filesRemoved, chatsDeleted };
 }
 
 async function resolveSessionOwner(sessionName) {
@@ -282,7 +334,15 @@ io.use(async (socket, next) => {
 
 io.on('connection', (socket) => {
   console.log(`⚡ Socket: ${socket.id}`);
-  socket.emit('sessions:init', Array.from(sessions.entries()).map(([name, d]) => ({ name, status: d.status, phone: d.phone, hasQr: !!d.qrcode })));
+  (async () => {
+    const visible = [];
+    for (const [name, d] of sessions.entries()) {
+      if (await canAccessSession(socket.user.id, name, d)) {
+        visible.push({ name, status: d.status, phone: d.phone, hasQr: !!d.qrcode });
+      }
+    }
+    socket.emit('sessions:init', visible);
+  })().catch((error) => console.warn('Socket session init failed:', error.message));
   socket.on('disconnect', () => console.log(`🔌 Socket: ${socket.id}`));
 });
 
@@ -301,13 +361,13 @@ async function startSession(sessionName, ownerId = null) {
 
   const sd = {
     client: null, status: 'STARTING', qrcode: null,
-    error: null, qrScanned: false,
+    error: null, qrScanned: false, everConnected: false, cleaningUp: false,
     ownerId,
     phone: null, battery: 100, antiBanHealth: 98,
     warmupDay: 14, lastActive: new Date().toISOString()
   };
   sessions.set(sessionName, sd);
-  io.emit('session:status', { session: sessionName, status: 'STARTING' });
+  emitSessionEvent('session:status', sessionName, { session: sessionName, status: 'STARTING' });
 
   try {
     const client = await wppconnect.create({
@@ -318,8 +378,8 @@ async function startSession(sessionName, ownerId = null) {
         sd.qrcode = qr;
         sd.qrScanned = false;
         sd.status = 'QRCODE';
-        io.emit('session:qr', { session: sessionName, qrcode: qr, attempts });
-        io.emit('session:status', { session: sessionName, status: 'QRCODE' });
+        emitSessionEvent('session:qr', sessionName, { session: sessionName, qrcode: qr, attempts });
+        emitSessionEvent('session:status', sessionName, { session: sessionName, status: 'QRCODE' });
       },
       statusFind: (statusSession, session) => {
         console.log(`🔄 [${session}] ${statusSession}`);
@@ -329,26 +389,34 @@ async function startSession(sessionName, ownerId = null) {
           sd.qrScanned = true;
           sd.status = 'AUTHENTICATING';
           sd.qrcode = null;
-          io.emit('session:status', { session, status: 'AUTHENTICATING' });
+          emitSessionEvent('session:status', sessionName, { session, status: 'AUTHENTICATING' });
 
         } else if (['isLogged', 'inChat'].includes(statusSession) && sd.qrScanned) {
           // A QR was accepted and the client is now ready.
           sd.status = 'CONNECTED';
+          sd.everConnected = true;
           sd.qrcode = null;
           sd.error = null;
           setSessionRegistered(sessionName, true, sd.ownerId);
-          io.emit('session:status', { session, status: 'CONNECTED' });
+          emitSessionEvent('session:status', sessionName, { session, status: 'CONNECTED' });
 
         } else if (['isLogged', 'inChat'].includes(statusSession)) {
           // Existing profiles can briefly report logged-in while WhatsApp Web is
           // still deciding that they are unpaired. Do not complete the UI yet.
-          io.emit('session:status', { session, status: 'AUTHENTICATING' });
+          emitSessionEvent('session:status', sessionName, { session, status: 'AUTHENTICATING' });
 
         } else if (statusSession === 'notLogged' || statusSession === 'disconnectedMobile') {
-          // Normal intermediate states — WhatsApp Web loaded, QR incoming
-          // Do NOT change sd.status here; catchQR will set it to QRCODE
-          // Just forward the raw status for debugging
-          io.emit('session:status', { session, status: statusSession });
+          // WPPConnect also reports disconnectedMobile while an unpaired
+          // profile is booting. Only a profile that was previously connected
+          // represents a real mobile logout and should be purged.
+          if (statusSession === 'disconnectedMobile' && sd.everConnected) {
+            cleanupSession(sessionName, sd).catch((error) =>
+              console.warn(`⚠️  [${sessionName}] Mobile logout cleanup failed:`, error.message)
+            );
+          } else {
+            // Normal intermediate states — catchQR will set QRCODE.
+            emitSessionEvent('session:status', sessionName, { session, status: statusSession });
+          }
 
         } else if (statusSession === 'autocloseCalled') {
           // QR wasn't scanned in time — NOT a crash, just expired
@@ -356,16 +424,16 @@ async function startSession(sessionName, ownerId = null) {
           console.log(`⏰ [${session}] QR expired (autocloseCalled)`);
           sd.status = 'EXPIRED';
           sd.qrcode = null;
-          io.emit('session:status', { session, status: 'EXPIRED' });
+          emitSessionEvent('session:status', sessionName, { session, status: 'EXPIRED' });
 
         } else if (statusSession === 'browserClose') {
           // Chromium actually closed — real failure
           sd.status = 'FAILED';
-          io.emit('session:status', { session, status: 'FAILED' });
+          emitSessionEvent('session:status', sessionName, { session, status: 'FAILED' });
 
         } else {
           // All other statuses: just forward, don't overwrite sd.status
-          io.emit('session:status', { session, status: statusSession });
+          emitSessionEvent('session:status', sessionName, { session, status: statusSession });
         }
       },
       headless: true,
@@ -390,10 +458,11 @@ async function startSession(sessionName, ownerId = null) {
       ).catch(() => false);
       if (ready) {
         sd.status = 'CONNECTED';
+        sd.everConnected = true;
         sd.qrcode = null;
         sd.error = null;
         setSessionRegistered(sessionName, true, sd.ownerId);
-        io.emit('session:status', { session: sessionName, status: 'CONNECTED' });
+        emitSessionEvent('session:status', sessionName, { session: sessionName, status: 'CONNECTED' });
       }
     }
 
@@ -406,7 +475,7 @@ async function startSession(sessionName, ownerId = null) {
 
     if (sd.status === 'CONNECTED') {
       console.log(`✅ [${sessionName}] Connected! Phone: ${sd.phone}`);
-      io.emit('session:status', { session: sessionName, status: 'CONNECTED', phone: sd.phone, battery: sd.battery });
+      emitSessionEvent('session:status', sessionName, { session: sessionName, status: 'CONNECTED', phone: sd.phone, battery: sd.battery });
     }
 
     client.onMessage(async (msg) => {
@@ -419,7 +488,7 @@ async function startSession(sessionName, ownerId = null) {
     });
 
     client.onAck((ack) => {
-      io.emit('session:ack', { session: sessionName, id: ack.id._serialized || ack.id, ack: ack.ack });
+      emitSessionEvent('session:ack', sessionName, { session: sessionName, id: ack.id._serialized || ack.id, ack: ack.ack });
     });
 
     return sd;
@@ -429,12 +498,12 @@ async function startSession(sessionName, ownerId = null) {
     if (err.message && (err.message.includes('Auto Close') || err.message.includes('autocloseCalled'))) {
       console.log(`⏰ [${sessionName}] Session closed: QR not scanned in time.`);
       sd.status = 'EXPIRED';
-      io.emit('session:status', { session: sessionName, status: 'EXPIRED' });
+      emitSessionEvent('session:status', sessionName, { session: sessionName, status: 'EXPIRED' });
     } else {
       console.error(`❌ [${sessionName}] Session failed: ${err.message}`);
       sd.status = 'FAILED';
       sd.error = err.message;
-      io.emit('session:status', { session: sessionName, status: 'FAILED', error: err.message });
+      emitSessionEvent('session:status', sessionName, { session: sessionName, status: 'FAILED', error: err.message });
     }
     throw err;
   }
@@ -507,6 +576,7 @@ app.get('/api/sessions', authenticateToken, async (req, res) => {
 app.post('/api/sessions/start', authenticateToken, async (req, res) => {
   const { sessionName } = req.body;
   if (!sessionName) return res.status(400).json({ status: 'error', message: 'sessionName is required' });
+  if (!isSafeSessionName(sessionName)) return res.status(400).json({ status: 'error', message: 'sessionName may contain only letters, numbers, hyphens and underscores.' });
   startSession(sessionName, req.user.id).catch(e => {
     if (!e.message?.includes('Auto Close')) {
       console.error(`startSession error [${sessionName}]:`, e.message);
@@ -516,21 +586,13 @@ app.post('/api/sessions/start', authenticateToken, async (req, res) => {
 });
 
 app.delete('/api/sessions/:session', authenticateToken, async (req, res) => {
+  if (!isSafeSessionName(req.params.session)) return res.status(400).json({ status: 'error', message: 'Invalid session name.' });
   const s = sessions.get(req.params.session);
   if (s && !await canAccessSession(req.user.id, req.params.session, s)) {
     return res.status(403).json({ status: 'error', message: 'Session is outside the current workspace' });
   }
-  if (s && !s.client && ['STARTING', 'QRCODE', 'AUTHENTICATING'].includes(s.status)) {
-    return res.status(409).json({
-      status: 'error',
-      message: `Session '${req.params.session}' is still initializing and cannot be removed yet`
-    });
-  }
-  if (s?.client) { try { await s.client.close(); } catch {} }
-  sessions.delete(req.params.session);
-  setSessionRegistered(req.params.session, false);
-  io.emit('session:status', { session: req.params.session, status: 'DISCONNECTED' });
-  res.json({ status: 'success', message: `Session '${req.params.session}' removed` });
+  const cleanup = await cleanupSession(req.params.session, s);
+  res.json({ status: 'success', message: `Session '${req.params.session}' removed`, ...cleanup });
 });
 
 app.get('/api/sessions/:session/qr', authenticateToken, async (req, res) => {
@@ -679,15 +741,13 @@ app.get('/api/sessions/:session/blocklist', authenticateToken, async (req, res) 
 });
 
 app.post('/api/sessions/:session/close', authenticateToken, async (req, res) => {
+  if (!isSafeSessionName(req.params.session)) return res.status(400).json({ status: 'error', message: 'Invalid session name.' });
   const s = sessions.get(req.params.session);
   if (s && !await canAccessSession(req.user.id, req.params.session, s)) {
     return res.status(403).json({ status: 'error', message: 'Session is outside the current workspace' });
   }
-  if (s?.client) { try { await s.client.close(); } catch (e) { console.warn('close:', e.message); } }
-  sessions.delete(req.params.session);
-  setSessionRegistered(req.params.session, false);
-  io.emit('session:status', { session: req.params.session, status: 'DISCONNECTED' });
-  res.json({ status: 'success', message: `Session '${req.params.session}' closed` });
+  const cleanup = await cleanupSession(req.params.session, s);
+  res.json({ status: 'success', message: `Session '${req.params.session}' closed`, ...cleanup });
 });
 
 // Campaign broadcast

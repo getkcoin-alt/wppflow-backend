@@ -359,6 +359,29 @@ export async function updateChat(userId, chatId, updates) {
   }
 }
 
+/** Remove all inbox chats (and their cascading messages) for a WhatsApp session. */
+export async function deleteChatsByChannel(channel) {
+  let deleted = 0;
+  if (isPgConnected && pool) {
+    try {
+      const result = await pool.query('DELETE FROM chats WHERE channel = $1', [channel]);
+      deleted = result.rowCount || 0;
+    } catch (err) {
+      console.warn('PG chat cleanup error:', err.message);
+    }
+  }
+
+  // Keep the fallback store consistent as well. PostgreSQL cascades messages
+  // through the FK; the in-memory store needs that relationship removed here.
+  for (const [chatId, chat] of memoryChats.entries()) {
+    if (chat.channel !== channel) continue;
+    if (!isPgConnected) deleted += 1;
+    memoryChats.delete(chatId);
+    memoryMessages.delete(chatId);
+  }
+  return deleted;
+}
+
 function normalizeChat(row) {
   return {
     id: row.id, contactId: row.contact_id, contactName: row.contact_name, phone: row.phone,

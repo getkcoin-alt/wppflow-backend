@@ -80,9 +80,8 @@ router.post('/signup', async (req, res) => {
 
     // First-ever account (empty DB) becomes the initial admin
     const allUsers = await getAllUsers();
-    const workspaceUserIds = await getWorkspaceUserIds(actor.id);
     if (allUsers.length === 0) {
-      assignedRole = 'admin';
+      assignedRole = email.trim().toLowerCase() === 'admin@wppflow.io' ? 'admin' : 'user';
     }
 
     const plan = assignedRole === 'admin' ? 'Enterprise' : 'Growth';
@@ -199,6 +198,7 @@ router.get('/users', authenticateToken, async (req, res) => {
       return res.status(403).json({ status: 'error', message: 'Admin access required.' });
     }
     const allUsers = await getAllUsers();
+    const workspaceUserIds = await getWorkspaceUserIds(actor.id);
     const users = isSuperAdmin(actor)
       ? allUsers
       : allUsers.filter((entry) => workspaceUserIds.includes(Number(entry.id)));
