@@ -114,6 +114,8 @@ function clearChromiumLocks(sessionName) {
 }
 
 async function resolveSessionOwner(sessionName) {
+  const activeSession = sessions.get(sessionName);
+  if (activeSession?.ownerId) return activeSession.ownerId;
   try {
     const pool = getPool();
     if (pool) {
@@ -193,9 +195,10 @@ io.on('connection', (socket) => {
 // SESSION MANAGEMENT
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function startSession(sessionName) {
+async function startSession(sessionName, ownerId = null) {
   if (sessions.has(sessionName)) {
     const ex = sessions.get(sessionName);
+    if (!ex.ownerId && ownerId) ex.ownerId = ownerId;
     if (['CONNECTED', 'STARTING', 'QRCODE'].includes(ex.status)) return ex;
   }
 
@@ -204,6 +207,7 @@ async function startSession(sessionName) {
   const sd = {
     client: null, status: 'STARTING', qrcode: null,
     error: null, qrScanned: false,
+    ownerId,
     phone: null, battery: 100, antiBanHealth: 98,
     warmupDay: 14, lastActive: new Date().toISOString()
   };
@@ -391,7 +395,7 @@ app.get('/api/sessions', authenticateToken, (req, res) => {
 app.post('/api/sessions/start', authenticateToken, async (req, res) => {
   const { sessionName } = req.body;
   if (!sessionName) return res.status(400).json({ status: 'error', message: 'sessionName is required' });
-  startSession(sessionName).catch(e => {
+  startSession(sessionName, req.user.id).catch(e => {
     if (!e.message?.includes('Auto Close')) {
       console.error(`startSession error [${sessionName}]:`, e.message);
     }
