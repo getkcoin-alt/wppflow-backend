@@ -200,6 +200,43 @@ async function handleInboundMessage(sessionName, message) {
   } catch (e) { console.error(`Inbound error [${sessionName}]:`, e.message); return null; }
 }
 
+async function syncRemoteChats(sessionName, client) {
+  const userId = await resolveSessionOwner(sessionName);
+  if (!userId) return;
+  const remoteChats = await client.listChats({ count: 100 });
+  const existing = await getChats(userId);
+  for (const remote of remoteChats || []) {
+    const remoteId = remote.id?._serialized || remote.id;
+    if (!remoteId || remoteId === 'status@broadcast') continue;
+    const phone = String(remoteId).replace(/@c\.us$|@g\.us$/, '');
+    const last = remote.lastMessage || {};
+    const timestamp = last.t ? new Date(Number(last.t) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—';
+    const isGroup = String(remoteId).includes('@g.us');
+    const contactName = remote.name || remote.contact?.pushname || remote.contact?.name || phone;
+    let chat = existing.find((entry) => entry.phone === phone || entry.phone === remoteId);
+    if (!chat) {
+      chat = await createChat(userId, {
+        contactName,
+        phone,
+        avatar: remote.contact?.profilePicThumbObj?.eurl || '',
+        channel: sessionName,
+        assignedTo: '',
+        isGroup,
+        groupMembersCount: remote.groupMetadata?.participants?.length || 0,
+        lastMessage: { text: last.body || '', timestamp, status: 'delivered', fromMe: Boolean(last.fromMe) },
+        tags: [],
+      });
+      io.to(`workspace:${userId}`).emit('chat:created', { session: sessionName, chat });
+    } else if (last.body) {
+      await updateChat(userId, chat.id, {
+        unreadCount: Number(remote.unreadCount || chat.unreadCount || 0),
+        lastMessage: { text: last.body, timestamp, status: 'delivered', fromMe: Boolean(last.fromMe) },
+      });
+    }
+  }
+  console.log(`🔄 [${sessionName}] Synced ${remoteChats?.length || 0} WhatsApp chats into the shared inbox`);
+}
+
 io.use(async (socket, next) => {
   try {
     const token = socket.handshake.auth?.token;
@@ -343,6 +380,10 @@ async function startSession(sessionName, ownerId = null) {
     client.onMessage(async (msg) => {
       const result = await handleInboundMessage(sessionName, msg);
       if (result?.userId) await runAutomationEngine(sessionName, result.userId, msg, client);
+    });
+
+    syncRemoteChats(sessionName, client).catch((error) => {
+      console.warn(`⚠️  [${sessionName}] Chat sync failed:`, error.message);
     });
 
     client.onAck((ack) => {
