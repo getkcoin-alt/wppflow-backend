@@ -256,7 +256,7 @@ router.post('/users', authenticateToken, async (req, res) => {
     if (!email || !name) return res.status(400).json({ status: 'error', message: 'Name and email are required.' });
     const superAdmin = isSuperAdmin(actor);
     const role = superAdmin
-      ? (['admin', 'superadmin'].includes(requestedRole) ? requestedRole : 'user')
+      ? (requestedRole === 'admin' ? 'admin' : 'user')
       : (['sales', 'support', 'user'].includes(requestedRole) ? requestedRole : 'user');
     const workspaceName = superAdmin ? String(companyName || '').trim() : actor.company_name;
     if (!workspaceName) return res.status(400).json({ status: 'error', message: 'companyName is required when creating a company.' });
