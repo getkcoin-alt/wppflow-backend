@@ -7,7 +7,9 @@ import {
   getAllUsers, 
   comparePassword,
   getDatabaseStatus,
-  getWorkspaceUserIds
+  getWorkspaceUserIds,
+  updateUser,
+  deleteUser
 } from '../db.js';
 
 const router = express.Router();
@@ -138,6 +140,16 @@ router.post('/login', async (req, res) => {
       });
     }
 
+    if (user.status && user.status !== 'active') {
+      return res.status(403).json({
+        status: 'error',
+        code: 'ACCOUNT_BLOCKED',
+        message: user.status === 'blocked'
+          ? 'This account is blocked. Contact your workspace administrator.'
+          : 'This account is not active. Contact your workspace administrator.'
+      });
+    }
+
     const isMatch = await comparePassword(password, user.password_hash);
     if (!isMatch) {
       return res.status(401).json({ 
@@ -215,7 +227,8 @@ router.get('/users', authenticateToken, async (req, res) => {
 });
 
 function isSuperAdmin(user) {
-  return user?.role === 'superadmin' || user?.email === process.env.SUPERADMIN_EMAIL || user?.email === 'admin@wppflow.io';
+  const platformEmail = (process.env.SUPERADMIN_EMAIL || 'admin@wppflow.io').toLowerCase();
+  return user?.email?.toLowerCase() === platformEmail;
 }
 
 function temporaryPassword() {
@@ -273,6 +286,63 @@ router.post('/users', authenticateToken, async (req, res) => {
   } catch (error) {
     const status = /already registered/i.test(error.message) ? 409 : 500;
     res.status(status).json({ status: 'error', message: error.message || 'Could not create user.' });
+  }
+});
+
+async function canManageTarget(actor, targetId) {
+  const target = await findUserById(targetId);
+  if (!target) return { target: null, allowed: false };
+  if (target.email === 'admin@wppflow.io') return { target, allowed: false };
+  if (isSuperAdmin(actor)) return { target, allowed: true };
+  if (!['admin', 'superadmin'].includes(actor.role)) return { target, allowed: false };
+  const workspaceIds = await getWorkspaceUserIds(actor.id);
+  return { target, allowed: workspaceIds.includes(Number(target.id)) };
+}
+
+/** Edit a tenant or employee while preserving workspace boundaries. */
+router.patch('/users/:id', authenticateToken, async (req, res) => {
+  try {
+    const actor = await findUserById(req.user.id);
+    const { target, allowed } = await canManageTarget(actor, req.params.id);
+    if (!actor || !allowed) return res.status(403).json({ status: 'error', message: 'You cannot edit this account.' });
+    const superAdmin = isSuperAdmin(actor);
+    const body = req.body || {};
+    const updates = {};
+    if (body.name !== undefined) updates.name = String(body.name).trim();
+    if (body.email !== undefined) updates.email = String(body.email).trim().toLowerCase();
+    if (body.companyName !== undefined && superAdmin) updates.companyName = String(body.companyName).trim();
+    if (body.role !== undefined) {
+      const allowedRoles = superAdmin ? ['admin', 'sales', 'support', 'user'] : ['sales', 'support', 'user'];
+      if (!allowedRoles.includes(body.role)) return res.status(400).json({ status: 'error', message: 'Invalid role for this administrator.' });
+      updates.role = body.role;
+    }
+    if (body.status !== undefined) {
+      if (!['active', 'blocked', 'suspended', 'pending'].includes(body.status)) return res.status(400).json({ status: 'error', message: 'Invalid account status.' });
+      updates.status = body.status;
+    }
+    if (body.plan !== undefined && superAdmin) updates.plan = String(body.plan);
+    if (body.sessionsLimit !== undefined && superAdmin) updates.sessionsLimit = Math.max(1, Math.min(100, Number(body.sessionsLimit)));
+    if (updates.email === 'admin@wppflow.io') return res.status(400).json({ status: 'error', message: 'The platform administrator email is reserved.' });
+    if (updates.name === '') return res.status(400).json({ status: '400', message: 'Name cannot be empty.' });
+    const user = await updateUser(target.id, updates);
+    res.json({ status: 'success', user });
+  } catch (error) {
+    const status = /already registered/i.test(error.message) ? 409 : 500;
+    res.status(status).json({ status: 'error', message: error.message || 'Could not update user.' });
+  }
+});
+
+/** Delete a tenant or employee account. The platform administrator is protected. */
+router.delete('/users/:id', authenticateToken, async (req, res) => {
+  try {
+    const actor = await findUserById(req.user.id);
+    const { target, allowed } = await canManageTarget(actor, req.params.id);
+    if (!actor || !allowed || Number(target.id) === Number(actor.id)) return res.status(403).json({ status: 'error', message: 'You cannot delete this account.' });
+    const user = await deleteUser(target.id);
+    if (!user) return res.status(404).json({ status: 'error', message: 'User not found.' });
+    res.json({ status: 'success', message: 'User deleted.', user });
+  } catch (error) {
+    res.status(500).json({ status: 'error', message: error.message || 'Could not delete user.' });
   }
 });
 

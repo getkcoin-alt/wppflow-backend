@@ -49,6 +49,7 @@ export async function initDatabase() {
           name VARCHAR(255) NOT NULL,
           company_name VARCHAR(255) DEFAULT 'WppFlow Workspace',
           role VARCHAR(50) DEFAULT 'user',
+          status VARCHAR(30) DEFAULT 'active',
           plan VARCHAR(50) DEFAULT 'Growth',
           sessions_limit INT DEFAULT 5,
           created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -139,6 +140,8 @@ export async function initDatabase() {
         );
       `);
       await client.query(`ALTER TABLE messages ALTER COLUMN media_url TYPE TEXT`);
+      await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(30) DEFAULT 'active'`);
+      await client.query(`UPDATE users SET status = 'active' WHERE status IS NULL`);
 
       console.log('✅ PostgreSQL Schema verified: all tables ready.');
       client.release();
@@ -162,10 +165,10 @@ async function seedDefaultUsers() {
       const { rows } = await pool.query('SELECT COUNT(*) FROM users');
       if (parseInt(rows[0].count, 10) === 0) {
         await pool.query(`
-          INSERT INTO users (email, password_hash, name, company_name, role, plan, sessions_limit)
+          INSERT INTO users (email, password_hash, name, company_name, role, status, plan, sessions_limit)
           VALUES
-            ('admin@wppflow.io', $1, 'Super Admin', 'WppFlow HQ', 'admin', 'Enterprise', 25),
-            ('demo@wppflow.io', $2, 'Aarav Mehta', 'Urban Threads', 'user', 'Growth', 5)
+            ('admin@wppflow.io', $1, 'Super Admin', 'WppFlow HQ', 'admin', 'active', 'Enterprise', 25),
+            ('demo@wppflow.io', $2, 'Aarav Mehta', 'Urban Threads', 'user', 'active', 'Growth', 5)
         `, [adminHash, demoHash]);
         console.log('🌱 Seeded default users into PostgreSQL');
       }
@@ -174,23 +177,23 @@ async function seedDefaultUsers() {
     }
   }
 
-  memoryUsers.set('admin@wppflow.io', { id: 1, email: 'admin@wppflow.io', password_hash: adminHash, name: 'Super Admin', company_name: 'WppFlow HQ', role: 'admin', plan: 'Enterprise', sessions_limit: 25, created_at: new Date().toISOString() });
-  memoryUsers.set('demo@wppflow.io', { id: 2, email: 'demo@wppflow.io', password_hash: demoHash, name: 'Aarav Mehta', company_name: 'Urban Threads', role: 'user', plan: 'Growth', sessions_limit: 5, created_at: new Date().toISOString() });
+  memoryUsers.set('admin@wppflow.io', { id: 1, email: 'admin@wppflow.io', password_hash: adminHash, name: 'Super Admin', company_name: 'WppFlow HQ', role: 'admin', status: 'active', plan: 'Enterprise', sessions_limit: 25, created_at: new Date().toISOString() });
+  memoryUsers.set('demo@wppflow.io', { id: 2, email: 'demo@wppflow.io', password_hash: demoHash, name: 'Aarav Mehta', company_name: 'Urban Threads', role: 'user', status: 'active', plan: 'Growth', sessions_limit: 5, created_at: new Date().toISOString() });
 }
 
 // ─── USERS ───────────────────────────────────────────────────────────────────
 
-export async function createUser({ email, password, name, company_name = 'WppFlow Workspace', role = 'user', plan = 'Growth', sessions_limit = 5 }) {
+export async function createUser({ email, password, name, company_name = 'WppFlow Workspace', role = 'user', status = 'active', plan = 'Growth', sessions_limit = 5 }) {
   const password_hash = await hashPassword(password);
   const normalizedEmail = email.trim().toLowerCase();
 
   if (isPgConnected && pool) {
     try {
       const res = await pool.query(`
-        INSERT INTO users (email, password_hash, name, company_name, role, plan, sessions_limit)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        RETURNING id, email, name, company_name, role, plan, sessions_limit, created_at
-      `, [normalizedEmail, password_hash, name.trim(), company_name.trim(), role, plan, sessions_limit]);
+        INSERT INTO users (email, password_hash, name, company_name, role, status, plan, sessions_limit)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING id, email, name, company_name, role, status, plan, sessions_limit, created_at
+      `, [normalizedEmail, password_hash, name.trim(), company_name.trim(), role, status, plan, sessions_limit]);
       const user = res.rows[0];
       memoryUsers.set(normalizedEmail, { ...user, password_hash });
       return user;
@@ -201,7 +204,7 @@ export async function createUser({ email, password, name, company_name = 'WppFlo
   }
 
   if (memoryUsers.has(normalizedEmail)) throw new Error('Email already registered');
-  const newUser = { id: memoryUsers.size + 1, email: normalizedEmail, password_hash, name: name.trim(), company_name: company_name.trim(), role, plan, sessions_limit, created_at: new Date().toISOString() };
+  const newUser = { id: memoryUsers.size + 1, email: normalizedEmail, password_hash, name: name.trim(), company_name: company_name.trim(), role, status, plan, sessions_limit, created_at: new Date().toISOString() };
   memoryUsers.set(normalizedEmail, newUser);
   const { password_hash: _, ...safeUser } = newUser;
   return safeUser;
@@ -221,7 +224,7 @@ export async function findUserByEmail(email) {
 export async function findUserById(id) {
   if (isPgConnected && pool) {
     try {
-      const res = await pool.query('SELECT id, email, name, company_name, role, plan, sessions_limit, created_at FROM users WHERE id = $1', [id]);
+      const res = await pool.query('SELECT id, email, name, company_name, role, status, plan, sessions_limit, created_at FROM users WHERE id = $1', [id]);
       if (res.rows.length > 0) return res.rows[0];
     } catch (err) { console.warn('PG read error:', err.message); }
   }
@@ -234,20 +237,76 @@ export async function findUserById(id) {
 export async function getAllUsers() {
   if (isPgConnected && pool) {
     try {
-      const res = await pool.query('SELECT id, email, name, company_name, role, plan, sessions_limit, created_at FROM users ORDER BY id DESC');
+      const res = await pool.query('SELECT id, email, name, company_name, role, status, plan, sessions_limit, created_at FROM users ORDER BY id DESC');
       return res.rows;
     } catch (err) { console.warn('PG read error:', err.message); }
   }
   return Array.from(memoryUsers.values()).map(({ password_hash: _, ...s }) => s);
 }
 
+export async function updateUser(userId, updates = {}) {
+  const allowed = {
+    name: 'name', email: 'email', companyName: 'company_name', role: 'role',
+    status: 'status', plan: 'plan', sessionsLimit: 'sessions_limit'
+  };
+  const entries = Object.entries(updates).filter(([key, value]) => allowed[key] && value !== undefined);
+  if (!entries.length) return await findUserById(userId);
+
+  if (isPgConnected && pool) {
+    try {
+      const fields = [];
+      const values = [];
+      entries.forEach(([key, value], index) => {
+        fields.push(`${allowed[key]} = $${index + 1}`);
+        values.push(key === 'email' ? String(value).trim().toLowerCase() : value);
+      });
+      values.push(userId);
+      const result = await pool.query(`UPDATE users SET ${fields.join(', ')} WHERE id = $${values.length} RETURNING id, email, name, company_name, role, status, plan, sessions_limit, created_at`, values);
+      if (!result.rows[0]) return null;
+      memoryUsers.set(result.rows[0].email, { ...result.rows[0], password_hash: memoryUsers.get(result.rows[0].email)?.password_hash });
+      return result.rows[0];
+    } catch (err) {
+      if (err.code === '23505') throw new Error('Email already registered');
+      console.warn('PG user update error:', err.message);
+    }
+  }
+
+  const current = Array.from(memoryUsers.values()).find((entry) => entry.id === Number(userId));
+  if (!current) return null;
+  const next = { ...current };
+  for (const [key, value] of entries) next[allowed[key]] = key === 'email' ? String(value).trim().toLowerCase() : value;
+  if (next.email !== current.email && memoryUsers.has(next.email)) throw new Error('Email already registered');
+  memoryUsers.delete(current.email);
+  memoryUsers.set(next.email, next);
+  const { password_hash: _, ...safeUser } = next;
+  return safeUser;
+}
+
+export async function deleteUser(userId) {
+  if (isPgConnected && pool) {
+    try {
+      const result = await pool.query('DELETE FROM users WHERE id = $1 RETURNING id, email, name, company_name, role, status', [userId]);
+      return result.rows[0] || null;
+    } catch (err) { console.warn('PG user delete error:', err.message); }
+  }
+  const entry = Array.from(memoryUsers.values()).find((user) => user.id === Number(userId));
+  if (!entry) return null;
+  memoryUsers.delete(entry.email);
+  const { password_hash: _, ...safeUser } = entry;
+  return safeUser;
+}
+
 /** Return the user ids that share the authenticated user's workspace. */
 export async function getWorkspaceUserIds(userId) {
   const user = await findUserById(userId);
   if (!user) return [];
-  if (user.role === 'superadmin' || user.email === process.env.SUPERADMIN_EMAIL || user.email === 'admin@wppflow.io') {
+  const platformEmail = (process.env.SUPERADMIN_EMAIL || 'admin@wppflow.io').toLowerCase();
+  if (user.email?.toLowerCase() === platformEmail) {
     return (await getAllUsers()).map((entry) => Number(entry.id));
   }
+  // Employees work only their own WhatsApp line and inbox. Tenant admins
+  // receive the whole company workspace below.
+  if (user.role !== 'admin') return [Number(user.id)];
   if (isPgConnected && pool) {
     try {
       const res = await pool.query('SELECT id FROM users WHERE company_name = $1', [user.company_name]);
