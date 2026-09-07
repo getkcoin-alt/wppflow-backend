@@ -446,7 +446,15 @@ async function recoverPersistedSessions() {
     // every directory starts one Chromium process per abandoned QR attempt and
     // can exhaust the container. Only sessions that previously connected are
     // recorded in this registry and eligible for automatic recovery.
-    const registeredSessions = readConnectedSessions();
+    let registeredSessions = readConnectedSessions();
+    if (!registeredSessions.length) {
+      const pool = getPool();
+      if (pool) {
+        const { rows } = await pool.query(`SELECT channel AS name, MIN(user_id) AS "ownerId" FROM chats WHERE channel LIKE '%whatsapp%' GROUP BY channel`);
+        registeredSessions = rows.map((entry) => ({ name: entry.name, ownerId: Number(entry.ownerId) || null }));
+        if (registeredSessions.length) console.log(`🔄 Recovering WhatsApp sessions from workspace chats: ${registeredSessions.map((entry) => entry.name).join(', ')}`);
+      }
+    }
     if (!registeredSessions.length) { console.log('ℹ️  No connected sessions to recover.'); return; }
     console.log(`🔄 Recovering connected sessions: ${registeredSessions.map((entry) => entry.name).join(', ')}`);
     for (const entry of registeredSessions) {
