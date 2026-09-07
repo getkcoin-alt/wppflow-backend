@@ -471,7 +471,8 @@ app.post('/api/sessions/:session/send-message', authenticateToken, async (req, r
   if (!s?.client) return res.status(400).json({ status: 'error', message: `Session '${req.params.session}' not connected` });
   if (!await canAccessSession(req.user.id, req.params.session, s)) return res.status(403).json({ status: 'error', message: 'Session is outside the current workspace' });
   try {
-    const target = req.body.phone.includes('@') ? req.body.phone : `${req.body.phone.replace(/\D/g, '')}@c.us`;
+    if (!req.body?.message?.trim()) return res.status(400).json({ status: 'error', message: 'message is required' });
+    const target = whatsappTarget(req.body.phone);
     const result = await s.client.sendText(target, req.body.message);
     res.json({ status: 'success', response: { id: result.id, to: target, body: req.body.message, timestamp: Math.floor(Date.now() / 1000) } });
   } catch (e) { res.status(500).json({ status: 'error', message: e.message }); }
@@ -554,7 +555,8 @@ app.post('/api/sessions/:session/send-buttons', authenticateToken, async (req, r
   if (!s?.client) return res.status(400).json({ status: 'error', message: `Session '${req.params.session}' not connected` });
   if (!await canAccessSession(req.user.id, req.params.session, s)) return res.status(403).json({ status: 'error', message: 'Session is outside the current workspace' });
   try {
-    const target = req.body.phone.includes('@') ? req.body.phone : `${req.body.phone.replace(/\D/g, '')}@c.us`;
+    if (!Array.isArray(req.body?.buttons) || !req.body.buttons.length) return res.status(400).json({ status: 'error', message: 'buttons are required' });
+    const target = whatsappTarget(req.body.phone);
     const result = await s.client.sendButtonList(target, req.body.title, req.body.buttons.map((b, i) => ({ id: b.id || `btn_${i}`, text: b.text || b.label })));
     res.json({ status: 'success', response: result });
   } catch (e) { res.status(500).json({ status: 'error', message: e.message }); }
