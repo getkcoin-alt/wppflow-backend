@@ -245,7 +245,7 @@ export async function getAllUsers() {
 export async function getWorkspaceUserIds(userId) {
   const user = await findUserById(userId);
   if (!user) return [];
-  if (user.role === 'superadmin') {
+  if (user.role === 'superadmin' || user.email === process.env.SUPERADMIN_EMAIL || user.email === 'admin@wppflow.io') {
     return (await getAllUsers()).map((entry) => Number(entry.id));
   }
   if (isPgConnected && pool) {
