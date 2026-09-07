@@ -254,6 +254,7 @@ export async function updateUser(userId, updates = {}) {
 
   if (isPgConnected && pool) {
     try {
+      const cachedBeforeUpdate = Array.from(memoryUsers.values()).find((entry) => entry.id === Number(userId));
       const fields = [];
       const values = [];
       entries.forEach(([key, value], index) => {
@@ -263,7 +264,8 @@ export async function updateUser(userId, updates = {}) {
       values.push(userId);
       const result = await pool.query(`UPDATE users SET ${fields.join(', ')} WHERE id = $${values.length} RETURNING id, email, name, company_name, role, status, plan, sessions_limit, created_at`, values);
       if (!result.rows[0]) return null;
-      memoryUsers.set(result.rows[0].email, { ...result.rows[0], password_hash: memoryUsers.get(result.rows[0].email)?.password_hash });
+      if (cachedBeforeUpdate?.email && cachedBeforeUpdate.email !== result.rows[0].email) memoryUsers.delete(cachedBeforeUpdate.email);
+      memoryUsers.set(result.rows[0].email, { ...result.rows[0], password_hash: cachedBeforeUpdate?.password_hash });
       return result.rows[0];
     } catch (err) {
       if (err.code === '23505') throw new Error('Email already registered');
@@ -286,6 +288,7 @@ export async function deleteUser(userId) {
   if (isPgConnected && pool) {
     try {
       const result = await pool.query('DELETE FROM users WHERE id = $1 RETURNING id, email, name, company_name, role, status', [userId]);
+      if (result.rows[0]) memoryUsers.delete(result.rows[0].email);
       return result.rows[0] || null;
     } catch (err) { console.warn('PG user delete error:', err.message); }
   }
