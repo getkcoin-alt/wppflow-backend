@@ -74,23 +74,28 @@ console.log(`📋 Node: ${process.version}`);
 // ─────────────────────────────────────────────────────────────────────────────
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-function readConnectedSessionNames() {
+function readConnectedSessions() {
   try {
     const value = JSON.parse(fs.readFileSync(SESSION_REGISTRY, 'utf8'));
-    return Array.isArray(value) ? value.filter(name => typeof name === 'string') : [];
+    if (!Array.isArray(value)) return [];
+    return value.map((entry) => typeof entry === 'string' ? { name: entry, ownerId: null } : entry)
+      .filter((entry) => typeof entry?.name === 'string')
+      .map((entry) => ({ name: entry.name, ownerId: entry.ownerId ? Number(entry.ownerId) : null }));
   } catch (e) {
     if (e.code !== 'ENOENT') console.warn(`⚠️  Could not read session registry: ${e.message}`);
     return [];
   }
 }
 
-function setSessionRegistered(sessionName, registered) {
-  const names = new Set(readConnectedSessionNames());
-  if (registered) names.add(sessionName);
-  else names.delete(sessionName);
+function setSessionRegistered(sessionName, registered, ownerId = null) {
+  const sessionsInRegistry = readConnectedSessions().filter((entry) => entry.name !== sessionName);
+  if (registered) {
+    const previous = readConnectedSessions().find((entry) => entry.name === sessionName);
+    sessionsInRegistry.push({ name: sessionName, ownerId: ownerId || previous?.ownerId || null });
+  }
   const temporaryFile = `${SESSION_REGISTRY}.${process.pid}.tmp`;
   try {
-    fs.writeFileSync(temporaryFile, JSON.stringify([...names].sort()));
+    fs.writeFileSync(temporaryFile, JSON.stringify(sessionsInRegistry.sort((a, b) => a.name.localeCompare(b.name))));
     fs.renameSync(temporaryFile, SESSION_REGISTRY);
   } catch (e) {
     console.warn(`⚠️  Could not update session registry: ${e.message}`);
@@ -262,7 +267,7 @@ async function startSession(sessionName, ownerId = null) {
           sd.status = 'CONNECTED';
           sd.qrcode = null;
           sd.error = null;
-          setSessionRegistered(sessionName, true);
+          setSessionRegistered(sessionName, true, sd.ownerId);
           io.emit('session:status', { session, status: 'CONNECTED' });
 
         } else if (['isLogged', 'inChat'].includes(statusSession)) {
@@ -318,7 +323,7 @@ async function startSession(sessionName, ownerId = null) {
         sd.status = 'CONNECTED';
         sd.qrcode = null;
         sd.error = null;
-        setSessionRegistered(sessionName, true);
+        setSessionRegistered(sessionName, true, sd.ownerId);
         io.emit('session:status', { session: sessionName, status: 'CONNECTED' });
       }
     }
@@ -368,12 +373,13 @@ async function recoverPersistedSessions() {
     // every directory starts one Chromium process per abandoned QR attempt and
     // can exhaust the container. Only sessions that previously connected are
     // recorded in this registry and eligible for automatic recovery.
-    const names = readConnectedSessionNames();
-    if (!names.length) { console.log('ℹ️  No connected sessions to recover.'); return; }
-    console.log(`🔄 Recovering connected sessions: ${names.join(', ')}`);
-    for (const name of names) {
+    const registeredSessions = readConnectedSessions();
+    if (!registeredSessions.length) { console.log('ℹ️  No connected sessions to recover.'); return; }
+    console.log(`🔄 Recovering connected sessions: ${registeredSessions.map((entry) => entry.name).join(', ')}`);
+    for (const entry of registeredSessions) {
+      const name = entry.name;
       await sleep(3000);
-      startSession(name)
+      startSession(name, entry.ownerId)
         .then(() => console.log(`♻️  Recovered: ${name}`))
         .catch(e => {
           // Suppress autocloseCalled noise on recovery

@@ -6,7 +6,8 @@ import {
   findUserById, 
   getAllUsers, 
   comparePassword,
-  getDatabaseStatus 
+  getDatabaseStatus,
+  getWorkspaceUserIds
 } from '../db.js';
 
 const router = express.Router();
@@ -79,6 +80,7 @@ router.post('/signup', async (req, res) => {
 
     // First-ever account (empty DB) becomes the initial admin
     const allUsers = await getAllUsers();
+    const workspaceUserIds = await getWorkspaceUserIds(actor.id);
     if (allUsers.length === 0) {
       assignedRole = 'admin';
     }
@@ -196,7 +198,10 @@ router.get('/users', authenticateToken, async (req, res) => {
     if (!actor || !['admin', 'superadmin'].includes(actor.role)) {
       return res.status(403).json({ status: 'error', message: 'Admin access required.' });
     }
-    const users = await getAllUsers();
+    const allUsers = await getAllUsers();
+    const users = isSuperAdmin(actor)
+      ? allUsers
+      : allUsers.filter((entry) => workspaceUserIds.includes(Number(entry.id)));
     res.json({
       status: 'success',
       count: users.length,
