@@ -354,7 +354,12 @@ router.get('/status', (req, res) => {
   res.json({
     status: 'ok',
     auth: 'jwt-ready',
-    database: getDatabaseStatus()
+    database: getDatabaseStatus(),
+    email: {
+      provider: 'resend',
+      configured: Boolean(process.env.RESEND_API_KEY && process.env.EMAIL_FROM),
+      sender: process.env.EMAIL_FROM || null,
+    }
   });
 });
 
