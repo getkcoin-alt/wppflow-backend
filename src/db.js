@@ -138,6 +138,7 @@ export async function initDatabase() {
           created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
       `);
+      await client.query(`ALTER TABLE messages ALTER COLUMN media_url TYPE TEXT`);
 
       console.log('✅ PostgreSQL Schema verified: all tables ready.');
       client.release();
@@ -240,16 +241,35 @@ export async function getAllUsers() {
   return Array.from(memoryUsers.values()).map(({ password_hash: _, ...s }) => s);
 }
 
+/** Return the user ids that share the authenticated user's workspace. */
+export async function getWorkspaceUserIds(userId) {
+  const user = await findUserById(userId);
+  if (!user) return [];
+  if (user.role === 'superadmin') {
+    return (await getAllUsers()).map((entry) => Number(entry.id));
+  }
+  if (isPgConnected && pool) {
+    try {
+      const res = await pool.query('SELECT id FROM users WHERE company_name = $1', [user.company_name]);
+      return res.rows.map((entry) => Number(entry.id));
+    } catch (err) { console.warn('PG workspace read error:', err.message); }
+  }
+  return Array.from(memoryUsers.values())
+    .filter((entry) => entry.company_name === user.company_name)
+    .map((entry) => Number(entry.id));
+}
+
 // ─── CONTACTS ────────────────────────────────────────────────────────────────
 
 export async function getContacts(userId) {
+  const workspaceUserIds = await getWorkspaceUserIds(userId);
   if (isPgConnected && pool) {
     try {
-      const res = await pool.query('SELECT * FROM contacts WHERE user_id = $1 ORDER BY created_at DESC', [userId]);
+      const res = await pool.query('SELECT * FROM contacts WHERE user_id = ANY($1::int[]) ORDER BY created_at DESC', [workspaceUserIds]);
       return res.rows.map(normalizeContact);
     } catch (err) { console.warn('PG contacts read error:', err.message); }
   }
-  return Array.from(memoryContacts.values()).filter(c => c.user_id === userId).map(normalizeContact);
+  return Array.from(memoryContacts.values()).filter(c => workspaceUserIds.includes(Number(c.user_id))).map(normalizeContact);
 }
 
 export async function createContact(userId, data) {
@@ -291,13 +311,14 @@ function normalizeContact(row) {
 // ─── CHATS ───────────────────────────────────────────────────────────────────
 
 export async function getChats(userId) {
+  const workspaceUserIds = await getWorkspaceUserIds(userId);
   if (isPgConnected && pool) {
     try {
-      const res = await pool.query('SELECT * FROM chats WHERE user_id = $1 ORDER BY created_at DESC', [userId]);
+      const res = await pool.query('SELECT * FROM chats WHERE user_id = ANY($1::int[]) ORDER BY created_at DESC', [workspaceUserIds]);
       return res.rows.map(normalizeChat);
     } catch (err) { console.warn('PG chats read error:', err.message); }
   }
-  return Array.from(memoryChats.values()).filter(c => c.user_id === userId).map(normalizeChat);
+  return Array.from(memoryChats.values()).filter(c => workspaceUserIds.includes(Number(c.user_id))).map(normalizeChat);
 }
 
 export async function createChat(userId, data) {
@@ -316,6 +337,7 @@ export async function createChat(userId, data) {
 }
 
 export async function updateChat(userId, chatId, updates) {
+  const workspaceUserIds = await getWorkspaceUserIds(userId);
   if (isPgConnected && pool) {
     try {
       const fields = [];
@@ -326,12 +348,13 @@ export async function updateChat(userId, chatId, updates) {
       if (updates.unreadCount !== undefined) { fields.push(`unread_count = $${i++}`); vals.push(updates.unreadCount); }
       if (updates.lastMessage !== undefined) { fields.push(`last_message = $${i++}`); vals.push(JSON.stringify(updates.lastMessage)); }
       if (fields.length === 0) return;
-      vals.push(chatId, userId);
-      await pool.query(`UPDATE chats SET ${fields.join(', ')} WHERE id = $${i++} AND user_id = $${i}`, vals);
+      vals.push(chatId, workspaceUserIds);
+      await pool.query(`UPDATE chats SET ${fields.join(', ')} WHERE id = $${i++} AND user_id = ANY($${i}::int[])`, vals);
     } catch (err) { console.warn('PG chat update error:', err.message); }
   }
   if (memoryChats.has(chatId)) {
     const c = memoryChats.get(chatId);
+    if (!workspaceUserIds.includes(Number(c?.user_id))) return;
     memoryChats.set(chatId, { ...c, ...updates });
   }
 }
@@ -348,17 +371,33 @@ function normalizeChat(row) {
 
 // ─── MESSAGES ────────────────────────────────────────────────────────────────
 
-export async function getMessages(chatId) {
+export async function getMessages(chatId, userId = null) {
+  const workspaceUserIds = userId ? await getWorkspaceUserIds(userId) : null;
   if (isPgConnected && pool) {
     try {
-      const res = await pool.query('SELECT * FROM messages WHERE chat_id = $1 ORDER BY created_at ASC', [chatId]);
+      const params = userId ? [chatId, workspaceUserIds] : [chatId];
+      const accessClause = userId ? ' AND c.user_id = ANY($2::int[])' : '';
+      const res = await pool.query(`SELECT m.* FROM messages m JOIN chats c ON c.id = m.chat_id WHERE m.chat_id = $1${accessClause} ORDER BY m.created_at ASC`, params);
       return res.rows.map(normalizeMessage);
     } catch (err) { console.warn('PG messages read error:', err.message); }
   }
+  const chat = memoryChats.get(chatId);
+  if (userId && !workspaceUserIds.includes(Number(chat?.user_id))) return [];
   return (memoryMessages.get(chatId) || []).map(normalizeMessage);
 }
 
-export async function createMessage(chatId, data) {
+export async function createMessage(chatId, data, userId = null) {
+  if (userId) {
+    const workspaceUserIds = await getWorkspaceUserIds(userId);
+    let ownerId = null;
+    if (isPgConnected && pool) {
+      const result = await pool.query('SELECT user_id FROM chats WHERE id = $1', [chatId]);
+      ownerId = result.rows[0]?.user_id;
+    } else {
+      ownerId = memoryChats.get(chatId)?.user_id;
+    }
+    if (!workspaceUserIds.includes(Number(ownerId))) throw new Error('Chat is outside the current workspace');
+  }
   const id = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const msg = { id, chat_id: chatId, sender: data.sender, agent_name: data.agentName || '', text: data.text || '', type: data.type || 'text', media_url: data.mediaUrl || '', file_name: data.fileName || '', file_size: data.fileSize || '', audio_duration: data.audioDuration || '', buttons: data.buttons || [], is_note: data.isNote || false, status: data.status || 'sent', timestamp: data.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), created_at: new Date().toISOString() };
 

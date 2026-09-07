@@ -72,7 +72,7 @@ router.patch('/chats/:id', authenticateToken, async (req, res) => {
 
 router.get('/chats/:chatId/messages', authenticateToken, async (req, res) => {
   try {
-    const messages = await getMessages(req.params.chatId);
+    const messages = await getMessages(req.params.chatId, req.user.id);
     res.json({ status: 'success', messages });
   } catch (err) {
     res.status(500).json({ status: 'error', message: err.message });
@@ -81,7 +81,7 @@ router.get('/chats/:chatId/messages', authenticateToken, async (req, res) => {
 
 router.post('/chats/:chatId/messages', authenticateToken, async (req, res) => {
   try {
-    const message = await createMessage(req.params.chatId, req.body);
+    const message = await createMessage(req.params.chatId, req.body, req.user.id);
     res.status(201).json({ status: 'success', message });
   } catch (err) {
     res.status(500).json({ status: 'error', message: err.message });

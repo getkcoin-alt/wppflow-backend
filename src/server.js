@@ -16,10 +16,12 @@ import {
   updateChat,
   getAutomations,
   getCampaigns,
-  getPool
+  getPool,
+  getWorkspaceUserIds
 } from './db.js';
 import authRoutes from './routes/authRoutes.js';
-import { authenticateToken } from './routes/authRoutes.js';
+import { authenticateToken, JWT_SECRET } from './routes/authRoutes.js';
+import jwt from 'jsonwebtoken';
 import dataRoutes from './routes/dataRoutes.js';
 
 dotenv.config();
@@ -56,6 +58,14 @@ const server = http.createServer(app);
 const io = new SocketIOServer(server, { cors: { origin: '*' } });
 
 const sessions = new Map();
+
+async function canAccessSession(userId, sessionName, session) {
+  if (!session) return false;
+  const ownerId = session.ownerId || await resolveSessionOwner(sessionName);
+  if (!ownerId) return true;
+  const workspaceIds = await getWorkspaceUserIds(userId);
+  return workspaceIds.includes(Number(ownerId));
+}
 
 console.log('🚀 WppFlow Core Backend Engine starting...');
 console.log(`📁 Token dir: ${path.resolve(TOKEN_DIR)}`);
@@ -175,15 +185,26 @@ async function handleInboundMessage(sessionName, message) {
       const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       chat = await createChat(userId, { contactName: senderName, phone: senderPhone, avatar: '', channel: sessionName, assignedTo: '', isGroup: false, lastMessage: { text: message.body || '', timestamp: ts, status: 'delivered', fromMe: false }, tags: [] });
       console.log(`💬 [${sessionName}] New chat: ${chat.id}`);
-      io.emit('chat:created', { session: sessionName, chat });
+      io.to(`workspace:${userId}`).emit('chat:created', { session: sessionName, chat });
     }
     const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const saved = await createMessage(chat.id, { sender: 'customer', agentName: senderName, text: message.body || '', type: message.type || 'text', status: 'delivered', timestamp: ts });
     await updateChat(userId, chat.id, { unreadCount: (chat.unreadCount || 0) + 1, lastMessage: { text: message.body || '', timestamp: ts, status: 'delivered', fromMe: false } });
-    io.emit('session:message', { session: sessionName, chatId: chat.id, message: { id: message.id, from: message.from, senderName, body: message.body, type: message.type, timestamp: ts, savedMessageId: saved.id } });
+    io.to(`workspace:${userId}`).emit('session:message', { session: sessionName, chatId: chat.id, message: { id: message.id, from: message.from, senderName, body: message.body, type: message.type, timestamp: ts, savedMessageId: saved.id } });
     return { userId, chat };
   } catch (e) { console.error(`Inbound error [${sessionName}]:`, e.message); return null; }
 }
+
+io.use(async (socket, next) => {
+  try {
+    const token = socket.handshake.auth?.token;
+    if (!token) return next(new Error('Authentication required'));
+    socket.user = jwt.verify(token, JWT_SECRET);
+    const workspaceIds = await getWorkspaceUserIds(socket.user.id);
+    workspaceIds.forEach((id) => socket.join(`workspace:${id}`));
+    next();
+  } catch (error) { next(new Error('Invalid socket credentials')); }
+});
 
 io.on('connection', (socket) => {
   console.log(`⚡ Socket: ${socket.id}`);
@@ -384,12 +405,16 @@ app.get('/health', (req, res) => res.json({
   uptime: Math.floor(process.uptime()), timestamp: new Date().toISOString()
 }));
 
-app.get('/api/sessions', authenticateToken, (req, res) => {
-  res.json({ status: 'success', sessions: Array.from(sessions.entries()).map(([name, d]) => ({
+app.get('/api/sessions', authenticateToken, async (req, res) => {
+  const visible = [];
+  for (const [name, d] of sessions.entries()) {
+    if (await canAccessSession(req.user.id, name, d)) visible.push({
     sessionKey: name, status: d.status, phone: d.phone,
     battery: d.battery, antiBanHealth: d.antiBanHealth,
     warmupDay: d.warmupDay, hasQr: !!d.qrcode, lastActive: d.lastActive
-  })) });
+    });
+  }
+  res.json({ status: 'success', sessions: visible });
 });
 
 app.post('/api/sessions/start', authenticateToken, async (req, res) => {
@@ -405,6 +430,9 @@ app.post('/api/sessions/start', authenticateToken, async (req, res) => {
 
 app.delete('/api/sessions/:session', authenticateToken, async (req, res) => {
   const s = sessions.get(req.params.session);
+  if (s && !await canAccessSession(req.user.id, req.params.session, s)) {
+    return res.status(403).json({ status: 'error', message: 'Session is outside the current workspace' });
+  }
   if (s && !s.client && ['STARTING', 'QRCODE', 'AUTHENTICATING'].includes(s.status)) {
     return res.status(409).json({
       status: 'error',
@@ -418,21 +446,24 @@ app.delete('/api/sessions/:session', authenticateToken, async (req, res) => {
   res.json({ status: 'success', message: `Session '${req.params.session}' removed` });
 });
 
-app.get('/api/sessions/:session/qr', authenticateToken, (req, res) => {
+app.get('/api/sessions/:session/qr', authenticateToken, async (req, res) => {
   const s = sessions.get(req.params.session);
   if (!s) return res.status(404).json({ status: 'error', message: 'Session not found' });
+  if (!await canAccessSession(req.user.id, req.params.session, s)) return res.status(403).json({ status: 'error', message: 'Session is outside the current workspace' });
   res.json({ status: 'success', session: req.params.session, sessionStatus: s.status, qrcode: s.qrcode, error: s.error });
 });
 
-app.get('/api/sessions/:session/status', authenticateToken, (req, res) => {
+app.get('/api/sessions/:session/status', authenticateToken, async (req, res) => {
   const s = sessions.get(req.params.session);
   if (!s) return res.status(404).json({ status: 'error', message: 'Session not found' });
+  if (!await canAccessSession(req.user.id, req.params.session, s)) return res.status(403).json({ status: 'error', message: 'Session is outside the current workspace' });
   res.json({ status: 'success', session: req.params.session, sessionStatus: s.status, phone: s.phone, battery: s.battery, antiBanHealth: s.antiBanHealth, error: s.error });
 });
 
 app.post('/api/sessions/:session/send-message', authenticateToken, async (req, res) => {
   const s = sessions.get(req.params.session);
   if (!s?.client) return res.status(400).json({ status: 'error', message: `Session '${req.params.session}' not connected` });
+  if (!await canAccessSession(req.user.id, req.params.session, s)) return res.status(403).json({ status: 'error', message: 'Session is outside the current workspace' });
   try {
     const target = req.body.phone.includes('@') ? req.body.phone : `${req.body.phone.replace(/\D/g, '')}@c.us`;
     const result = await s.client.sendText(target, req.body.message);
@@ -440,9 +471,82 @@ app.post('/api/sessions/:session/send-message', authenticateToken, async (req, r
   } catch (e) { res.status(500).json({ status: 'error', message: e.message }); }
 });
 
+function whatsappTarget(phone) {
+  if (typeof phone !== 'string' || !phone.trim()) throw new Error('phone is required');
+  return phone.includes('@') ? phone : `${phone.replace(/\D/g, '')}@c.us`;
+}
+
+async function getAuthorizedClient(req, res) {
+  const sessionName = req.params.session;
+  const session = sessions.get(sessionName);
+  if (!session?.client) {
+    res.status(400).json({ status: 'error', message: `Session '${sessionName}' not connected` });
+    return null;
+  }
+  if (!await canAccessSession(req.user.id, sessionName, session)) {
+    res.status(403).json({ status: 'error', message: 'Session is outside the current workspace' });
+    return null;
+  }
+  return session.client;
+}
+
+// WPPConnect media, contact, location and forwarding primitives. Payloads use
+// data URLs so the Vercel UI can send files without a separate object store.
+app.post('/api/sessions/:session/send-media', authenticateToken, async (req, res) => {
+  try {
+    const client = await getAuthorizedClient(req, res);
+    if (!client) return;
+    const { phone, data, filename = 'attachment', caption = '', kind = 'file' } = req.body || {};
+    if (!data || typeof data !== 'string' || !data.startsWith('data:')) return res.status(400).json({ status: 'error', message: 'data must be a data URL' });
+    const target = whatsappTarget(phone);
+    let result;
+    if (kind === 'sticker') result = await client.sendImageAsSticker(target, data);
+    else if (kind === 'sticker-gif') result = await client.sendImageAsStickerGif(target, data);
+    else if (kind === 'image') result = await client.sendImageFromBase64(target, data, filename, caption);
+    else result = await client.sendFile(target, data, { filename, caption, type: kind === 'audio' ? 'audio' : kind === 'video' ? 'video' : 'auto-detect' });
+    res.json({ status: 'success', response: result });
+  } catch (e) { res.status(500).json({ status: 'error', message: e.message || 'Media send failed' }); }
+});
+
+app.post('/api/sessions/:session/send-contact', authenticateToken, async (req, res) => {
+  try {
+    const client = await getAuthorizedClient(req, res);
+    if (!client) return;
+    const target = whatsappTarget(req.body?.phone);
+    const contacts = Array.isArray(req.body?.contacts) ? req.body.contacts : [{ id: whatsappTarget(req.body?.contactPhone), name: req.body?.name || '' }];
+    const result = await client.sendContactVcardList(target, contacts.map((entry) => ({ id: whatsappTarget(entry.id || entry.phone), name: entry.name || '' })));
+    res.json({ status: 'success', response: result });
+  } catch (e) { res.status(500).json({ status: 'error', message: e.message || 'Contact send failed' }); }
+});
+
+app.post('/api/sessions/:session/send-location', authenticateToken, async (req, res) => {
+  try {
+    const client = await getAuthorizedClient(req, res);
+    if (!client) return;
+    const { phone, latitude, longitude, title = '' } = req.body || {};
+    const result = await client.sendLocation(whatsappTarget(phone), String(latitude), String(longitude), title);
+    res.json({ status: 'success', response: result });
+  } catch (e) { res.status(500).json({ status: 'error', message: e.message || 'Location send failed' }); }
+});
+
+app.post('/api/sessions/:session/forward', authenticateToken, async (req, res) => {
+  try {
+    const client = await getAuthorizedClient(req, res);
+    if (!client) return;
+    const target = whatsappTarget(req.body?.phone);
+    const messageIds = req.body?.messageIds || req.body?.messageId;
+    if (!messageIds) return res.status(400).json({ status: 'error', message: 'messageId or messageIds is required' });
+    const result = client.forwardMessagesV2
+      ? await client.forwardMessagesV2(target, messageIds)
+      : await client.forwardMessage(target, messageIds);
+    res.json({ status: 'success', response: result });
+  } catch (e) { res.status(500).json({ status: 'error', message: e.message || 'Forward failed' }); }
+});
+
 app.post('/api/sessions/:session/send-buttons', authenticateToken, async (req, res) => {
   const s = sessions.get(req.params.session);
   if (!s?.client) return res.status(400).json({ status: 'error', message: `Session '${req.params.session}' not connected` });
+  if (!await canAccessSession(req.user.id, req.params.session, s)) return res.status(403).json({ status: 'error', message: 'Session is outside the current workspace' });
   try {
     const target = req.body.phone.includes('@') ? req.body.phone : `${req.body.phone.replace(/\D/g, '')}@c.us`;
     const result = await s.client.sendButtonList(target, req.body.title, req.body.buttons.map((b, i) => ({ id: b.id || `btn_${i}`, text: b.text || b.label })));
@@ -451,14 +555,45 @@ app.post('/api/sessions/:session/send-buttons', authenticateToken, async (req, r
 });
 
 app.get('/api/sessions/:session/chats', authenticateToken, async (req, res) => {
-  const s = sessions.get(req.params.session);
-  if (!s?.client) return res.status(400).json({ status: 'error', message: `Session '${req.params.session}' not connected` });
-  try { res.json({ status: 'success', chats: await s.client.listChats({ count: 20 }) }); }
+  const client = await getAuthorizedClient(req, res);
+  if (!client) return;
+  try { res.json({ status: 'success', chats: await client.listChats({ count: Number(req.query.count) || 100 }) }); }
+  catch (e) { res.status(500).json({ status: 'error', message: e.message }); }
+});
+
+app.get('/api/sessions/:session/contacts', authenticateToken, async (req, res) => {
+  const client = await getAuthorizedClient(req, res);
+  if (!client) return;
+  try { res.json({ status: 'success', contacts: await client.getAllContacts() }); }
+  catch (e) { res.status(500).json({ status: 'error', message: e.message }); }
+});
+
+app.get('/api/sessions/:session/groups', authenticateToken, async (req, res) => {
+  const client = await getAuthorizedClient(req, res);
+  if (!client) return;
+  try { res.json({ status: 'success', groups: await client.getAllGroups() }); }
+  catch (e) { res.status(500).json({ status: 'error', message: e.message }); }
+});
+
+app.get('/api/sessions/:session/groups/:groupId/members', authenticateToken, async (req, res) => {
+  const client = await getAuthorizedClient(req, res);
+  if (!client) return;
+  try { res.json({ status: 'success', members: await client.getGroupMembers(req.params.groupId) }); }
+  catch (e) { res.status(500).json({ status: 'error', message: e.message }); }
+});
+
+app.get('/api/sessions/:session/blocklist', authenticateToken, async (req, res) => {
+  const client = await getAuthorizedClient(req, res);
+  if (!client) return;
+  try { res.json({ status: 'success', blocklist: await client.getBlockList() }); }
   catch (e) { res.status(500).json({ status: 'error', message: e.message }); }
 });
 
 app.post('/api/sessions/:session/close', authenticateToken, async (req, res) => {
   const s = sessions.get(req.params.session);
+  if (s && !await canAccessSession(req.user.id, req.params.session, s)) {
+    return res.status(403).json({ status: 'error', message: 'Session is outside the current workspace' });
+  }
   if (s?.client) { try { await s.client.close(); } catch (e) { console.warn('close:', e.message); } }
   sessions.delete(req.params.session);
   setSessionRegistered(req.params.session, false);

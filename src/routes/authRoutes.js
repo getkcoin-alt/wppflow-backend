@@ -10,7 +10,7 @@ import {
 } from '../db.js';
 
 const router = express.Router();
-const JWT_SECRET = process.env.JWT_SECRET;
+export const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
   console.error('❌ FATAL: JWT_SECRET environment variable is not set. Refusing to start.');
   process.exit(1);
@@ -192,6 +192,10 @@ router.get('/me', authenticateToken, async (req, res) => {
  */
 router.get('/users', authenticateToken, async (req, res) => {
   try {
+    const actor = await findUserById(req.user.id);
+    if (!actor || !['admin', 'superadmin'].includes(actor.role)) {
+      return res.status(403).json({ status: 'error', message: 'Admin access required.' });
+    }
     const users = await getAllUsers();
     res.json({
       status: 'success',
@@ -202,6 +206,68 @@ router.get('/users', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('Get users error:', error);
     res.status(500).json({ status: 'error', message: 'Failed to fetch users list' });
+  }
+});
+
+function isSuperAdmin(user) {
+  return user?.role === 'superadmin' || user?.email === process.env.SUPERADMIN_EMAIL || user?.email === 'admin@wppflow.io';
+}
+
+function temporaryPassword() {
+  return `${Math.random().toString(36).slice(2, 8)}-${Math.random().toString(36).slice(2, 6)}`;
+}
+
+async function deliverCredentials({ email, name, companyName, password }) {
+  const apiKey = process.env.RESEND_API_KEY;
+  const from = process.env.EMAIL_FROM;
+  if (!apiKey || !from) return { delivered: false, reason: 'email_not_configured' };
+  try {
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from,
+        to: [email],
+        subject: `Your ${companyName} WppFlow workspace access`,
+        text: `Hi ${name},\n\nYour WppFlow workspace has been created.\n\nEmail: ${email}\nTemporary password: ${password}\n\nSign in at ${process.env.APP_URL || 'https://wppflow-beige.vercel.app/'} and change your password after login.`,
+      }),
+    });
+    if (!response.ok) return { delivered: false, reason: 'email_provider_rejected' };
+    return { delivered: true };
+  } catch (error) {
+    console.warn('Credential email delivery failed:', error.message);
+    return { delivered: false, reason: 'email_provider_unavailable' };
+  }
+}
+
+/** Provision a company admin or workspace agent from an authorized admin. */
+router.post('/users', authenticateToken, async (req, res) => {
+  try {
+    const actor = await findUserById(req.user.id);
+    if (!actor || !['admin', 'superadmin'].includes(actor.role)) {
+      return res.status(403).json({ status: 'error', message: 'Admin access required.' });
+    }
+    const { email, name, companyName, role: requestedRole, password: suppliedPassword } = req.body || {};
+    if (!email || !name) return res.status(400).json({ status: 'error', message: 'Name and email are required.' });
+    const superAdmin = isSuperAdmin(actor);
+    const role = superAdmin
+      ? (['admin', 'superadmin'].includes(requestedRole) ? requestedRole : 'user')
+      : (['sales', 'support', 'user'].includes(requestedRole) ? requestedRole : 'user');
+    const workspaceName = superAdmin ? String(companyName || '').trim() : actor.company_name;
+    if (!workspaceName) return res.status(400).json({ status: 'error', message: 'companyName is required when creating a company.' });
+    const password = suppliedPassword || temporaryPassword();
+    const user = await createUser({ email, password, name, company_name: workspaceName, role });
+    const emailDelivery = await deliverCredentials({ email: user.email, name: user.name, companyName: workspaceName, password });
+    res.status(201).json({
+      status: 'success',
+      message: emailDelivery.delivered ? 'User created and credentials emailed.' : 'User created. Configure RESEND_API_KEY and EMAIL_FROM to email credentials automatically.',
+      user,
+      emailDelivery,
+      temporaryPassword: emailDelivery.delivered ? undefined : password,
+    });
+  } catch (error) {
+    const status = /already registered/i.test(error.message) ? 409 : 500;
+    res.status(status).json({ status: 'error', message: error.message || 'Could not create user.' });
   }
 });
 
