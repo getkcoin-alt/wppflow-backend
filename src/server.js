@@ -750,6 +750,24 @@ app.post('/api/sessions/:session/close', authenticateToken, async (req, res) => 
   res.json({ status: 'success', message: `Session '${req.params.session}' closed`, ...cleanup });
 });
 
+// On-demand inbox sync — forces re-import of WhatsApp chats, contacts, groups
+app.post('/api/sessions/:session/sync-inbox', authenticateToken, async (req, res) => {
+  const sessionName = req.params.session;
+  if (!isSafeSessionName(sessionName)) return res.status(400).json({ status: 'error', message: 'Invalid session name.' });
+  const s = sessions.get(sessionName);
+  if (!s?.client) return res.status(400).json({ status: 'error', message: `Session '${sessionName}' is not connected.` });
+  if (!await canAccessSession(req.user.id, sessionName, s)) {
+    return res.status(403).json({ status: 'error', message: 'Session is outside the current workspace.' });
+  }
+  try {
+    res.json({ status: 'success', message: `Inbox sync started for '${sessionName}'` });
+    // Run sync in background so response is immediate
+    syncRemoteChats(sessionName, s.client).catch(err => console.error(`Sync error [${sessionName}]:`, err.message));
+  } catch (e) {
+    res.status(500).json({ status: 'error', message: e.message });
+  }
+});
+
 // Campaign broadcast
 app.post('/api/campaigns/:id/send', authenticateToken, async (req, res) => {
   const userId = req.user.id;
