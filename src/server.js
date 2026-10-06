@@ -10,6 +10,7 @@ import {
   initDatabase,
   getDatabaseStatus,
   getContacts,
+  createContact,
   getChats,
   createChat,
   createMessage,
@@ -230,95 +231,234 @@ async function runAutomationEngine(sessionName, userId, message, client) {
   } catch (e) { console.error(`Automation engine error [${sessionName}]:`, e.message); }
 }
 
-async function handleInboundMessage(sessionName, message) {
-  if (message.fromMe || message.isGroupMsg) return;
+async function handleInboundMessage(sessionName, message, client) {
+  if (message.fromMe) return;
   const userId = await resolveSessionOwner(sessionName);
   if (!userId) { console.warn(`⚠️  [${sessionName}] No owner — message not persisted.`); return; }
   try {
-    const senderPhone = message.from.replace('@c.us', '');
-    const senderName = message.sender?.name || message.notifyName || senderPhone;
+    const isGroup = Boolean(message.isGroupMsg || String(message.from).includes('@g.us'));
+    const remoteId = message.from;
+    const senderPhone = isGroup ? remoteId : String(remoteId).replace('@c.us', '');
+    const senderName = message.sender?.name || message.notifyName || (isGroup ? (message.author ? String(message.author).replace('@c.us', '') : 'Member') : senderPhone);
+    const groupName = message.chat?.name || message.chat?.contact?.name || 'WhatsApp Group';
+    const contactName = isGroup ? groupName : senderName;
+
     const existing = await getChats(userId);
-    let chat = existing.find(c => c.phone === senderPhone || c.phone === message.from);
-    if (!chat) {
-      const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      chat = await createChat(userId, { contactName: senderName, phone: senderPhone, avatar: '', channel: sessionName, assignedTo: '', isGroup: false, lastMessage: { text: message.body || '', timestamp: ts, status: 'delivered', fromMe: false }, tags: [] });
-      console.log(`💬 [${sessionName}] New chat: ${chat.id}`);
-      io.to(`workspace:${userId}`).emit('chat:created', { session: sessionName, chat });
-      try {
-        const history = await client.getAllMessagesInChat(remoteId, true, false);
-        for (const item of (Array.isArray(history) ? history : []).slice(-50)) {
-          const itemTimestamp = item.t ? new Date(Number(item.t) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : timestamp;
-          await createMessage(chat.id, {
-            sender: item.fromMe ? 'agent' : 'customer',
-            agentName: item.fromMe ? 'WhatsApp Agent' : (item.sender?.name || contactName),
-            text: item.body || '',
-            type: item.type === 'chat' ? 'text' : (item.type || 'text'),
-            status: item.fromMe ? 'sent' : 'delivered',
-            timestamp: itemTimestamp,
-          });
-        }
-      } catch (error) {
-        console.warn(`⚠️  [${sessionName}] History sync skipped for ${remoteId}:`, error.message);
-      }
-    }
+    let chat = existing.find(c => c.phone === senderPhone || c.phone === remoteId);
     const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    const saved = await createMessage(chat.id, { sender: 'customer', agentName: senderName, text: message.body || '', type: message.type || 'text', status: 'delivered', timestamp: ts });
-    await updateChat(userId, chat.id, { unreadCount: (chat.unreadCount || 0) + 1, lastMessage: { text: message.body || '', timestamp: ts, status: 'delivered', fromMe: false } });
-    io.to(`workspace:${userId}`).emit('session:message', { session: sessionName, chatId: chat.id, message: { id: message.id, from: message.from, senderName, body: message.body, type: message.type, timestamp: ts, savedMessageId: saved.id } });
+    const msgText = message.body || message.caption || (message.type !== 'chat' ? `[${message.type}]` : '');
+
+    if (!chat) {
+      chat = await createChat(userId, {
+        contactName,
+        phone: senderPhone,
+        avatar: message.chat?.contact?.profilePicThumbObj?.eurl || '',
+        channel: sessionName,
+        assignedTo: '',
+        isGroup,
+        groupMembersCount: isGroup ? (message.chat?.groupMetadata?.participants?.length || 0) : 0,
+        lastMessage: { text: msgText, timestamp: ts, status: 'delivered', fromMe: false },
+        tags: isGroup ? ['Group'] : [],
+      });
+      console.log(`💬 [${sessionName}] New chat: ${chat.id} (${contactName})`);
+      io.to(`workspace:${userId}`).emit('chat:created', { session: sessionName, chat });
+    }
+
+    const saved = await createMessage(chat.id, {
+      sender: 'customer',
+      agentName: senderName,
+      text: msgText,
+      type: message.type === 'chat' ? 'text' : (message.type || 'text'),
+      mediaUrl: message.mediaUrl || '',
+      status: 'delivered',
+      timestamp: ts,
+    });
+
+    await updateChat(userId, chat.id, {
+      unreadCount: (chat.unreadCount || 0) + 1,
+      lastMessage: { text: msgText, timestamp: ts, status: 'delivered', fromMe: false },
+    });
+
+    io.to(`workspace:${userId}`).emit('session:message', {
+      session: sessionName,
+      chatId: chat.id,
+      message: {
+        id: message.id?._serialized || message.id || saved.id,
+        from: message.from,
+        senderName,
+        body: msgText,
+        type: message.type,
+        timestamp: ts,
+        savedMessageId: saved.id,
+      },
+    });
+
     return { userId, chat };
-  } catch (e) { console.error(`Inbound error [${sessionName}]:`, e.message); return null; }
+  } catch (e) {
+    console.error(`Inbound error [${sessionName}]:`, e.message);
+    return null;
+  }
 }
 
 async function syncRemoteChats(sessionName, client) {
   const userId = await resolveSessionOwner(sessionName);
-  if (!userId) return;
-  const remoteChats = await client.listChats({ count: 100 });
+  if (!userId) {
+    console.warn(`⚠️  [${sessionName}] No owner found to sync chats.`);
+    return;
+  }
+
+  console.log(`🔄 [${sessionName}] Starting comprehensive WhatsApp sync for owner ${userId}...`);
+
+  // 1. Sync Contacts into workspace contacts table
+  try {
+    const existingContacts = await getContacts(userId);
+    const existingPhones = new Set(existingContacts.map((c) => c.phone));
+    const rawContacts = await client.getAllContacts();
+    if (Array.isArray(rawContacts)) {
+      let contactsSynced = 0;
+      for (const rc of rawContacts) {
+        const rawId = rc.id?._serialized || rc.id;
+        if (!rawId || String(rawId).includes('@g.us') || rawId === 'status@broadcast') continue;
+        const phone = String(rc.id?.user || rawId).replace(/@c\.us$/, '');
+        if (!phone || existingPhones.has(phone)) continue;
+        const name = rc.name || rc.shortName || rc.pushname || rc.formattedName || phone;
+        const avatar = rc.profilePicThumbObj?.eurl || '';
+        await createContact(userId, {
+          name,
+          phone,
+          avatar,
+          tags: ['WhatsApp'],
+          channel: sessionName,
+          customTraits: rc.textStatusString ? { status: rc.textStatusString } : {},
+          lifetimeValue: 0,
+        });
+        existingPhones.add(phone);
+        contactsSynced++;
+        if (contactsSynced >= 300) break;
+      }
+      console.log(`📇 [${sessionName}] Synced ${contactsSynced} WhatsApp contacts`);
+    }
+  } catch (err) {
+    console.warn(`⚠️  [${sessionName}] Contact sync error:`, err.message);
+  }
+
+  // 2. Collect all conversations: groups + direct chats
+  const allConversations = [];
+  const seenIds = new Set();
+
+  // 2a. Fetch all groups
+  try {
+    const rawGroups = await client.getAllGroups();
+    if (Array.isArray(rawGroups)) {
+      for (const g of rawGroups) {
+        const gid = g.id?._serialized || g.id;
+        if (gid && !seenIds.has(gid)) {
+          allConversations.push({ ...g, _isGroup: true });
+          seenIds.add(gid);
+        }
+      }
+      console.log(`👥 [${sessionName}] Found ${rawGroups.length} WhatsApp groups`);
+    }
+  } catch (err) {
+    console.warn(`⚠️  [${sessionName}] Group fetch error:`, err.message);
+  }
+
+  // 2b. Fetch direct chats via listChats / getAllChats
+  try {
+    let rawChats = [];
+    try { rawChats = await client.listChats(); } catch {}
+    if (!Array.isArray(rawChats) || !rawChats.length) {
+      try { rawChats = await client.getAllChats(); } catch {}
+    }
+    if (Array.isArray(rawChats)) {
+      for (const c of rawChats) {
+        const cid = c.id?._serialized || c.id;
+        if (cid && cid !== 'status@broadcast' && !seenIds.has(cid)) {
+          allConversations.push(c);
+          seenIds.add(cid);
+        }
+      }
+      console.log(`💬 [${sessionName}] Found ${rawChats.length} active chats`);
+    }
+  } catch (err) {
+    console.warn(`⚠️  [${sessionName}] Chat fetch error:`, err.message);
+  }
+
+  // 3. Persist and import messages into database
   const existing = await getChats(userId);
-  for (const remote of remoteChats || []) {
+  let chatsCreated = 0;
+
+  for (const remote of allConversations) {
     const remoteId = remote.id?._serialized || remote.id;
     if (!remoteId || remoteId === 'status@broadcast') continue;
-    const phone = String(remoteId).replace(/@c\.us$|@g\.us$/, '');
-    const last = remote.lastMessage || {};
-    const timestamp = last.t ? new Date(Number(last.t) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—';
-    const isGroup = String(remoteId).includes('@g.us');
-    const contactName = remote.name || remote.contact?.pushname || remote.contact?.name || phone;
+    const isGroup = Boolean(remote._isGroup || String(remoteId).includes('@g.us') || remote.isGroup);
+    const phone = isGroup ? String(remoteId) : String(remoteId).replace(/@c\.us$/, '');
+    const last = remote.lastMessage || remote.lastReceivedKey || {};
+    const timestamp = remote.t
+      ? new Date(Number(remote.t) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : (last.t ? new Date(Number(last.t) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—');
+    const contactName = remote.name || remote.formattedTitle || remote.contact?.pushname || remote.contact?.name || (isGroup ? 'WhatsApp Group' : phone);
+    const avatar = remote.contact?.profilePicThumbObj?.eurl || '';
+    const groupMembersCount = remote.groupMetadata?.participants?.length || 0;
+
     let chat = existing.find((entry) => entry.phone === phone || entry.phone === remoteId);
     if (!chat) {
       chat = await createChat(userId, {
         contactName,
         phone,
-        avatar: remote.contact?.profilePicThumbObj?.eurl || '',
+        avatar,
         channel: sessionName,
         assignedTo: '',
         isGroup,
-        groupMembersCount: remote.groupMetadata?.participants?.length || 0,
-        lastMessage: { text: last.body || '', timestamp, status: 'delivered', fromMe: Boolean(last.fromMe) },
-        tags: [],
+        groupMembersCount,
+        lastMessage: {
+          text: last.body || (last.id ? 'Message' : ''),
+          timestamp,
+          status: 'delivered',
+          fromMe: Boolean(last.fromMe),
+        },
+        tags: isGroup ? ['Group'] : [],
       });
+      existing.push(chat);
+      chatsCreated++;
       io.to(`workspace:${userId}`).emit('chat:created', { session: sessionName, chat });
-    } else {
-      if (last.body) {
-        await updateChat(userId, chat.id, {
-          unreadCount: Number(remote.unreadCount || chat.unreadCount || 0),
-          lastMessage: { text: last.body, timestamp, status: 'delivered', fromMe: Boolean(last.fromMe) },
-        });
-      }
-      if (!last.body && !(await getMessages(chat.id)).length) {
-        try {
-          const history = await client.getAllMessagesInChat(remoteId, true, false);
-          for (const item of (Array.isArray(history) ? history : []).slice(-50)) {
-            const itemTimestamp = item.t ? new Date(Number(item.t) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : timestamp;
+    } else if (last.body) {
+      await updateChat(userId, chat.id, {
+        unreadCount: Number(remote.unreadCount || chat.unreadCount || 0),
+        lastMessage: { text: last.body, timestamp, status: 'delivered', fromMe: Boolean(last.fromMe) },
+      });
+    }
+
+    // Import recent messages if the chat thread has no messages in DB
+    try {
+      const existingMsgs = await getMessages(chat.id);
+      if (!existingMsgs || existingMsgs.length === 0) {
+        const history = await client.getAllMessagesInChat(remoteId, true, false);
+        if (Array.isArray(history) && history.length) {
+          for (const item of history.slice(-30)) {
+            const itemTimestamp = item.t
+              ? new Date(Number(item.t) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+              : timestamp;
+            const senderName = item.fromMe
+              ? 'Agent'
+              : (item.sender?.name || item.notifyName || (isGroup ? (item.author ? String(item.author).replace(/@c\.us$/, '') : 'Member') : contactName));
             await createMessage(chat.id, {
-              sender: item.fromMe ? 'agent' : 'customer', agentName: item.fromMe ? 'WhatsApp Agent' : (item.sender?.name || contactName),
-              text: item.body || '', type: item.type === 'chat' ? 'text' : (item.type || 'text'),
-              status: item.fromMe ? 'sent' : 'delivered', timestamp: itemTimestamp,
+              sender: item.fromMe ? 'agent' : 'customer',
+              agentName: senderName,
+              text: item.body || item.caption || (item.type !== 'chat' ? `[${item.type}]` : ''),
+              type: item.type === 'chat' ? 'text' : (item.type || 'text'),
+              status: item.fromMe ? 'sent' : 'delivered',
+              timestamp: itemTimestamp,
             });
           }
-        } catch (error) { console.warn(`⚠️  [${sessionName}] Existing history sync skipped for ${remoteId}:`, error.message); }
+        }
       }
+    } catch (msgErr) {
+      // Individual chat message sync error shouldn't halt loop
     }
   }
-  console.log(`🔄 [${sessionName}] Synced ${remoteChats?.length || 0} WhatsApp chats into the shared inbox`);
+
+  console.log(`✅ [${sessionName}] Inbox sync finished: ${chatsCreated} new chats created, total ${allConversations.length} processed`);
 }
 
 io.use(async (socket, next) => {
@@ -479,7 +619,7 @@ async function startSession(sessionName, ownerId = null) {
     }
 
     client.onMessage(async (msg) => {
-      const result = await handleInboundMessage(sessionName, msg);
+      const result = await handleInboundMessage(sessionName, msg, client);
       if (result?.userId) await runAutomationEngine(sessionName, result.userId, msg, client);
     });
 
@@ -708,8 +848,17 @@ app.post('/api/sessions/:session/send-buttons', authenticateToken, async (req, r
 app.get('/api/sessions/:session/chats', authenticateToken, async (req, res) => {
   const client = await getAuthorizedClient(req, res);
   if (!client) return;
-  try { res.json({ status: 'success', chats: await client.listChats({ count: Number(req.query.count) || 100 }) }); }
-  catch (e) { res.status(500).json({ status: 'error', message: e.message }); }
+  try {
+    let chats = [];
+    try { chats = await client.listChats(); } catch {}
+    if (!Array.isArray(chats) || !chats.length) {
+      try { chats = await client.getAllChats(); } catch {}
+    }
+    if (!Array.isArray(chats) || !chats.length) {
+      try { chats = await client.getAllGroups(); } catch {}
+    }
+    res.json({ status: 'success', chats: Array.isArray(chats) ? chats : [] });
+  } catch (e) { res.status(500).json({ status: 'error', message: e.message }); }
 });
 
 app.get('/api/sessions/:session/contacts', authenticateToken, async (req, res) => {
