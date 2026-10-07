@@ -195,7 +195,144 @@ async function resolveSessionOwner(sessionName) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-async function runAutomationEngine(sessionName, userId, message, client) {
+// Robust WhatsApp Target Resolution & Safe Messaging Primitives
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function resolveWhatsAppTarget(client, rawTarget) {
+  if (!rawTarget || typeof rawTarget !== 'string') throw new Error('Target phone or chat identifier is required');
+  const target = rawTarget.trim();
+  if (target.includes('@')) return target;
+
+  try {
+    const resolved = await client.page.evaluate(async (id) => {
+      if (typeof window.WPP === 'undefined' || !window.WPP.chat) return null;
+      const asLid = `${id}@lid`;
+      const asCus = `${id}@c.us`;
+      const asGus = `${id}@g.us`;
+      if (await window.WPP.chat.get(asLid).catch(() => null)) return asLid;
+      if (await window.WPP.chat.get(asCus).catch(() => null)) return asCus;
+      if (await window.WPP.chat.get(asGus).catch(() => null)) return asGus;
+      return null;
+    }, target);
+    if (resolved) return resolved;
+  } catch {}
+
+  return `${target.replace(/\D/g, '')}@c.us`;
+}
+
+async function sendTextMessageSafe(client, rawTarget, content, options = {}) {
+  const target = await resolveWhatsAppTarget(client, rawTarget);
+  console.log(`📤 [WPP] Sending message to ${target}`);
+  return await client.page.evaluate(async (to, text, opts) => {
+    if (typeof window.WPP === 'undefined' || !window.WPP.chat) {
+      throw new Error('WhatsApp Web engine not ready');
+    }
+    const sendResult = await window.WPP.chat.sendTextMessage(to, text, {
+      waitForAck: false,
+      ...opts
+    });
+    return {
+      id: String(sendResult?.id?._serialized || sendResult?.id || `msg_${Date.now()}`),
+      ack: sendResult?.ack ?? 1,
+      to,
+      timestamp: Math.floor(Date.now() / 1000)
+    };
+  }, target, content, options);
+}
+
+async function fetchRecentChatMessages(client, rawTarget) {
+  const target = await resolveWhatsAppTarget(client, rawTarget);
+  let list = [];
+
+  // 1. Try modern WPP.chat.getMessages in page evaluate
+  try {
+    const raw = await client.page.evaluate(async (chatId) => {
+      if (typeof window.WPP === 'undefined' || !window.WPP.chat?.getMessages) return [];
+      try {
+        const msgs = await window.WPP.chat.getMessages(chatId, { count: 30 });
+        if (!Array.isArray(msgs)) return [];
+        return msgs.map(m => ({
+          id: String(m.id?._serialized || m.id || ''),
+          body: m.body || m.caption || (m.type !== 'chat' ? `[${m.type}]` : ''),
+          fromMe: Boolean(m.fromMe),
+          type: m.type === 'chat' ? 'text' : (m.type || 'text'),
+          t: m.t ? Number(m.t) : Math.floor(Date.now() / 1000),
+          senderName: m.sender?.name || m.notifyName || (m.fromMe ? 'Agent' : '')
+        }));
+      } catch (err) {
+        return [];
+      }
+    }, target);
+    if (Array.isArray(raw) && raw.length > 0) {
+      list = raw;
+    }
+  } catch {}
+
+  // 2. Fallback to client.getAllMessagesInChat
+  if (list.length === 0) {
+    try {
+      const raw = await client.getAllMessagesInChat(target, true, false).catch(() => []);
+      if (Array.isArray(raw) && raw.length > 0) {
+        list = raw.map(m => ({
+          id: String(m.id?._serialized || m.id || ''),
+          body: m.body || m.caption || (m.type !== 'chat' ? `[${m.type}]` : ''),
+          fromMe: Boolean(m.fromMe),
+          type: m.type === 'chat' ? 'text' : (m.type || 'text'),
+          t: m.t ? Number(m.t) : Math.floor(Date.now() / 1000),
+          senderName: m.sender?.name || m.notifyName || (m.fromMe ? 'Agent' : '')
+        }));
+      }
+    } catch {}
+  }
+
+  // 3. Fallback to model-storage IndexedDB if still empty
+  if (list.length === 0) {
+    try {
+      const idbList = await client.page.evaluate(async (targetId) => {
+        return new Promise((resolve) => {
+          const req = indexedDB.open('model-storage');
+          req.onsuccess = (e) => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains('message')) {
+              db.close();
+              return resolve([]);
+            }
+            const tx = db.transaction(['message'], 'readonly');
+            const store = tx.objectStore('message');
+            const range = IDBKeyRange.bound(`${targetId}_`, `${targetId}_\uffff`);
+            const cursorReq = store.index('internalId').openCursor(range, 'prev');
+            const results = [];
+            cursorReq.onsuccess = () => {
+              const cursor = cursorReq.result;
+              if (cursor && results.length < 30) {
+                const v = cursor.value;
+                results.push({
+                  id: String(v.id?._serialized || v.id || ''),
+                  body: v.body || v.caption || (v.type !== 'chat' ? `[${v.type}]` : ''),
+                  fromMe: Boolean(v.fromMe),
+                  type: v.type === 'chat' ? 'text' : (v.type || 'text'),
+                  t: v.t ? Number(v.t) : Math.floor(Date.now() / 1000),
+                  senderName: v.fromMe ? 'Agent' : ''
+                });
+                cursor.continue();
+              } else {
+                db.close();
+                resolve(results.reverse());
+              }
+            };
+            cursorReq.onerror = () => { db.close(); resolve([]); };
+          };
+          req.onerror = () => resolve([]);
+        });
+      }, target);
+      if (Array.isArray(idbList) && idbList.length > 0) list = idbList;
+    } catch {}
+  }
+
+  return list;
+}
+
+async function runAutomationEngine(sessionName, userId, message, client, incomingChat = null) {
   try {
     const rules = (await getAutomations(userId)).filter(a => a.isEnabled);
     for (const rule of rules) {
@@ -209,19 +346,58 @@ async function runAutomationEngine(sessionName, userId, message, client) {
         case 'any_message': matched = body.length > 0; break;
       }
       if (!matched) continue;
-      console.log(`⚡ [${sessionName}] Automation '${rule.name}' triggered`);
+      console.log(`⚡ [${sessionName}] Chatbot automation '${rule.name}' triggered for ${message.from}`);
+
       try {
-        if (rule.actionType === 'reply_text' && rule.actionSummary)
-          await client.sendText(message.from, rule.actionSummary);
-        else if (rule.actionType === 'reply_buttons' && rule.actionSummary) {
+        if (rule.actionType === 'reply_text' && rule.actionSummary) {
+          // 1. Send via WhatsApp to recipient
+          await sendTextMessageSafe(client, message.from, rule.actionSummary);
+
+          // 2. Persist in database & emit real-time event for UI
+          const chat = incomingChat || (await getChats(userId)).find(c =>
+            c.phone === message.from || String(message.from).includes(c.phone)
+          );
+
+          if (chat) {
+            const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const botMsg = await createMessage(chat.id, {
+              sender: 'agent',
+              agentName: rule.name || 'Chatbot',
+              text: rule.actionSummary,
+              type: 'text',
+              status: 'sent',
+              timestamp: ts,
+            }, userId);
+
+            await updateChat(userId, chat.id, {
+              lastMessage: { text: rule.actionSummary, timestamp: ts, status: 'sent', fromMe: true }
+            });
+
+            io.to(`workspace:${userId}`).emit('session:message', {
+              session: sessionName,
+              chatId: chat.id,
+              message: {
+                id: botMsg.id,
+                from: sessionName,
+                senderName: rule.name || 'Chatbot',
+                body: rule.actionSummary,
+                type: 'text',
+                timestamp: ts,
+                savedMessageId: botMsg.id,
+                fromMe: true,
+              }
+            });
+          }
+        } else if (rule.actionType === 'reply_buttons' && rule.actionSummary) {
           const parts = rule.actionSummary.split('|||');
           const btns = parts.slice(1).map((t, i) => ({ id: `btn_${i}`, text: t }));
           if (btns.length) await client.sendButtonList(message.from, parts[0], btns);
         }
+
         const pool = getPool();
         if (pool) await pool.query(`UPDATE automations SET executions_count = executions_count + 1 WHERE id = $1`, [rule.id]);
-        io.emit('automation:fired', { session: sessionName, ruleId: rule.id, ruleName: rule.name, from: message.from });
-      } catch (e) { console.error(`❌ Automation '${rule.name}' failed:`, e.message); }
+        io.to(`workspace:${userId}`).emit('automation:fired', { session: sessionName, ruleId: rule.id, ruleName: rule.name, from: message.from });
+      } catch (e) { console.error(`❌ Chatbot automation '${rule.name}' failed:`, e.message); }
     }
   } catch (e) { console.error(`Automation engine error [${sessionName}]:`, e.message); }
 }
@@ -665,7 +841,7 @@ async function startSession(sessionName, ownerId = null) {
 
     client.onMessage(async (msg) => {
       const result = await handleInboundMessage(sessionName, msg, client);
-      if (result?.userId) await runAutomationEngine(sessionName, result.userId, msg, client);
+      if (result?.userId) await runAutomationEngine(sessionName, result.userId, msg, client, result.chat);
     });
 
     syncRemoteChats(sessionName, client).catch((error) => {
@@ -727,7 +903,59 @@ async function recoverPersistedSessions() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-app.use('/api/auth', authRoutes);
+// Dynamic on-demand message loader: ensures all recent WhatsApp messages
+// are fetched and visible as soon as a chat is opened.
+app.get('/api/chats/:chatId/messages', authenticateToken, async (req, res) => {
+  const { chatId } = req.params;
+  const userId = req.user.id;
+  try {
+    let messages = await getMessages(chatId, userId);
+
+    if (!messages || messages.length <= 1) {
+      const chats = await getChats(userId);
+      const chat = chats.find(c => c.id === chatId);
+      if (chat) {
+        const sessionName = chat.channel || 'primary-whatsapp';
+        const session = sessions.get(sessionName) || Array.from(sessions.values()).find(s => s.client && s.status === 'CONNECTED');
+        if (session?.client) {
+          try {
+            const target = await resolveWhatsAppTarget(session.client, chat.phone || chatId);
+            const remoteMsgs = await fetchRecentChatMessages(session.client, target);
+            if (Array.isArray(remoteMsgs) && remoteMsgs.length > 0) {
+              const existingTexts = new Set(messages.map(m => `${m.text}__${m.timestamp}`));
+              for (const rm of remoteMsgs.slice(-30)) {
+                const ts = rm.t
+                  ? new Date(Number(rm.t) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                  : 'Just now';
+                const key = `${rm.body}__${ts}`;
+                if (existingTexts.has(key)) continue;
+                existingTexts.add(key);
+
+                const senderName = rm.fromMe ? 'Agent' : (rm.senderName || chat.contactName || chat.contact_name || 'Contact');
+                await createMessage(chat.id, {
+                  sender: rm.fromMe ? 'agent' : 'customer',
+                  agentName: senderName,
+                  text: rm.body || (rm.type !== 'chat' ? `[${rm.type}]` : ''),
+                  type: rm.type === 'chat' ? 'text' : (rm.type || 'text'),
+                  status: rm.fromMe ? 'sent' : 'delivered',
+                  timestamp: ts,
+                }, userId);
+              }
+              messages = await getMessages(chatId, userId);
+            }
+          } catch (fetchErr) {
+            console.warn(`Could not pull remote messages for ${chatId}:`, fetchErr.message);
+          }
+        }
+      }
+    }
+
+    res.json({ status: 'success', messages });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
 app.use('/api', dataRoutes);
 
 // Session and QR state changes continuously. Prevent browsers and Vercel's
@@ -800,10 +1028,12 @@ app.post('/api/sessions/:session/send-message', authenticateToken, async (req, r
   if (!await canAccessSession(req.user.id, req.params.session, s)) return res.status(403).json({ status: 'error', message: 'Session is outside the current workspace' });
   try {
     if (!req.body?.message?.trim()) return res.status(400).json({ status: 'error', message: 'message is required' });
-    const target = whatsappTarget(req.body.phone);
-    const result = await s.client.sendText(target, req.body.message);
-    res.json({ status: 'success', response: { id: result.id, to: target, body: req.body.message, timestamp: Math.floor(Date.now() / 1000) } });
-  } catch (e) { res.status(500).json({ status: 'error', message: e.message }); }
+    const result = await sendTextMessageSafe(s.client, req.body.phone, req.body.message);
+    res.json({ status: 'success', response: result });
+  } catch (e) {
+    console.error(`Send message error [${req.params.session}]:`, e.message);
+    res.status(500).json({ status: 'error', message: e.message });
+  }
 });
 
 function whatsappTarget(phone) {
@@ -833,7 +1063,7 @@ app.post('/api/sessions/:session/send-media', authenticateToken, async (req, res
     if (!client) return;
     const { phone, data, filename = 'attachment', caption = '', kind = 'file' } = req.body || {};
     if (!data || typeof data !== 'string' || !data.startsWith('data:')) return res.status(400).json({ status: 'error', message: 'data must be a data URL' });
-    const target = whatsappTarget(phone);
+    const target = await resolveWhatsAppTarget(client, phone);
     let result;
     if (kind === 'sticker') result = await client.sendImageAsSticker(target, data);
     else if (kind === 'sticker-gif') result = await client.sendImageAsStickerGif(target, data);
@@ -847,9 +1077,9 @@ app.post('/api/sessions/:session/send-contact', authenticateToken, async (req, r
   try {
     const client = await getAuthorizedClient(req, res);
     if (!client) return;
-    const target = whatsappTarget(req.body?.phone);
-    const contacts = Array.isArray(req.body?.contacts) ? req.body.contacts : [{ id: whatsappTarget(req.body?.contactPhone), name: req.body?.name || '' }];
-    const result = await client.sendContactVcardList(target, contacts.map((entry) => ({ id: whatsappTarget(entry.id || entry.phone), name: entry.name || '' })));
+    const target = await resolveWhatsAppTarget(client, req.body?.phone);
+    const contacts = Array.isArray(req.body?.contacts) ? req.body.contacts : [{ id: await resolveWhatsAppTarget(client, req.body?.contactPhone), name: req.body?.name || '' }];
+    const result = await client.sendContactVcardList(target, contacts.map((entry) => ({ id: entry.id || entry.phone, name: entry.name || '' })));
     res.json({ status: 'success', response: result });
   } catch (e) { res.status(500).json({ status: 'error', message: e.message || 'Contact send failed' }); }
 });
@@ -859,7 +1089,8 @@ app.post('/api/sessions/:session/send-location', authenticateToken, async (req, 
     const client = await getAuthorizedClient(req, res);
     if (!client) return;
     const { phone, latitude, longitude, title = '' } = req.body || {};
-    const result = await client.sendLocation(whatsappTarget(phone), String(latitude), String(longitude), title);
+    const target = await resolveWhatsAppTarget(client, phone);
+    const result = await client.sendLocation(target, String(latitude), String(longitude), title);
     res.json({ status: 'success', response: result });
   } catch (e) { res.status(500).json({ status: 'error', message: e.message || 'Location send failed' }); }
 });
@@ -868,7 +1099,7 @@ app.post('/api/sessions/:session/forward', authenticateToken, async (req, res) =
   try {
     const client = await getAuthorizedClient(req, res);
     if (!client) return;
-    const target = whatsappTarget(req.body?.phone);
+    const target = await resolveWhatsAppTarget(client, req.body?.phone);
     const messageIds = req.body?.messageIds || req.body?.messageId;
     if (!messageIds) return res.status(400).json({ status: 'error', message: 'messageId or messageIds is required' });
     const result = client.forwardMessagesV2
@@ -884,7 +1115,7 @@ app.post('/api/sessions/:session/send-buttons', authenticateToken, async (req, r
   if (!await canAccessSession(req.user.id, req.params.session, s)) return res.status(403).json({ status: 'error', message: 'Session is outside the current workspace' });
   try {
     if (!Array.isArray(req.body?.buttons) || !req.body.buttons.length) return res.status(400).json({ status: 'error', message: 'buttons are required' });
-    const target = whatsappTarget(req.body.phone);
+    const target = await resolveWhatsAppTarget(s.client, req.body.phone);
     const result = await s.client.sendButtonList(target, req.body.title, req.body.buttons.map((b, i) => ({ id: b.id || `btn_${i}`, text: b.text || b.label })));
     res.json({ status: 'success', response: result });
   } catch (e) { res.status(500).json({ status: 'error', message: e.message }); }
@@ -1058,7 +1289,7 @@ app.post('/api/campaigns/:id/send', authenticateToken, async (req, res) => {
       if (pool) await pool.query(`UPDATE campaigns SET status='sending' WHERE id=$1 AND user_id=$2`, [req.params.id, userId]);
       for (let i = 0; i < contacts.length; i++) {
         const target = contacts[i].phone.includes('@') ? contacts[i].phone : `${contacts[i].phone.replace(/\D/g, '')}@c.us`;
-        try { await sd.client.sendText(target, campaign.templateText); sent++; }
+        try { await sendTextMessageSafe(sd.client, contacts[i].phone, campaign.templateText); sent++; }
         catch (e) { failed++; }
         io.emit('campaign:progress', { campaignId: req.params.id, sent, failed, total: contacts.length });
         if (i < contacts.length - 1) await sleep(delayMs);
