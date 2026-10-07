@@ -929,27 +929,55 @@ app.get('/api/sessions/:session/debug-chats', authenticateToken, async (req, res
   const client = await getAuthorizedClient(req, res);
   if (!client) return;
   try {
-    const debug = await client.page.evaluate(async () => {
-      const storeChats = window.Store?.Chat?.models?.map(c => ({
-        id: c.id?._serialized,
-        name: c.name || c.formattedTitle,
-        isGroup: Boolean(c.isGroup),
-        isUser: Boolean(c.isUser)
-      })) || [];
-      const wppAll = (await window.WPP?.chat?.list().catch(e => ({ error: e.message }))) || [];
-      const wppUsers = (await window.WPP?.chat?.list({ onlyUsers: true }).catch(e => ({ error: e.message }))) || [];
-      const wppGroups = (await window.WPP?.chat?.list({ onlyGroups: true }).catch(e => ({ error: e.message }))) || [];
-      return {
-        storeChatsCount: storeChats.length,
-        storeUserChatsCount: storeChats.filter(c => c.isUser).length,
-        wppAllCount: Array.isArray(wppAll) ? wppAll.length : wppAll,
-        wppUsersCount: Array.isArray(wppUsers) ? wppUsers.length : wppUsers,
-        wppGroupsCount: Array.isArray(wppGroups) ? wppGroups.length : wppGroups,
-        sampleStoreUsers: storeChats.filter(c => c.isUser).slice(0, 5),
-        sampleWppUsers: Array.isArray(wppUsers) ? wppUsers.slice(0, 5).map(c => ({ id: c.id?._serialized, name: c.name })) : []
-      };
+    const target = req.query.target || '120363023981533800@g.us';
+    let wapiMsgs = [];
+    try {
+      wapiMsgs = await client.getAllMessagesInChat(target, true, false).catch(e => ({ error: e.message }));
+    } catch (e) { wapiMsgs = { error: e.message }; }
+
+    let idbMsgs = [];
+    try {
+      idbMsgs = await client.page.evaluate(async (targetId) => {
+        return new Promise((resolve) => {
+          const req = indexedDB.open('model-storage');
+          req.onsuccess = (e) => {
+            const db = e.target.result;
+            const tx = db.transaction(['message'], 'readonly');
+            const store = tx.objectStore('message');
+            const range = IDBKeyRange.bound(`${targetId}_`, `${targetId}_\uffff`);
+            const cursorReq = store.index('internalId').openCursor(range, 'prev');
+            const list = [];
+            cursorReq.onsuccess = () => {
+              const cursor = cursorReq.result;
+              if (cursor && list.length < 20) {
+                const v = cursor.value;
+                list.push({
+                  id: String(v.id?._serialized || v.id || ''),
+                  body: v.body || v.caption || '',
+                  fromMe: Boolean(v.fromMe),
+                  t: v.t,
+                  type: v.type
+                });
+                cursor.continue();
+              } else {
+                db.close();
+                resolve(list);
+              }
+            };
+            cursorReq.onerror = () => { db.close(); resolve([]); };
+          };
+          req.onerror = () => resolve([]);
+        });
+      }, target);
+    } catch (e) { idbMsgs = { error: e.message }; }
+
+    res.json({
+      target,
+      wapiCount: Array.isArray(wapiMsgs) ? wapiMsgs.length : wapiMsgs,
+      idbCount: Array.isArray(idbMsgs) ? idbMsgs.length : idbMsgs,
+      wapiSample: Array.isArray(wapiMsgs) ? wapiMsgs.slice(-3) : [],
+      idbSample: Array.isArray(idbMsgs) ? idbMsgs.slice(0, 3) : []
     });
-    res.json(debug);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
