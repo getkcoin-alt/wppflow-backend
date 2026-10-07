@@ -40,9 +40,8 @@ if (!fs.existsSync(TOKEN_DIR)) {
 const app = express();
 
 app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
-  else res.setHeader('Access-Control-Allow-Origin', '*');
+  const origin = req.headers.origin || '*';
+  res.setHeader('Access-Control-Allow-Origin', origin);
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD');
   res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Cache-Control, Pragma');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
@@ -51,8 +50,6 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(cors({ origin: true, credentials: true }));
-app.options('*', (req, res) => res.status(204).end());
 app.use(express.json({ limit: '50mb' }));
 
 const server = http.createServer(app);
@@ -340,64 +337,101 @@ async function syncRemoteChats(sessionName, client) {
     console.warn(`⚠️  [${sessionName}] Contact sync error:`, err.message);
   }
 
-  // 2. Collect all conversations: groups + direct chats
+  // 2. Collect ALL conversations: groups + individual chats via fast page evaluate
   const allConversations = [];
   const seenIds = new Set();
 
-  // 2a. Fetch all groups
   try {
-    const rawGroups = await client.getAllGroups();
-    if (Array.isArray(rawGroups)) {
-      for (const g of rawGroups) {
-        const gid = g.id?._serialized || g.id;
-        if (gid && !seenIds.has(gid)) {
-          allConversations.push({ ...g, _isGroup: true });
-          seenIds.add(gid);
+    const rawList = await client.page.evaluate(async () => {
+      if (typeof window.WPP === 'undefined' || !window.WPP.chat) return [];
+      try {
+        const list = await window.WPP.chat.list();
+        return list.map((c) => {
+          const rawId = c.id?._serialized || c.id;
+          const isGroup = Boolean(c.isGroup || String(rawId).includes('@g.us'));
+          const contact = c.contact || {};
+          const name = c.name || c.formattedTitle || contact.name || contact.pushname || contact.shortName || '';
+          const phone = isGroup
+            ? String(rawId)
+            : String(contact.id?.user || contact.phoneNumber || c.id?.user || rawId).replace(/@c\.us$/, '').replace(/@lid$/, '');
+          const msgs = c.msgs?.models || [];
+          const last = msgs.length > 0 ? msgs[msgs.length - 1] : null;
+          const lastBody = last?.body || last?.caption || (last?.type && last.type !== 'chat' ? `[${last.type}]` : '');
+          const lastTimestamp = last?.t ? Number(last.t) : (c.t ? Number(c.t) : null);
+          const fromMe = Boolean(last?.fromMe);
+
+          return {
+            rawId: String(rawId),
+            name: name || (isGroup ? 'WhatsApp Group' : phone),
+            phone: phone || String(rawId),
+            isGroup,
+            groupMembersCount: c.groupMetadata?.participants?.length || 0,
+            avatar: contact.profilePicThumbObj?.eurl || '',
+            unreadCount: Number(c.unreadCount || 0),
+            timestamp: lastTimestamp,
+            lastMessage: lastBody,
+            fromMe
+          };
+        });
+      } catch {
+        return [];
+      }
+    });
+
+    if (Array.isArray(rawList)) {
+      for (const item of rawList) {
+        if (item.rawId && !seenIds.has(item.rawId) && item.rawId !== 'status@broadcast') {
+          allConversations.push(item);
+          seenIds.add(item.rawId);
         }
       }
-      console.log(`👥 [${sessionName}] Found ${rawGroups.length} WhatsApp groups`);
+      console.log(`💬 [${sessionName}] Extracted ${allConversations.length} WhatsApp conversations via fast evaluator`);
     }
-  } catch (err) {
-    console.warn(`⚠️  [${sessionName}] Group fetch error:`, err.message);
+  } catch (evalErr) {
+    console.warn(`⚠️ [${sessionName}] Fast chat list error:`, evalErr.message);
   }
 
-  // 2b. Fetch direct chats via listChats / getAllChats
-  try {
-    let rawChats = [];
-    try { rawChats = await client.listChats(); } catch {}
-    if (!Array.isArray(rawChats) || !rawChats.length) {
-      try { rawChats = await client.getAllChats(); } catch {}
-    }
-    if (Array.isArray(rawChats)) {
-      for (const c of rawChats) {
-        const cid = c.id?._serialized || c.id;
-        if (cid && cid !== 'status@broadcast' && !seenIds.has(cid)) {
-          allConversations.push(c);
-          seenIds.add(cid);
+  // Fallback: If no groups were in WPP list, fetch via getAllGroups
+  if (!allConversations.some(c => c.isGroup)) {
+    try {
+      const rawGroups = await client.getAllGroups();
+      if (Array.isArray(rawGroups)) {
+        for (const g of rawGroups) {
+          const gid = g.id?._serialized || g.id;
+          if (gid && !seenIds.has(gid)) {
+            allConversations.push({
+              rawId: String(gid),
+              name: g.name || g.formattedTitle || 'WhatsApp Group',
+              phone: String(gid),
+              isGroup: true,
+              groupMembersCount: g.groupMetadata?.participants?.length || 0,
+              avatar: g.contact?.profilePicThumbObj?.eurl || '',
+              unreadCount: Number(g.unreadCount || 0),
+              timestamp: g.t ? Number(g.t) : null,
+              lastMessage: g.lastMessage?.body || '',
+              fromMe: Boolean(g.lastMessage?.fromMe)
+            });
+            seenIds.add(gid);
+          }
         }
       }
-      console.log(`💬 [${sessionName}] Found ${rawChats.length} active chats`);
-    }
-  } catch (err) {
-    console.warn(`⚠️  [${sessionName}] Chat fetch error:`, err.message);
+    } catch {}
   }
 
-  // 3. Persist and import messages into database
+  // 3. Persist and import conversations into database
   const existing = await getChats(userId);
   let chatsCreated = 0;
 
   for (const remote of allConversations) {
-    const remoteId = remote.id?._serialized || remote.id;
-    if (!remoteId || remoteId === 'status@broadcast') continue;
-    const isGroup = Boolean(remote._isGroup || String(remoteId).includes('@g.us') || remote.isGroup);
-    const phone = isGroup ? String(remoteId) : String(remoteId).replace(/@c\.us$/, '');
-    const last = remote.lastMessage || remote.lastReceivedKey || {};
-    const timestamp = remote.t
-      ? new Date(Number(remote.t) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      : (last.t ? new Date(Number(last.t) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—');
-    const contactName = remote.name || remote.formattedTitle || remote.contact?.pushname || remote.contact?.name || (isGroup ? 'WhatsApp Group' : phone);
-    const avatar = remote.contact?.profilePicThumbObj?.eurl || '';
-    const groupMembersCount = remote.groupMetadata?.participants?.length || 0;
+    const remoteId = remote.rawId;
+    const phone = remote.phone;
+    const isGroup = remote.isGroup;
+    const contactName = remote.name;
+    const avatar = remote.avatar;
+    const groupMembersCount = remote.groupMembersCount;
+    const timeStr = remote.timestamp
+      ? new Date(remote.timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : '—';
 
     let chat = existing.find((entry) => entry.phone === phone || entry.phone === remoteId);
     if (!chat) {
@@ -410,53 +444,56 @@ async function syncRemoteChats(sessionName, client) {
         isGroup,
         groupMembersCount,
         lastMessage: {
-          text: last.body || (last.id ? 'Message' : ''),
-          timestamp,
+          text: remote.lastMessage || (isGroup ? 'Group joined' : 'Chat active'),
+          timestamp: timeStr,
           status: 'delivered',
-          fromMe: Boolean(last.fromMe),
+          fromMe: remote.fromMe,
         },
-        tags: isGroup ? ['Group'] : [],
+        tags: isGroup ? ['Group'] : ['Individual'],
       });
       existing.push(chat);
       chatsCreated++;
       io.to(`workspace:${userId}`).emit('chat:created', { session: sessionName, chat });
-    } else if (last.body) {
+    } else if (remote.lastMessage) {
       await updateChat(userId, chat.id, {
-        unreadCount: Number(remote.unreadCount || chat.unreadCount || 0),
-        lastMessage: { text: last.body, timestamp, status: 'delivered', fromMe: Boolean(last.fromMe) },
+        unreadCount: remote.unreadCount,
+        lastMessage: { text: remote.lastMessage, timestamp: timeStr, status: 'delivered', fromMe: remote.fromMe },
       });
     }
 
-    // Import recent messages if the chat thread has no messages in DB
-    try {
-      const existingMsgs = await getMessages(chat.id);
-      if (!existingMsgs || existingMsgs.length === 0) {
-        const history = await client.getAllMessagesInChat(remoteId, true, false);
-        if (Array.isArray(history) && history.length) {
-          for (const item of history.slice(-30)) {
-            const itemTimestamp = item.t
-              ? new Date(Number(item.t) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-              : timestamp;
-            const senderName = item.fromMe
-              ? 'Agent'
-              : (item.sender?.name || item.notifyName || (isGroup ? (item.author ? String(item.author).replace(/@c\.us$/, '') : 'Member') : contactName));
-            await createMessage(chat.id, {
-              sender: item.fromMe ? 'agent' : 'customer',
-              agentName: senderName,
-              text: item.body || item.caption || (item.type !== 'chat' ? `[${item.type}]` : ''),
-              type: item.type === 'chat' ? 'text' : (item.type || 'text'),
-              status: item.fromMe ? 'sent' : 'delivered',
-              timestamp: itemTimestamp,
-            });
+    // Only import recent message history for the first 15 active conversations to avoid timeout
+    if (chatsCreated <= 15) {
+      try {
+        const existingMsgs = await getMessages(chat.id);
+        if (!existingMsgs || existingMsgs.length === 0) {
+          const history = await client.getAllMessagesInChat(remoteId, true, false).catch(() => []);
+          if (Array.isArray(history) && history.length) {
+            for (const item of history.slice(-20)) {
+              const itemTimestamp = item.t
+                ? new Date(Number(item.t) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                : timeStr;
+              const senderName = item.fromMe
+                ? 'Agent'
+                : (item.sender?.name || item.notifyName || (isGroup ? (item.author ? String(item.author).replace(/@c\.us$/, '') : 'Member') : contactName));
+              await createMessage(chat.id, {
+                sender: item.fromMe ? 'agent' : 'customer',
+                agentName: senderName,
+                text: item.body || item.caption || (item.type !== 'chat' ? `[${item.type}]` : ''),
+                type: item.type === 'chat' ? 'text' : (item.type || 'text'),
+                status: item.fromMe ? 'sent' : 'delivered',
+                timestamp: itemTimestamp,
+              });
+            }
           }
         }
-      }
-    } catch (msgErr) {
-      // Individual chat message sync error shouldn't halt loop
+      } catch {}
     }
   }
 
-  console.log(`✅ [${sessionName}] Inbox sync finished: ${chatsCreated} new chats created, total ${allConversations.length} processed`);
+  const groupCount = allConversations.filter(c => c.isGroup).length;
+  const individualCount = allConversations.filter(c => !c.isGroup).length;
+  console.log(`✅ [${sessionName}] Inbox sync finished: ${chatsCreated} new chats created, total ${allConversations.length} processed (${groupCount} groups, ${individualCount} individual chats)`);
+  io.to(`workspace:${userId}`).emit('inbox:synced', { session: sessionName, total: allConversations.length, created: chatsCreated, groupCount, individualCount });
 }
 
 io.use(async (socket, next) => {
@@ -857,14 +894,33 @@ app.get('/api/sessions/:session/chats', authenticateToken, async (req, res) => {
   const client = await getAuthorizedClient(req, res);
   if (!client) return;
   try {
-    let chats = [];
-    try { chats = await client.listChats(); } catch {}
-    if (!Array.isArray(chats) || !chats.length) {
-      try { chats = await client.getAllChats(); } catch {}
-    }
-    if (!Array.isArray(chats) || !chats.length) {
-      try { chats = await client.getAllGroups(); } catch {}
-    }
+    const chats = await client.page.evaluate(async () => {
+      if (typeof window.WPP === 'undefined' || !window.WPP.chat) return [];
+      try {
+        const list = await window.WPP.chat.list();
+        return list.map((c) => {
+          const rawId = c.id?._serialized || c.id;
+          const isGroup = Boolean(c.isGroup || String(rawId).includes('@g.us'));
+          const contact = c.contact || {};
+          const name = c.name || c.formattedTitle || contact.name || contact.pushname || contact.shortName || '';
+          const phone = isGroup
+            ? String(rawId)
+            : String(contact.id?.user || contact.phoneNumber || c.id?.user || rawId).replace(/@c\.us$/, '').replace(/@lid$/, '');
+          const msgs = c.msgs?.models || [];
+          const last = msgs.length > 0 ? msgs[msgs.length - 1] : null;
+          return {
+            id: rawId,
+            name: name || (isGroup ? 'WhatsApp Group' : phone),
+            phone: phone || String(rawId),
+            isGroup,
+            groupMembersCount: c.groupMetadata?.participants?.length || 0,
+            avatar: contact.profilePicThumbObj?.eurl || '',
+            unreadCount: Number(c.unreadCount || 0),
+            lastMessage: last?.body || ''
+          };
+        });
+      } catch { return []; }
+    });
     res.json({ status: 'success', chats: Array.isArray(chats) ? chats : [] });
   } catch (e) { res.status(500).json({ status: 'error', message: e.message }); }
 });
