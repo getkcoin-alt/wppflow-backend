@@ -204,20 +204,50 @@ async function resolveWhatsAppTarget(client, rawTarget) {
   if (target.includes('@')) return target;
 
   try {
-    const resolved = await client.page.evaluate(async (id) => {
+    const resolved = await client.page.evaluate((id) => {
       if (typeof window.WPP === 'undefined' || !window.WPP.chat) return null;
       const asLid = `${id}@lid`;
       const asCus = `${id}@c.us`;
       const asGus = `${id}@g.us`;
-      if (await window.WPP.chat.get(asLid).catch(() => null)) return asLid;
-      if (await window.WPP.chat.get(asCus).catch(() => null)) return asCus;
-      if (await window.WPP.chat.get(asGus).catch(() => null)) return asGus;
+
+      // 1. Direct get on ChatModel collection
+      try {
+        if (window.WPP.chat.get(asLid)) return asLid;
+        if (window.WPP.chat.get(asCus)) return asCus;
+        if (window.WPP.chat.get(asGus)) return asGus;
+      } catch {}
+
+      // 2. Search all loaded chats in WPP.chat.list()
+      try {
+        const list = window.WPP.chat.list();
+        if (Array.isArray(list)) {
+          const match = list.find(c => {
+            const sid = String(c.id?._serialized || c.id || '');
+            const uid = String(c.id?.user || '');
+            return sid === asLid || sid === asCus || sid === asGus || uid === id;
+          });
+          if (match) return String(match.id?._serialized || match.id);
+        }
+      } catch {}
+
       return null;
     }, target);
-    if (resolved) return resolved;
-  } catch {}
 
-  return `${target.replace(/\D/g, '')}@c.us`;
+    if (resolved) {
+      console.log(`🎯 [WPP] Resolved target '${target}' -> '${resolved}'`);
+      return resolved;
+    }
+  } catch (err) {
+    console.warn(`Target resolution error:`, err.message);
+  }
+
+  // 3. Fallback heuristic: LIDs are typically >= 13 digits
+  const digits = target.replace(/\D/g, '');
+  if (digits.length >= 13) {
+    return `${digits}@lid`;
+  }
+
+  return `${digits}@c.us`;
 }
 
 async function sendTextMessageSafe(client, rawTarget, content, options = {}) {
@@ -527,9 +557,10 @@ async function syncRemoteChats(sessionName, client) {
           const isGroup = Boolean(c.isGroup || String(rawId).includes('@g.us'));
           const contact = c.contact || {};
           const name = c.name || c.formattedTitle || contact.name || contact.pushname || contact.shortName || '';
-          const phone = isGroup
+          const isLid = String(rawId).includes('@lid');
+          const phone = (isGroup || isLid)
             ? String(rawId)
-            : String(contact.id?.user || contact.phoneNumber || c.id?.user || rawId).replace(/@c\.us$/, '').replace(/@lid$/, '');
+            : String(contact.id?.user || contact.phoneNumber || c.id?.user || rawId).replace(/@c\.us$/, '');
           const msgs = c.msgs?.models || [];
           const last = msgs.length > 0 ? msgs[msgs.length - 1] : null;
           const lastBody = last?.body || last?.caption || (last?.type && last.type !== 'chat' ? `[${last.type}]` : '');
@@ -609,7 +640,7 @@ async function syncRemoteChats(sessionName, client) {
       ? new Date(remote.timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       : '—';
 
-    let chat = existing.find((entry) => entry.phone === phone || entry.phone === remoteId);
+    let chat = existing.find((entry) => entry.phone === phone || entry.phone === remoteId || entry.phone === String(remoteId).replace(/@lid$/, '') || `${entry.phone}@lid` === remoteId);
     if (!chat) {
       chat = await createChat(userId, {
         contactName,
@@ -630,11 +661,19 @@ async function syncRemoteChats(sessionName, client) {
       existing.push(chat);
       chatsCreated++;
       io.to(`workspace:${userId}`).emit('chat:created', { session: sessionName, chat });
-    } else if (remote.lastMessage) {
-      await updateChat(userId, chat.id, {
-        unreadCount: remote.unreadCount,
-        lastMessage: { text: remote.lastMessage, timestamp: timeStr, status: 'delivered', fromMe: remote.fromMe },
-      });
+    } else {
+      const updates = {};
+      if (remote.lastMessage) {
+        updates.unreadCount = remote.unreadCount;
+        updates.lastMessage = { text: remote.lastMessage, timestamp: timeStr, status: 'delivered', fromMe: remote.fromMe };
+      }
+      if (remoteId && (remoteId.includes('@lid') || remoteId.includes('@g.us')) && chat.phone !== remoteId) {
+        updates.phone = remoteId;
+        chat.phone = remoteId;
+      }
+      if (Object.keys(updates).length > 0) {
+        await updateChat(userId, chat.id, updates);
+      }
     }
 
     // Only import recent message history for the first 15 active conversations to avoid timeout

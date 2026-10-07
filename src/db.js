@@ -439,6 +439,7 @@ export async function updateChat(userId, chatId, updates) {
       if (updates.isClosed !== undefined) { fields.push(`is_closed = $${i++}`); vals.push(updates.isClosed); }
       if (updates.unreadCount !== undefined) { fields.push(`unread_count = $${i++}`); vals.push(updates.unreadCount); }
       if (updates.lastMessage !== undefined) { fields.push(`last_message = $${i++}`); vals.push(JSON.stringify(updates.lastMessage)); }
+      if (updates.phone !== undefined) { fields.push(`phone = $${i++}`); vals.push(updates.phone); }
       if (fields.length === 0) return;
       vals.push(chatId, workspaceUserIds);
       await pool.query(`UPDATE chats SET ${fields.join(', ')} WHERE id = $${i++} AND user_id = ANY($${i}::int[])`, vals);
