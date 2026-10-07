@@ -869,6 +869,36 @@ app.get('/api/sessions/:session/chats', authenticateToken, async (req, res) => {
   } catch (e) { res.status(500).json({ status: 'error', message: e.message }); }
 });
 
+app.get('/api/sessions/:session/debug-chats', authenticateToken, async (req, res) => {
+  const client = await getAuthorizedClient(req, res);
+  if (!client) return;
+  try {
+    const debug = await client.page.evaluate(async () => {
+      const storeChats = window.Store?.Chat?.models?.map(c => ({
+        id: c.id?._serialized,
+        name: c.name || c.formattedTitle,
+        isGroup: Boolean(c.isGroup),
+        isUser: Boolean(c.isUser)
+      })) || [];
+      const wppAll = (await window.WPP?.chat?.list().catch(e => ({ error: e.message }))) || [];
+      const wppUsers = (await window.WPP?.chat?.list({ onlyUsers: true }).catch(e => ({ error: e.message }))) || [];
+      const wppGroups = (await window.WPP?.chat?.list({ onlyGroups: true }).catch(e => ({ error: e.message }))) || [];
+      return {
+        storeChatsCount: storeChats.length,
+        storeUserChatsCount: storeChats.filter(c => c.isUser).length,
+        wppAllCount: Array.isArray(wppAll) ? wppAll.length : wppAll,
+        wppUsersCount: Array.isArray(wppUsers) ? wppUsers.length : wppUsers,
+        wppGroupsCount: Array.isArray(wppGroups) ? wppGroups.length : wppGroups,
+        sampleStoreUsers: storeChats.filter(c => c.isUser).slice(0, 5),
+        sampleWppUsers: Array.isArray(wppUsers) ? wppUsers.slice(0, 5).map(c => ({ id: c.id?._serialized, name: c.name })) : []
+      };
+    });
+    res.json(debug);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/sessions/:session/contacts', authenticateToken, async (req, res) => {
   const client = await getAuthorizedClient(req, res);
   if (!client) return;
