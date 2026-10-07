@@ -582,8 +582,18 @@ async function startSession(sessionName, ownerId = null) {
       logQR: true,
       autoClose: 120000,  // 2 min to scan
       folderNameToken: TOKEN_DIR,
-      browserArgs: ['--no-sandbox'],
-      puppeteerOptions: {},
+      browserArgs: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--disable-gpu',
+      ],
+      puppeteerOptions: {
+        ...(process.env.PUPPETEER_EXECUTABLE_PATH ? { executablePath: process.env.PUPPETEER_EXECUTABLE_PATH } : {}),
+      },
     });
 
     sd.client = client;
