@@ -903,6 +903,8 @@ async function recoverPersistedSessions() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+app.use('/api/auth', authRoutes);
+
 // Dynamic on-demand message loader: ensures all recent WhatsApp messages
 // are fetched and visible as soon as a chat is opened.
 app.get('/api/chats/:chatId/messages', authenticateToken, async (req, res) => {
