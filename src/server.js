@@ -1,8 +1,8 @@
+import 'dotenv/config';
 import express from 'express';
 import http from 'http';
 import { Server as SocketIOServer } from 'socket.io';
 import cors from 'cors';
-import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import wppconnect from '@wppconnect-team/wppconnect';
@@ -26,8 +26,6 @@ import authRoutes from './routes/authRoutes.js';
 import { authenticateToken, JWT_SECRET } from './routes/authRoutes.js';
 import jwt from 'jsonwebtoken';
 import dataRoutes from './routes/dataRoutes.js';
-
-dotenv.config();
 
 initDatabase().catch(err => console.error('Database init error:', err));
 
