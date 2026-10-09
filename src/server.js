@@ -279,13 +279,40 @@ function formatCallText(msg) {
   return `${prefix} (${msg.fromMe ? 'No answer' : 'Missed'})`;
 }
 
-async function getMessageMediaDataUrl(client, msgId) {
-  if (!msgId) return '';
+async function getMessageMediaDataUrl(client, msgId, target = '', timestamp = null) {
   try {
-    return await client.page.evaluate(async (mid) => {
-      if (typeof window.WPP === 'undefined' || !window.WPP.chat?.downloadMedia) return '';
+    return await client.page.evaluate(async (mid, chatTarget, ts) => {
+      if (typeof window.WPP === 'undefined' || !window.WPP.chat) return '';
       try {
-        const blob = await window.WPP.chat.downloadMedia(mid);
+        let msg = null;
+        if (mid && !String(mid).startsWith('row_')) {
+          try {
+            msg = await window.WPP.chat.getMessage(chatTarget, mid);
+          } catch {}
+        }
+
+        if (!msg && chatTarget) {
+          try {
+            const chat = await window.WPP.chat.find(chatTarget);
+            if (chat?.msgs?.models) {
+              msg = chat.msgs.models.find(m => (ts && Number(m.t) === Number(ts)) || (mid && (m.id?._serialized === mid || m.rowId === mid)));
+            }
+          } catch {}
+        }
+
+        if (!msg && chatTarget) {
+          try {
+            const msgs = await window.WPP.chat.getMessages(chatTarget, { count: 60 });
+            if (Array.isArray(msgs)) {
+              msg = msgs.find(m => (ts && Number(m.t) === Number(ts)) || (mid && (m.id?._serialized === mid || m.id === mid)));
+            }
+          } catch {}
+        }
+
+        const idToDownload = msg?.id?._serialized || msg?.id || mid;
+        if (!idToDownload || String(idToDownload).startsWith('row_')) return '';
+
+        const blob = await window.WPP.chat.downloadMedia(idToDownload);
         if (!blob) return '';
         if (typeof blob === 'string') return blob;
         if (window.WPP.util?.blobToBase64) {
@@ -300,7 +327,7 @@ async function getMessageMediaDataUrl(client, msgId) {
       } catch (e) {
         return '';
       }
-    }, msgId);
+    }, msgId, target, timestamp);
   } catch {
     return '';
   }
@@ -484,11 +511,11 @@ async function fetchRecentChatMessages(client, rawTarget, hintName = '') {
     } catch {}
   }
 
-  // For recent media items without a loaded image URL, download media
-  for (const item of list.slice(-15)) {
-    if (['image', 'video', 'audio', 'document'].includes(item.type) && !item.mediaUrl && item.id && !item.id.startsWith('row_')) {
+  // For media items without a loaded image URL, download media
+  for (const item of list) {
+    if (['image', 'video', 'audio', 'document'].includes(item.type) && !item.mediaUrl) {
       try {
-        const dl = await getMessageMediaDataUrl(client, item.id);
+        const dl = await getMessageMediaDataUrl(client, item.id, target, item.t);
         if (dl) item.mediaUrl = dl;
       } catch {}
     }
@@ -647,7 +674,7 @@ async function handleAnyMessage(sessionName, message, client) {
       const mid = message.id?._serialized || message.id;
       if (mid) {
         try {
-          mediaUrl = await getMessageMediaDataUrl(client, mid);
+          mediaUrl = await getMessageMediaDataUrl(client, mid, remoteId, message.t || message.timestamp);
         } catch {}
       }
     }
