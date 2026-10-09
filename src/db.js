@@ -406,21 +406,37 @@ export async function getChats(userId) {
   const workspaceUserIds = await getWorkspaceUserIds(userId);
   if (isPgConnected && pool) {
     try {
-      const res = await pool.query('SELECT * FROM chats WHERE user_id = ANY($1::int[]) ORDER BY created_at DESC', [workspaceUserIds]);
+      const res = await pool.query(
+        `SELECT * FROM chats WHERE user_id = ANY($1::int[]) ORDER BY COALESCE(last_active_epoch, EXTRACT(EPOCH FROM created_at)::bigint) DESC`,
+        [workspaceUserIds]
+      );
       return res.rows.map(normalizeChat);
     } catch (err) { console.warn('PG chats read error:', err.message); }
   }
-  return Array.from(memoryChats.values()).filter(c => workspaceUserIds.includes(Number(c.user_id))).map(normalizeChat);
+  return Array.from(memoryChats.values())
+    .filter(c => workspaceUserIds.includes(Number(c.user_id)))
+    .sort((a, b) => (Number(b.lastActiveEpoch || 0) - Number(a.lastActiveEpoch || 0)))
+    .map(normalizeChat);
 }
 
 export async function createChat(userId, data) {
   const id = `chat_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  const chat = { id, user_id: userId, contact_id: data.contactId || '', contact_name: data.contactName, phone: data.phone, avatar: data.avatar || '', unread_count: 0, is_group: data.isGroup || false, group_members_count: data.groupMembersCount || 0, channel: data.channel || 'sales', assigned_to: data.assignedTo || '', is_closed: false, last_message: data.lastMessage || {}, tags: data.tags || [], created_at: new Date().toISOString() };
+  const lastActiveEpoch = data.lastActiveEpoch || (data.timestamp ? Number(data.timestamp) : Math.floor(Date.now() / 1000));
+  const chat = {
+    id, user_id: userId, contact_id: data.contactId || '', contact_name: data.contactName,
+    phone: data.phone, avatar: data.avatar || '', unread_count: data.unreadCount || 0,
+    is_group: data.isGroup || false, group_members_count: data.groupMembersCount || 0,
+    channel: data.channel || 'sales', assigned_to: data.assignedTo || '', is_closed: false,
+    last_message: data.lastMessage || {}, tags: data.tags || [],
+    last_active_epoch: lastActiveEpoch, created_at: new Date().toISOString()
+  };
 
   if (isPgConnected && pool) {
     try {
-      await pool.query(`INSERT INTO chats (id, user_id, contact_id, contact_name, phone, avatar, unread_count, is_group, group_members_count, channel, assigned_to, is_closed, last_message, tags) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-        [id, userId, chat.contact_id, chat.contact_name, chat.phone, chat.avatar, 0, chat.is_group, chat.group_members_count, chat.channel, chat.assigned_to, false, JSON.stringify(chat.last_message), JSON.stringify(chat.tags)]);
+      await pool.query(
+        `INSERT INTO chats (id, user_id, contact_id, contact_name, phone, avatar, unread_count, is_group, group_members_count, channel, assigned_to, is_closed, last_message, tags, last_active_epoch) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+        [id, userId, chat.contact_id, chat.contact_name, chat.phone, chat.avatar, chat.unread_count, chat.is_group, chat.group_members_count, chat.channel, chat.assigned_to, false, JSON.stringify(chat.last_message), JSON.stringify(chat.tags), lastActiveEpoch]
+      );
       return normalizeChat(chat);
     } catch (err) { console.warn('PG chat create error:', err.message); }
   }
@@ -440,6 +456,8 @@ export async function updateChat(userId, chatId, updates) {
       if (updates.unreadCount !== undefined) { fields.push(`unread_count = $${i++}`); vals.push(updates.unreadCount); }
       if (updates.lastMessage !== undefined) { fields.push(`last_message = $${i++}`); vals.push(JSON.stringify(updates.lastMessage)); }
       if (updates.phone !== undefined) { fields.push(`phone = $${i++}`); vals.push(updates.phone); }
+      if (updates.contactName !== undefined) { fields.push(`contact_name = $${i++}`); vals.push(updates.contactName); }
+      if (updates.lastActiveEpoch !== undefined) { fields.push(`last_active_epoch = $${i++}`); vals.push(updates.lastActiveEpoch); }
       if (fields.length === 0) return;
       vals.push(chatId, workspaceUserIds);
       await pool.query(`UPDATE chats SET ${fields.join(', ')} WHERE id = $${i++} AND user_id = ANY($${i}::int[])`, vals);
@@ -481,7 +499,9 @@ function normalizeChat(row) {
     avatar: row.avatar, unreadCount: row.unread_count || 0, isGroup: row.is_group || false,
     groupMembersCount: row.group_members_count || 0, channel: row.channel,
     assignedTo: row.assigned_to, isClosed: row.is_closed || false,
-    lastMessage: row.last_message || {}, tags: row.tags || [], created_at: row.created_at
+    lastMessage: row.last_message || {}, tags: row.tags || [],
+    lastActiveEpoch: row.last_active_epoch ? Number(row.last_active_epoch) : 0,
+    created_at: row.created_at
   };
 }
 

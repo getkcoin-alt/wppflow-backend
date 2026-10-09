@@ -707,9 +707,11 @@ async function handleAnyMessage(sessionName, message, client) {
       timestamp: ts,
     }, userId);
 
+    const nowEpoch = message.t ? Number(message.t) : Math.floor(Date.now() / 1000);
     await updateChat(userId, chat.id, {
       unreadCount: isOut ? (chat.unreadCount || 0) : ((chat.unreadCount || 0) + 1),
       lastMessage: { text: msgText, timestamp: ts, status: isOut ? 'sent' : 'delivered', fromMe: isOut },
+      lastActiveEpoch: nowEpoch,
     });
 
     // Real-time broadcast to all browser tabs in the workspace
@@ -798,30 +800,50 @@ async function syncRemoteChats(sessionName, client) {
       try {
         const list = await window.WPP.chat.list();
         return list.map((c) => {
-          const rawId = c.id?._serialized || c.id;
-          const isGroup = Boolean(c.isGroup || String(rawId).includes('@g.us'));
+          const rawId = String(c.id?._serialized || c.id || '');
+          const isGroup = Boolean(c.isGroup || rawId.includes('@g.us'));
           const contact = c.contact || {};
-          const name = c.name || c.formattedTitle || contact.name || contact.pushname || contact.shortName || '';
-          const isLid = String(rawId).includes('@lid');
+          const name = c.formattedTitle || c.name || contact.name || contact.pushname || contact.shortName || '';
+          const isLid = rawId.includes('@lid');
           const phone = (isGroup || isLid)
-            ? String(rawId)
+            ? rawId
             : String(contact.id?.user || contact.phoneNumber || c.id?.user || rawId).replace(/@c\.us$/, '');
-          const msgs = c.msgs?.models || [];
-          const last = msgs.length > 0 ? msgs[msgs.length - 1] : null;
-          const lastBody = last?.body || last?.caption || (last?.type && last.type !== 'chat' ? `[${last.type}]` : '');
-          const lastTimestamp = last?.t ? Number(last.t) : (c.t ? Number(c.t) : null);
-          const fromMe = Boolean(last?.fromMe);
+
+          let lastBody = '';
+          let fromMe = false;
+          if (c.previewMessage) {
+            fromMe = Boolean(c.previewMessage.fromMe);
+            const pType = c.previewMessage.type;
+            if (pType === 'call_log') lastBody = '📞 Voice call';
+            else if (pType === 'image') lastBody = '📷 Photo';
+            else if (pType === 'video') lastBody = '🎥 Video';
+            else if (pType === 'audio' || pType === 'ptt') lastBody = '🎵 Voice message';
+            else if (pType === 'document') lastBody = '📄 Document';
+            else if (pType === 'vcard') {
+              const match = (c.previewMessage.body || '').match(/FN:(.+)/i) || (c.previewMessage.body || '').match(/N:(.+)/i);
+              lastBody = match ? `👤 ${match[1].replace(/;/g, ' ').trim()}` : '👤 Contact';
+            } else {
+              lastBody = c.previewMessage.body || '';
+            }
+          }
+          if (!lastBody && c.msgs?.models?.length > 0) {
+            const last = c.msgs.models[c.msgs.models.length - 1];
+            lastBody = last?.body || last?.caption || (last?.type && last.type !== 'chat' ? `[${last.type}]` : '');
+            fromMe = Boolean(last?.fromMe);
+          }
+
+          const lastTimestamp = Number(c.t || 0);
 
           return {
-            rawId: String(rawId),
+            rawId,
             name: name || (isGroup ? 'WhatsApp Group' : phone),
-            phone: phone || String(rawId),
+            phone: phone || rawId,
             isGroup,
             groupMembersCount: c.groupMetadata?.participants?.length || 0,
             avatar: contact.profilePicThumbObj?.eurl || '',
             unreadCount: Number(c.unreadCount || 0),
             timestamp: lastTimestamp,
-            lastMessage: lastBody,
+            lastMessage: lastBody || (isGroup ? 'Group joined' : 'Chat active'),
             fromMe
           };
         });
@@ -870,6 +892,9 @@ async function syncRemoteChats(sessionName, client) {
     } catch {}
   }
 
+  // Sort conversations by most recent activity timestamp descending (matching WhatsApp Web)
+  allConversations.sort((a, b) => (Number(b.timestamp || 0) - Number(a.timestamp || 0)));
+
   // 3. Persist and import conversations into database
   const existing = await getChats(userId);
   let chatsCreated = 0;
@@ -901,10 +926,12 @@ async function syncRemoteChats(sessionName, client) {
         assignedTo: '',
         isGroup,
         groupMembersCount,
+        unreadCount: remote.unreadCount,
+        lastActiveEpoch: remote.timestamp,
         lastMessage: {
           text: remote.lastMessage || (isGroup ? 'Group joined' : 'Chat active'),
           timestamp: timeStr,
-          status: 'delivered',
+          status: remote.fromMe ? 'sent' : 'delivered',
           fromMe: remote.fromMe,
         },
         tags: isGroup ? ['Group'] : ['Individual'],
@@ -913,18 +940,27 @@ async function syncRemoteChats(sessionName, client) {
       chatsCreated++;
       io.to(`workspace:${userId}`).emit('chat:created', { session: sessionName, chat });
     } else {
-      const updates = {};
-      if (remote.lastMessage) {
-        updates.unreadCount = remote.unreadCount;
-        updates.lastMessage = { text: remote.lastMessage, timestamp: timeStr, status: 'delivered', fromMe: remote.fromMe };
+      const updates = {
+        lastActiveEpoch: remote.timestamp,
+        unreadCount: remote.unreadCount,
+        contactName: contactName || chat.contactName,
+      };
+      if (remote.lastMessage && remote.lastMessage !== 'Chat active' && remote.lastMessage !== 'Group joined') {
+        updates.lastMessage = {
+          text: remote.lastMessage,
+          timestamp: timeStr,
+          status: remote.fromMe ? 'sent' : 'delivered',
+          fromMe: remote.fromMe
+        };
       }
       if (remoteId && (remoteId.includes('@lid') || remoteId.includes('@g.us')) && chat.phone !== remoteId) {
         updates.phone = remoteId;
         chat.phone = remoteId;
       }
-      if (Object.keys(updates).length > 0) {
-        await updateChat(userId, chat.id, updates);
+      if (avatar && (!chat.avatar || chat.avatar === '')) {
+        updates.avatar = avatar;
       }
+      await updateChat(userId, chat.id, updates);
     }
 
     // Only import recent message history for the first 15 active conversations to avoid timeout
@@ -1428,8 +1464,10 @@ app.post('/api/sessions/:session/send-message', authenticateToken, async (req, r
           timestamp: ts
         }, req.user.id);
 
+        const nowEpoch = Math.floor(Date.now() / 1000);
         await updateChat(req.user.id, targetChatId, {
-          lastMessage: { text: req.body.message, timestamp: ts, status: 'sent', fromMe: true }
+          lastMessage: { text: req.body.message, timestamp: ts, status: 'sent', fromMe: true },
+          lastActiveEpoch: nowEpoch
         });
 
         io.to(`workspace:${req.user.id}`).emit('session:message', {
