@@ -1360,19 +1360,68 @@ app.post('/api/sessions/:session/send-message', authenticateToken, async (req, r
   try {
     if (!req.body?.message?.trim()) return res.status(400).json({ status: 'error', message: 'message is required' });
     let hintName = req.body.contactName || req.body.hintName || '';
-    if (!hintName && (req.body.chatId || req.body.phone)) {
+    let targetChatId = req.body.chatId || '';
+    if (!hintName && (targetChatId || req.body.phone)) {
       const pool = getPool();
       if (pool) {
         const { rows } = await pool.query(
-          `SELECT contact_name, phone FROM chats WHERE id = $1 OR phone = $2 LIMIT 1`,
-          [req.body.chatId || '', req.body.phone || '']
+          `SELECT id, contact_name, phone FROM chats WHERE id = $1 OR phone = $2 LIMIT 1`,
+          [targetChatId || '', req.body.phone || '']
         );
         if (rows.length > 0) {
           hintName = rows[0].contact_name;
+          if (!targetChatId) targetChatId = rows[0].id;
         }
       }
     }
     const result = await sendTextMessageSafe(s.client, req.body.phone, req.body.message, {}, hintName);
+
+    // Save message and emit real-time updates to workspace if chat is known
+    if (targetChatId) {
+      try {
+        const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const saved = await createMessage(targetChatId, {
+          sender: 'agent',
+          agentName: req.user.name || 'Agent',
+          text: req.body.message,
+          type: 'text',
+          status: 'sent',
+          timestamp: ts
+        }, req.user.id);
+
+        await updateChat(req.user.id, targetChatId, {
+          lastMessage: { text: req.body.message, timestamp: ts, status: 'sent', fromMe: true }
+        });
+
+        io.to(`workspace:${req.user.id}`).emit('session:message', {
+          session: req.params.session,
+          chatId: targetChatId,
+          message: {
+            id: result?.id || saved.id,
+            chatId: targetChatId,
+            from: req.params.session,
+            senderName: req.user.name || 'Agent',
+            body: req.body.message,
+            text: req.body.message,
+            type: 'text',
+            timestamp: ts,
+            savedMessageId: saved.id,
+            fromMe: true,
+            status: 'sent',
+          }
+        });
+
+        io.to(`workspace:${req.user.id}`).emit('chat:updated', {
+          session: req.params.session,
+          chatId: targetChatId,
+          lastMessage: { text: req.body.message, timestamp: ts, status: 'sent', fromMe: true },
+          unreadCount: 0
+        });
+      } catch (broadcastErr) {
+        console.warn('Post-send broadcast error:', broadcastErr.message);
+      }
+    }
+
     res.json({ status: 'success', response: result });
   } catch (e) {
     console.error(`Send message error [${req.params.session}]:`, e.message);
