@@ -1275,15 +1275,21 @@ app.get('/api/chats/:chatId/messages', authenticateToken, async (req, res) => {
 app.get('/api/debug/inspect-image', authenticateToken, async (req, res) => {
   const session = sessions.get('primary-whatsapp');
   if (!session?.client) return res.json({ error: 'No client' });
+  const targetId = req.query.target || '79375424847946@lid';
   try {
-    const info = await session.client.page.evaluate(async () => {
-      const chats = await window.WPP.chat.list();
-      const targetChat = chats.find(c => c.name?.includes('Ardhangini') || c.formattedTitle?.includes('Ardhangini'));
-      if (!targetChat) return { error: 'chat not found' };
-      const msgs = await window.WPP.chat.getMessages(targetChat.id._serialized, { count: 30 });
+    const info = await session.client.page.evaluate(async (tid) => {
+      let chat = await window.WPP.chat.find(tid).catch(() => null);
+      if (!chat) {
+        const chats = await window.WPP.chat.list();
+        chat = chats.find(c => (c.id?._serialized === tid || c.name?.includes('Ardhangini')));
+      }
+      if (!chat) return { error: 'chat not found', tid };
+      const msgs = await window.WPP.chat.getMessages(chat.id?._serialized || tid, { count: 30 });
       const imgMsgs = msgs.filter(m => m.type === 'image');
       return {
-        chatId: targetChat.id._serialized,
+        chatId: chat.id?._serialized,
+        chatName: chat.name || chat.formattedTitle,
+        allCount: msgs.length,
         imgCount: imgMsgs.length,
         samples: imgMsgs.map(m => ({
           id: m.id?._serialized || m.id,
@@ -1294,10 +1300,12 @@ app.get('/api/debug/inspect-image', authenticateToken, async (req, res) => {
           mimetype: m.mimetype,
           hasMediaData: Boolean(m.mediaData),
           previewType: m.mediaData?.preview ? typeof m.mediaData.preview : null,
-          keys: Object.keys(m).slice(0, 25)
+          deprecatedMms3Url: m.deprecatedMms3Url ? 'present' : null,
+          directPath: m.directPath ? 'present' : null,
+          keys: Object.keys(m).slice(0, 30)
         }))
       };
-    });
+    }, targetId);
     res.json(info);
   } catch (err) {
     res.status(500).json({ error: err.message });
