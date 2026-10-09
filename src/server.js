@@ -1277,26 +1277,50 @@ app.get('/api/debug/inspect-image', authenticateToken, async (req, res) => {
   if (!session?.client) return res.json({ error: 'No client' });
   const targetId = req.query.target || '79375424847946@lid';
   try {
-    const msgs = await session.client.getAllMessagesInChat(targetId, true, false).catch(() => []);
-    const imgMsgs = (msgs || []).filter(m => m.type === 'image');
-    res.json({
-      allCount: msgs.length,
-      imgCount: imgMsgs.length,
-      samples: imgMsgs.map(m => ({
-        id: m.id?._serialized || m.id,
-        type: m.type,
-        bodyLen: m.body ? m.body.length : 0,
-        bodyPrefix: m.body ? m.body.slice(0, 50) : '',
-        caption: m.caption,
-        mimetype: m.mimetype,
-        hasMediaData: Boolean(m.mediaData),
-        previewType: m.mediaData?.preview ? typeof m.mediaData.preview : null,
-        previewB64: m.mediaData?.preview?._b64 ? 'present' : null,
-        deprecatedMms3Url: m.deprecatedMms3Url ? 'present' : null,
-        directPath: m.directPath ? 'present' : null,
-        keys: Object.keys(m).slice(0, 30)
-      }))
-    });
+    const info = await session.client.page.evaluate(async (tid) => {
+      return new Promise((resolve) => {
+        const req = indexedDB.open('model-storage');
+        req.onsuccess = (e) => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains('message')) {
+            db.close();
+            return resolve({ error: 'No message store' });
+          }
+          const tx = db.transaction(['message'], 'readonly');
+          const store = tx.objectStore('message');
+          const range = IDBKeyRange.bound(`${tid}_`, `${tid}_\uffff`);
+          const cursorReq = store.index('internalId').openCursor(range, 'prev');
+          const results = [];
+          cursorReq.onsuccess = () => {
+            const cursor = cursorReq.result;
+            if (cursor && results.length < 60) {
+              const v = cursor.value;
+              results.push({
+                id: String(v.id?._serialized || v.id || ''),
+                type: v.type,
+                bodyLen: v.body ? v.body.length : 0,
+                bodyPrefix: v.body ? v.body.slice(0, 40) : '',
+                caption: v.caption,
+                hasMediaData: Boolean(v.mediaData),
+                preview: v.mediaData?.preview ? typeof v.mediaData.preview : (v.preview ? typeof v.preview : null),
+                keys: Object.keys(v).filter(k => k.toLowerCase().includes('media') || k.toLowerCase().includes('url') || k.toLowerCase().includes('thumb') || k.toLowerCase().includes('data'))
+              });
+              cursor.continue();
+            } else {
+              db.close();
+              resolve({
+                total: results.length,
+                images: results.filter(r => r.type === 'image'),
+                allTypes: Array.from(new Set(results.map(r => r.type)))
+              });
+            }
+          };
+          cursorReq.onerror = () => { db.close(); resolve({ error: 'cursor error' }); };
+        };
+        req.onerror = () => resolve({ error: 'idb open error' });
+      });
+    }, targetId);
+    res.json(info);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
