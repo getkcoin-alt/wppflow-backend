@@ -1331,7 +1331,7 @@ app.get('/api/debug/wpp-chats', authenticateToken, async (req, res) => {
     if (targetChatId) {
       const single = await session.client.page.evaluate(async (cid) => {
         const list = await window.WPP.chat.list();
-        const c = list.find(x => String(x.id?._serialized || x.id) === cid);
+        const c = list.find(x => String(x.id?._serialized || x.id || '').includes(cid));
         if (!c) return { notFound: true };
         const pm = c.previewMessage || {};
         return {
