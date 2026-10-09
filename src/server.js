@@ -1326,6 +1326,33 @@ app.get('/api/debug/inspect-image', authenticateToken, async (req, res) => {
   }
 });
 
+app.get('/api/debug/test-send', authenticateToken, async (req, res) => {
+  const session = sessions.get('primary-whatsapp');
+  if (!session?.client) return res.json({ error: 'No client' });
+  const target = req.query.target || '79375424847946@lid';
+  try {
+    const result = await session.client.page.evaluate(async (to) => {
+      try {
+        if (window.WPP?.chat?.openChat) {
+          await window.WPP.chat.openChat(to).catch(() => null);
+        }
+        const sendRes = await window.WPP.chat.sendTextMessage(to, 'Test from WppFlow', { waitForAck: false });
+        return { success: true, sendRes };
+      } catch (err) {
+        return {
+          error: true,
+          message: err?.message || String(err),
+          stack: err?.stack,
+          stringified: JSON.stringify(err, Object.getOwnPropertyNames(err))
+        };
+      }
+    }, target);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message, stack: e.stack });
+  }
+});
+
 app.use('/api', dataRoutes);
 
 // Session and QR state changes continuously. Prevent browsers and Vercel's
