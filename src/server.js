@@ -1361,20 +1361,22 @@ app.post('/api/sessions/:session/send-message', authenticateToken, async (req, r
     if (!req.body?.message?.trim()) return res.status(400).json({ status: 'error', message: 'message is required' });
     let hintName = req.body.contactName || req.body.hintName || '';
     let targetChatId = req.body.chatId || '';
-    if (!hintName && (targetChatId || req.body.phone)) {
+    let targetPhone = req.body.phone || '';
+    if ((!hintName || !targetPhone || !targetChatId) && (targetChatId || targetPhone)) {
       const pool = getPool();
       if (pool) {
         const { rows } = await pool.query(
           `SELECT id, contact_name, phone FROM chats WHERE id = $1 OR phone = $2 LIMIT 1`,
-          [targetChatId || '', req.body.phone || '']
+          [targetChatId || '', targetPhone || '']
         );
         if (rows.length > 0) {
-          hintName = rows[0].contact_name;
+          if (!hintName) hintName = rows[0].contact_name;
           if (!targetChatId) targetChatId = rows[0].id;
+          if (!targetPhone) targetPhone = rows[0].phone;
         }
       }
     }
-    const result = await sendTextMessageSafe(s.client, req.body.phone, req.body.message, {}, hintName);
+    const result = await sendTextMessageSafe(s.client, targetPhone, req.body.message, {}, hintName);
 
     // Save message and emit real-time updates to workspace if chat is known
     if (targetChatId) {
