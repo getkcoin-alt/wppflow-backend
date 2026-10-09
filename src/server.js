@@ -1277,38 +1277,26 @@ app.get('/api/debug/inspect-image', authenticateToken, async (req, res) => {
   if (!session?.client) return res.json({ error: 'No client' });
   const targetId = req.query.target || '79375424847946@lid';
   try {
-    const info = await session.client.page.evaluate(async (tid) => {
-      let chat = null;
-      if (window.WPP?.whatsapp?.ChatStore) {
-        chat = window.WPP.whatsapp.ChatStore.get(tid);
-      }
-      if (!chat && window.WPP?.chat?.find) {
-        chat = await window.WPP.chat.find(tid).catch(() => null);
-      }
-      if (!chat) return { error: 'chat not found', tid };
-      const models = chat.msgs?.models || [];
-      const imgMsgs = models.filter(m => m.type === 'image');
-      return {
-        chatId: chat.id?._serialized,
-        chatName: chat.name || chat.formattedTitle,
-        allCount: models.length,
-        imgCount: imgMsgs.length,
-        samples: imgMsgs.map(m => ({
-          id: m.id?._serialized || m.id,
-          type: m.type,
-          bodyLen: m.body ? m.body.length : 0,
-          bodyPrefix: m.body ? m.body.slice(0, 50) : '',
-          caption: m.caption,
-          mimetype: m.mimetype,
-          hasMediaData: Boolean(m.mediaData),
-          previewType: m.mediaData?.preview ? typeof m.mediaData.preview : null,
-          deprecatedMms3Url: m.deprecatedMms3Url ? 'present' : null,
-          directPath: m.directPath ? 'present' : null,
-          keys: Object.keys(m).slice(0, 30)
-        }))
-      };
-    }, targetId);
-    res.json(info);
+    const msgs = await session.client.getAllMessagesInChat(targetId, true, false).catch(() => []);
+    const imgMsgs = (msgs || []).filter(m => m.type === 'image');
+    res.json({
+      allCount: msgs.length,
+      imgCount: imgMsgs.length,
+      samples: imgMsgs.map(m => ({
+        id: m.id?._serialized || m.id,
+        type: m.type,
+        bodyLen: m.body ? m.body.length : 0,
+        bodyPrefix: m.body ? m.body.slice(0, 50) : '',
+        caption: m.caption,
+        mimetype: m.mimetype,
+        hasMediaData: Boolean(m.mediaData),
+        previewType: m.mediaData?.preview ? typeof m.mediaData.preview : null,
+        previewB64: m.mediaData?.preview?._b64 ? 'present' : null,
+        deprecatedMms3Url: m.deprecatedMms3Url ? 'present' : null,
+        directPath: m.directPath ? 'present' : null,
+        keys: Object.keys(m).slice(0, 30)
+      }))
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
