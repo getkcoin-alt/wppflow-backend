@@ -1371,8 +1371,13 @@ app.get('/api/debug/wpp-chats', authenticateToken, async (req, res) => {
           cVerifiedName: c.verifiedName,
           cName: c.name,
           cFormattedTitle: c.formattedTitle,
-          contactMethods: window.WPP.contact ? Object.keys(window.WPP.contact) : [],
-          chatMethods: window.WPP.chat ? Object.keys(window.WPP.chat) : [],
+          picTest: await (async () => {
+            try {
+              return await window.WPP.contact.getProfilePictureUrl(String(c.id?._serialized || c.id || ''));
+            } catch (e) {
+              return 'err: ' + e.message;
+            }
+          })(),
           contactPic: c.contact?.profilePicThumbObj?.eurl || c.contact?.profilePicThumb?.eurl || '',
           previewMessageKeys: Object.keys(pm),
           previewMessageType: pm.type,
