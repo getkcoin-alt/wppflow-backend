@@ -1374,15 +1374,18 @@ app.get('/api/debug/wpp-chats', authenticateToken, async (req, res) => {
           picTest: await (async () => {
             try {
               const pn = c.contact?.__x_phoneNumber || c.contact?.phoneNumber;
+              const pnStr = pn?._serialized || (pn?.user ? `${pn.user}@c.us` : (typeof pn === 'string' ? (pn.includes('@') ? pn : `${pn}@c.us`) : null));
               const targets = [
-                pn ? `${pn}@c.us` : null,
+                pnStr,
                 String(c.id?._serialized || c.id || ''),
               ].filter(Boolean);
               for (const t of targets) {
                 const url = await window.WPP.contact.getProfilePictureUrl(t).catch(() => null);
                 if (url) return { target: t, url };
+                const url2 = await window.WPP.chat?.getProfilePictureUrl?.(t).catch(() => null);
+                if (url2) return { target: t, url: url2 };
               }
-              return { notFound: true, pn };
+              return { notFound: true, pnStr };
             } catch (e) {
               return 'err: ' + e.message;
             }
