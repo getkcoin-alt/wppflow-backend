@@ -6,14 +6,20 @@
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "node --watch src/server.js"
+    "dev": "node --watch src/server.js",
+    "test": "node --test 'tests/**/*.test.js'",
+    "seed:demo": "node src/db/seed.js"
   },
   "dependencies": {
-    "@wppconnect-team/wppconnect": "^1.35.3",
+    "@wppconnect-team/wppconnect": "1.41.3",
     "bcryptjs": "^3.0.3",
+    "bullmq": "^6.3.12",
+    "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "express-rate-limit": "^8.7.1",
+    "ioredis": "^6.0.0",
     "jsonwebtoken": "^9.0.3",
     "pg": "^8.23.0",
     "qrcode": "^1.5.3",
@@ -21,5 +27,8 @@
   },
   "engines": {
     "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "supertest": "^7.3.1"
   }
 }

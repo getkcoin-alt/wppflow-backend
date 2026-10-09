@@ -1,0 +1,25 @@
+export const ACK_STATUS = {
+  ERROR: -1,
+  PENDING: 0,
+  SERVER: 1,
+  DELIVERY: 2,
+  READ: 3,
+  PLAYED: 4,
+};
+
+export const ROLES = {
+  OWNER: 'owner',
+  ADMIN: 'admin',
+  AGENT: 'agent',
+  VIEWER: 'viewer',
+};
+
+export const SESSION_STATUS = {
+  DISCONNECTED: 'DISCONNECTED',
+  STARTING: 'STARTING',
+  QRCODE: 'QRCODE',
+  AUTHENTICATING: 'AUTHENTICATING',
+  CONNECTED: 'CONNECTED',
+  EXPIRED: 'EXPIRED',
+  FAILED: 'FAILED',
+};

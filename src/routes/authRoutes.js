@@ -1,116 +1,82 @@
-import 'dotenv/config';
 import express from 'express';
-import jwt from 'jsonwebtoken';
 import { 
-  createUser, 
-  findUserByEmail, 
-  findUserById, 
-  getAllUsers, 
-  comparePassword,
-  getDatabaseStatus,
-  getWorkspaceUserIds,
-  updateUser,
-  deleteUser
-} from '../db.js';
+  registerTenantAndUser, 
+  comparePassword, 
+  generateAccessToken, 
+  generateRefreshToken, 
+  rotateRefreshToken, 
+  revokeAllRefreshTokens 
+} from '../services/authService.js';
+import { authenticateToken } from '../middleware/auth.js';
+import { authRateLimiter } from '../middleware/rateLimiter.js';
+import { query } from '../db/index.js';
 
 const router = express.Router();
-export const JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET) {
-  console.error('❌ FATAL: JWT_SECRET environment variable is not set. Refusing to start.');
-  process.exit(1);
-}
-
-// Middleware to authenticate Bearer token
-export function authenticateToken(req, res, next) {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
-
-  if (!token) {
-    return res.status(401).json({ status: 'error', message: 'Authentication required. No token provided.' });
-  }
-
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded;
-    next();
-  } catch (err) {
-    return res.status(403).json({ status: 'error', message: 'Invalid or expired token.' });
-  }
-}
 
 /**
  * POST /api/auth/signup
- * Register a new organisation / user.
- *
- * Role assignment rules (most restrictive wins):
- *  1. Only the very first account in an empty database becomes admin.
- *  2. An explicit role='admin' body param is accepted ONLY when an existing
- *     admin is making the request (req.user present and role === 'admin').
- *  3. All other signups are forced to 'user' — no email-string sniffing.
  */
-router.post('/signup', async (req, res) => {
+router.post('/signup', authRateLimiter, async (req, res) => {
   try {
-    const { email, password, name, companyName, role: requestedRole } = req.body;
+    const { email, password, name, companyName } = req.body;
 
     if (!email || !password || !name) {
-      return res.status(400).json({ 
-        status: 'error', 
-        message: 'Name, email, and password (min 6 characters) are required.' 
+      return res.status(400).json({
+        status: 'error',
+        message: 'Name, email, and password (minimum 8 characters) are required.'
       });
     }
 
-    if (password.length < 6) {
-      return res.status(400).json({ 
-        status: 'error', 
-        message: 'Password must be at least 6 characters long.' 
+    if (password.length < 8) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Password must be at least 8 characters long.'
       });
     }
 
-    const existing = await findUserByEmail(email);
-    if (existing) {
-      return res.status(409).json({ 
-        status: 'error', 
-        message: 'An account with this email already exists. Please log in.' 
+    const { rows: existing } = await query('SELECT id FROM users WHERE email = $1', [email.trim().toLowerCase()]);
+    if (existing.length > 0) {
+      return res.status(409).json({
+        status: 'error',
+        message: 'An account with this email already exists. Please log in.'
       });
     }
 
-    // Determine role — never trust the client unless an authenticated admin asked
-    const isAdminRequest = req.user && req.user.role === 'admin';
-    let assignedRole = 'user';
-    if (isAdminRequest && requestedRole === 'admin') {
-      assignedRole = 'admin';
-    }
-
-    // First-ever account (empty DB) becomes the initial admin
-    const allUsers = await getAllUsers();
-    if (allUsers.length === 0) {
-      assignedRole = email.trim().toLowerCase() === 'admin@wppflow.io' ? 'admin' : 'user';
-    }
-
-    const plan = assignedRole === 'admin' ? 'Enterprise' : 'Growth';
-    const sessions_limit = assignedRole === 'admin' ? 25 : 5;
-
-    const user = await createUser({
+    const { user, tenant, role } = await registerTenantAndUser({
       email,
       password,
       name,
-      company_name: companyName || `${name.split(' ')[0]}'s Workspace`,
-      role: assignedRole,
-      plan,
-      sessions_limit
+      companyName
     });
 
-    const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
-      JWT_SECRET,
-      { expiresIn: '30d' }
-    );
+    const accessToken = generateAccessToken(user, tenant.id, role);
+    const { refreshToken } = await generateRefreshToken(user.id);
+
+    // Set secure HttpOnly refresh cookie
+    res.cookie('refreshToken', refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000
+    });
 
     res.status(201).json({
       status: 'success',
-      message: 'Account created successfully!',
-      token,
-      user
+      message: 'Workspace created successfully!',
+      token: accessToken,
+      refreshToken,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        isSuperAdmin: user.is_superadmin
+      },
+      tenant: {
+        id: tenant.id,
+        name: tenant.name,
+        slug: tenant.slug,
+        role
+      }
     });
   } catch (error) {
     console.error('Signup error:', error);
@@ -120,58 +86,114 @@ router.post('/signup', async (req, res) => {
 
 /**
  * POST /api/auth/login
- * Authenticate existing user
  */
-router.post('/login', async (req, res) => {
+router.post('/login', authRateLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
 
     if (!email || !password) {
-      return res.status(400).json({ 
-        status: 'error', 
-        message: 'Email and password are required.' 
+      return res.status(400).json({
+        status: 'error',
+        message: 'Email and password are required.'
       });
     }
 
-    const user = await findUserByEmail(email);
-    if (!user) {
-      return res.status(401).json({ 
-        status: 'error', 
-        message: 'Invalid email or password.' 
-      });
+    const normalizedEmail = email.trim().toLowerCase();
+    const { rows: users } = await query(
+      `SELECT id, email, password_hash, name, is_superadmin, status FROM users WHERE email = $1`,
+      [normalizedEmail]
+    );
+
+    if (users.length === 0) {
+      return res.status(401).json({ status: 'error', message: 'Invalid email or password.' });
     }
 
-    if (user.status && user.status !== 'active') {
+    const user = users[0];
+
+    if (user.status !== 'active') {
       return res.status(403).json({
         status: 'error',
-        code: 'ACCOUNT_BLOCKED',
-        message: user.status === 'blocked'
-          ? 'This account is blocked. Contact your workspace administrator.'
-          : 'This account is not active. Contact your workspace administrator.'
+        code: 'ACCOUNT_SUSPENDED',
+        message: 'Account is not active. Please contact your workspace administrator.'
       });
     }
 
     const isMatch = await comparePassword(password, user.password_hash);
     if (!isMatch) {
-      return res.status(401).json({ 
-        status: 'error', 
-        message: 'Invalid email or password.' 
-      });
+      return res.status(401).json({ status: 'error', message: 'Invalid email or password.' });
     }
 
-    const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
-      JWT_SECRET,
-      { expiresIn: '30d' }
-    );
+    // Resolve tenant memberships
+    const { rows: memberships } = await query(`
+      SELECT m.tenant_id, m.role, t.name as tenant_name, t.slug as tenant_slug, t.plan
+      FROM memberships m
+      JOIN tenants t ON m.tenant_id = t.id
+      WHERE m.user_id = $1
+      ORDER BY m.created_at ASC
+    `, [user.id]);
 
-    const { password_hash: _, ...safeUser } = user;
+    let activeTenant = null;
+    let activeRole = 'agent';
+
+    if (memberships.length > 0) {
+      activeTenant = {
+        id: memberships[0].tenant_id,
+        name: memberships[0].tenant_name,
+        slug: memberships[0].tenant_slug,
+        plan: memberships[0].plan
+      };
+      activeRole = memberships[0].role;
+    } else {
+      // Auto-provision a personal tenant if none exists
+      const tenantId = `tenant_user_${user.id}`;
+      await query(`
+        INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING
+      `, [tenantId, `${user.name}'s Workspace`, `workspace-${user.id}`]);
+      await query(`
+        INSERT INTO memberships (tenant_id, user_id, role) VALUES ($1, $2, 'owner') ON CONFLICT DO NOTHING
+      `, [tenantId, user.id]);
+      activeTenant = { id: tenantId, name: `${user.name}'s Workspace`, slug: `workspace-${user.id}` };
+      activeRole = 'owner';
+    }
+
+    const accessToken = generateAccessToken(user, activeTenant.id, activeRole);
+    const { refreshToken } = await generateRefreshToken(user.id);
+
+    // Audit log
+    await query(`
+      INSERT INTO audit_events (tenant_id, actor_id, event_type, metadata)
+      VALUES ($1, $2, 'auth.login_success', $3)
+    `, [activeTenant.id, user.id, JSON.stringify({ ip: req.ip })]);
+
+    res.cookie('refreshToken', refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000
+    });
 
     res.json({
       status: 'success',
       message: 'Login successful!',
-      token,
-      user: safeUser
+      token: accessToken,
+      refreshToken,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        isSuperAdmin: user.is_superadmin
+      },
+      tenant: {
+        id: activeTenant.id,
+        name: activeTenant.name,
+        slug: activeTenant.slug,
+        role: activeRole
+      },
+      memberships: memberships.map(m => ({
+        tenantId: m.tenant_id,
+        tenantName: m.tenant_name,
+        role: m.role
+      }))
     });
   } catch (error) {
     console.error('Login error:', error);
@@ -180,188 +202,152 @@ router.post('/login', async (req, res) => {
 });
 
 /**
+ * POST /api/auth/refresh
+ */
+router.post('/refresh', async (req, res) => {
+  const tokenValue = req.body?.refreshToken || req.cookies?.refreshToken;
+  if (!tokenValue) {
+    return res.status(400).json({ status: 'error', message: 'Refresh token is required.' });
+  }
+
+  try {
+    const { refreshToken: newRefreshToken, tokenId } = await rotateRefreshToken(tokenValue);
+    const { rows } = await query(`
+      SELECT r.user_id, u.email, u.name, u.is_superadmin
+      FROM refresh_tokens r
+      JOIN users u ON r.user_id = u.id
+      WHERE r.id = $1
+    `, [tokenId]);
+
+    const user = rows[0];
+
+    // Resolve tenant
+    const { rows: memberships } = await query(`
+      SELECT tenant_id, role FROM memberships WHERE user_id = $1 ORDER BY created_at ASC LIMIT 1
+    `, [user.user_id]);
+
+    const tenantId = memberships[0]?.tenant_id || null;
+    const role = memberships[0]?.role || 'agent';
+
+    const accessToken = generateAccessToken(
+      { id: user.user_id, email: user.email, is_superadmin: user.is_superadmin },
+      tenantId,
+      role
+    );
+
+    res.cookie('refreshToken', newRefreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000
+    });
+
+    res.json({
+      status: 'success',
+      token: accessToken,
+      refreshToken: newRefreshToken
+    });
+  } catch (err) {
+    return res.status(401).json({ status: 'error', message: err.message || 'Token refresh failed.' });
+  }
+});
+
+/**
+ * POST /api/auth/logout
+ */
+router.post('/logout', authenticateToken, async (req, res) => {
+  try {
+    await revokeAllRefreshTokens(req.user.id);
+    res.clearCookie('refreshToken');
+    res.json({ status: 'success', message: 'Logged out successfully.' });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
+/**
  * GET /api/auth/me
- * Get currently authenticated user profile
  */
 router.get('/me', authenticateToken, async (req, res) => {
   try {
-    const user = await findUserById(req.user.id);
-    if (!user) {
+    const { rows: users } = await query(
+      `SELECT id, email, name, is_superadmin, status, created_at FROM users WHERE id = $1`,
+      [req.user.id]
+    );
+
+    if (users.length === 0) {
       return res.status(404).json({ status: 'error', message: 'User not found.' });
     }
 
+    const { rows: memberships } = await query(`
+      SELECT m.tenant_id, m.role, t.name as tenant_name, t.slug as tenant_slug, t.plan
+      FROM memberships m
+      JOIN tenants t ON m.tenant_id = t.id
+      WHERE m.user_id = $1
+      ORDER BY m.created_at ASC
+    `, [req.user.id]);
+
+    const activeTenantId = req.tenantId || memberships[0]?.tenant_id;
+    const activeMembership = memberships.find(m => m.tenant_id === activeTenantId) || memberships[0];
+
     res.json({
       status: 'success',
-      user
+      user: users[0],
+      tenant: activeMembership ? {
+        id: activeMembership.tenant_id,
+        name: activeMembership.tenant_name,
+        slug: activeMembership.tenant_slug,
+        role: activeMembership.role
+      } : null,
+      memberships: memberships.map(m => ({
+        tenantId: m.tenant_id,
+        tenantName: m.tenant_name,
+        role: m.role
+      }))
     });
   } catch (error) {
-    console.error('Get profile error:', error);
-    res.status(500).json({ status: 'error', message: 'Failed to fetch user profile' });
+    res.status(500).json({ status: 'error', message: error.message });
   }
 });
 
 /**
- * GET /api/auth/users
- * List all tenants / registered users (Admin access)
+ * POST /api/auth/switch-tenant
  */
-router.get('/users', authenticateToken, async (req, res) => {
+router.post('/switch-tenant', authenticateToken, async (req, res) => {
+  const { tenantId } = req.body;
+  if (!tenantId) {
+    return res.status(400).json({ status: 'error', message: 'tenantId is required.' });
+  }
+
   try {
-    const actor = await findUserById(req.user.id);
-    if (!actor || !['admin', 'superadmin'].includes(actor.role)) {
-      return res.status(403).json({ status: 'error', message: 'Admin access required.' });
+    const { rows } = await query(`
+      SELECT m.role, t.id, t.name, t.slug, t.plan
+      FROM memberships m
+      JOIN tenants t ON m.tenant_id = t.id
+      WHERE m.user_id = $1 AND m.tenant_id = $2
+    `, [req.user.id, tenantId]);
+
+    if (rows.length === 0) {
+      return res.status(403).json({ status: 'error', message: 'You do not have access to this workspace.' });
     }
-    const allUsers = await getAllUsers();
-    const workspaceUserIds = await getWorkspaceUserIds(actor.id);
-    const users = isSuperAdmin(actor)
-      ? allUsers
-      : allUsers.filter((entry) => workspaceUserIds.includes(Number(entry.id)));
+
+    const target = rows[0];
+    const { rows: users } = await query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+    const newToken = generateAccessToken(users[0], target.id, target.role);
+
     res.json({
       status: 'success',
-      count: users.length,
-      users,
-      database: getDatabaseStatus()
+      token: newToken,
+      tenant: {
+        id: target.id,
+        name: target.name,
+        slug: target.slug,
+        role: target.role
+      }
     });
-  } catch (error) {
-    console.error('Get users error:', error);
-    res.status(500).json({ status: 'error', message: 'Failed to fetch users list' });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message });
   }
-});
-
-function isSuperAdmin(user) {
-  const platformEmail = (process.env.SUPERADMIN_EMAIL || 'admin@wppflow.io').toLowerCase();
-  return user?.email?.toLowerCase() === platformEmail;
-}
-
-function temporaryPassword() {
-  return `${Math.random().toString(36).slice(2, 8)}-${Math.random().toString(36).slice(2, 6)}`;
-}
-
-async function deliverCredentials({ email, name, companyName, password }) {
-  const apiKey = process.env.RESEND_API_KEY;
-  const from = process.env.EMAIL_FROM;
-  if (!apiKey || !from) return { delivered: false, reason: 'email_not_configured' };
-  try {
-    const response = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        from,
-        to: [email],
-        subject: `Your ${companyName} WppFlow workspace access`,
-        text: `Hi ${name},\n\nYour WppFlow workspace has been created.\n\nEmail: ${email}\nTemporary password: ${password}\n\nSign in at ${process.env.APP_URL || 'https://wppflow-beige.vercel.app/'} and change your password after login.`,
-      }),
-    });
-    if (!response.ok) return { delivered: false, reason: 'email_provider_rejected' };
-    return { delivered: true };
-  } catch (error) {
-    console.warn('Credential email delivery failed:', error.message);
-    return { delivered: false, reason: 'email_provider_unavailable' };
-  }
-}
-
-/** Provision a company admin or workspace agent from an authorized admin. */
-router.post('/users', authenticateToken, async (req, res) => {
-  try {
-    const actor = await findUserById(req.user.id);
-    if (!actor || !['admin', 'superadmin'].includes(actor.role)) {
-      return res.status(403).json({ status: 'error', message: 'Admin access required.' });
-    }
-    const { email, name, companyName, role: requestedRole, password: suppliedPassword } = req.body || {};
-    if (!email || !name) return res.status(400).json({ status: 'error', message: 'Name and email are required.' });
-    const superAdmin = isSuperAdmin(actor);
-    const role = superAdmin
-      ? (requestedRole === 'admin' ? 'admin' : 'user')
-      : (['sales', 'support', 'user'].includes(requestedRole) ? requestedRole : 'user');
-    const workspaceName = superAdmin ? String(companyName || '').trim() : actor.company_name;
-    if (!workspaceName) return res.status(400).json({ status: 'error', message: 'companyName is required when creating a company.' });
-    const password = suppliedPassword || temporaryPassword();
-    const user = await createUser({ email, password, name, company_name: workspaceName, role });
-    const emailDelivery = await deliverCredentials({ email: user.email, name: user.name, companyName: workspaceName, password });
-    res.status(201).json({
-      status: 'success',
-      message: emailDelivery.delivered ? 'User created and credentials emailed.' : 'User created. Configure RESEND_API_KEY and EMAIL_FROM to email credentials automatically.',
-      user,
-      emailDelivery,
-      temporaryPassword: emailDelivery.delivered ? undefined : password,
-    });
-  } catch (error) {
-    const status = /already registered/i.test(error.message) ? 409 : 500;
-    res.status(status).json({ status: 'error', message: error.message || 'Could not create user.' });
-  }
-});
-
-async function canManageTarget(actor, targetId) {
-  const target = await findUserById(targetId);
-  if (!target) return { target: null, allowed: false };
-  if (target.email === 'admin@wppflow.io') return { target, allowed: false };
-  if (isSuperAdmin(actor)) return { target, allowed: true };
-  if (!['admin', 'superadmin'].includes(actor.role)) return { target, allowed: false };
-  const workspaceIds = await getWorkspaceUserIds(actor.id);
-  return { target, allowed: workspaceIds.includes(Number(target.id)) };
-}
-
-/** Edit a tenant or employee while preserving workspace boundaries. */
-router.patch('/users/:id', authenticateToken, async (req, res) => {
-  try {
-    const actor = await findUserById(req.user.id);
-    const { target, allowed } = await canManageTarget(actor, req.params.id);
-    if (!actor || !allowed) return res.status(403).json({ status: 'error', message: 'You cannot edit this account.' });
-    const superAdmin = isSuperAdmin(actor);
-    const body = req.body || {};
-    const updates = {};
-    if (body.name !== undefined) updates.name = String(body.name).trim();
-    if (body.email !== undefined) updates.email = String(body.email).trim().toLowerCase();
-    if (body.companyName !== undefined && superAdmin) updates.companyName = String(body.companyName).trim();
-    if (body.role !== undefined) {
-      const allowedRoles = superAdmin ? ['admin', 'sales', 'support', 'user'] : ['sales', 'support', 'user'];
-      if (!allowedRoles.includes(body.role)) return res.status(400).json({ status: 'error', message: 'Invalid role for this administrator.' });
-      updates.role = body.role;
-    }
-    if (body.status !== undefined) {
-      if (!['active', 'blocked', 'suspended', 'pending'].includes(body.status)) return res.status(400).json({ status: 'error', message: 'Invalid account status.' });
-      updates.status = body.status;
-    }
-    if (body.plan !== undefined && superAdmin) updates.plan = String(body.plan);
-    if (body.sessionsLimit !== undefined && superAdmin) updates.sessionsLimit = Math.max(1, Math.min(100, Number(body.sessionsLimit)));
-    if (updates.email === 'admin@wppflow.io') return res.status(400).json({ status: 'error', message: 'The platform administrator email is reserved.' });
-    if (updates.name === '') return res.status(400).json({ status: '400', message: 'Name cannot be empty.' });
-    const user = await updateUser(target.id, updates);
-    res.json({ status: 'success', user });
-  } catch (error) {
-    const status = /already registered/i.test(error.message) ? 409 : 500;
-    res.status(status).json({ status: 'error', message: error.message || 'Could not update user.' });
-  }
-});
-
-/** Delete a tenant or employee account. The platform administrator is protected. */
-router.delete('/users/:id', authenticateToken, async (req, res) => {
-  try {
-    const actor = await findUserById(req.user.id);
-    const { target, allowed } = await canManageTarget(actor, req.params.id);
-    if (!actor || !allowed || Number(target.id) === Number(actor.id)) return res.status(403).json({ status: 'error', message: 'You cannot delete this account.' });
-    const user = await deleteUser(target.id);
-    if (!user) return res.status(404).json({ status: 'error', message: 'User not found.' });
-    res.json({ status: 'success', message: 'User deleted.', user });
-  } catch (error) {
-    res.status(500).json({ status: 'error', message: error.message || 'Could not delete user.' });
-  }
-});
-
-/**
- * GET /api/auth/status
- * Public status of auth and DB connectivity
- */
-router.get('/status', (req, res) => {
-  res.json({
-    status: 'ok',
-    auth: 'jwt-ready',
-    database: getDatabaseStatus(),
-    email: {
-      provider: 'resend',
-      configured: Boolean(process.env.RESEND_API_KEY && process.env.EMAIL_FROM),
-      sender: process.env.EMAIL_FROM || null,
-    }
-  });
 });
 
 export default router;
