@@ -333,24 +333,38 @@ async function getMessageMediaDataUrl(client, msgId, target = '', timestamp = nu
   }
 }
 
-async function sendTextMessageSafe(client, rawTarget, content, options = {}) {
-  const target = await resolveWhatsAppTarget(client, rawTarget);
+async function sendTextMessageSafe(client, rawTarget, content, options = {}, hintName = '') {
+  const target = await resolveWhatsAppTarget(client, rawTarget, hintName);
   console.log(`📤 [WPP] Sending message to ${target}`);
-  return await client.page.evaluate(async (to, text, opts) => {
-    if (typeof window.WPP === 'undefined' || !window.WPP.chat) {
-      throw new Error('WhatsApp Web engine not ready');
-    }
-    const sendResult = await window.WPP.chat.sendTextMessage(to, text, {
-      waitForAck: false,
-      ...opts
-    });
+  try {
+    return await client.page.evaluate(async (to, text, opts) => {
+      if (typeof window.WPP === 'undefined' || !window.WPP.chat) {
+        throw new Error('WhatsApp Web engine not ready');
+      }
+      if (window.WPP.chat.openChat) {
+        await window.WPP.chat.openChat(to).catch(() => null);
+      }
+      const sendResult = await window.WPP.chat.sendTextMessage(to, text, {
+        waitForAck: false,
+        ...opts
+      });
+      return {
+        id: String(sendResult?.id?._serialized || sendResult?.id || `msg_${Date.now()}`),
+        ack: sendResult?.ack ?? 1,
+        to,
+        timestamp: Math.floor(Date.now() / 1000)
+      };
+    }, target, content, options);
+  } catch (err) {
+    console.warn(`sendTextMessage in page failed for ${target}, trying client.sendText fallback:`, err.message);
+    const fallbackRes = await client.sendText(target, content, { waitForAck: false, ...options });
     return {
-      id: String(sendResult?.id?._serialized || sendResult?.id || `msg_${Date.now()}`),
-      ack: sendResult?.ack ?? 1,
-      to,
+      id: String(fallbackRes?.id?._serialized || fallbackRes?.id || `msg_${Date.now()}`),
+      ack: fallbackRes?.ack ?? 1,
+      to: target,
       timestamp: Math.floor(Date.now() / 1000)
     };
-  }, target, content, options);
+  }
 }
 
 async function fetchRecentChatMessages(client, rawTarget, hintName = '') {
@@ -635,7 +649,8 @@ async function handleAnyMessage(sessionName, message, client) {
     let msgType = message.type === 'chat' ? 'text' : (message.type || 'text');
     let msgText = message.body || message.caption || '';
 
-    if (msgType === 'call_log') {
+    if (msgType === 'call_log' || msgText === '[call_log]') {
+      msgType = 'call_log';
       msgText = formatCallText(message);
     } else if (msgType === 'image') {
       msgText = message.caption || '📷 Photo';
@@ -1272,87 +1287,6 @@ app.get('/api/chats/:chatId/messages', authenticateToken, async (req, res) => {
   }
 });
 
-app.get('/api/debug/inspect-image', authenticateToken, async (req, res) => {
-  const session = sessions.get('primary-whatsapp');
-  if (!session?.client) return res.json({ error: 'No client' });
-  const targetId = req.query.target || '79375424847946@lid';
-  try {
-    const info = await session.client.page.evaluate(async (tid) => {
-      return new Promise((resolve) => {
-        const req = indexedDB.open('model-storage');
-        req.onsuccess = (e) => {
-          const db = e.target.result;
-          if (!db.objectStoreNames.contains('message')) {
-            db.close();
-            return resolve({ error: 'No message store' });
-          }
-          const tx = db.transaction(['message'], 'readonly');
-          const store = tx.objectStore('message');
-          const range = IDBKeyRange.bound(`${tid}_`, `${tid}_\uffff`);
-          const cursorReq = store.index('internalId').openCursor(range, 'prev');
-          const results = [];
-          cursorReq.onsuccess = () => {
-            const cursor = cursorReq.result;
-            if (cursor && results.length < 60) {
-              const v = cursor.value;
-              results.push({
-                id: String(v.id?._serialized || v.id || ''),
-                type: v.type,
-                bodyLen: v.body ? v.body.length : 0,
-                bodyPrefix: v.body ? v.body.slice(0, 40) : '',
-                caption: v.caption,
-                hasMediaData: Boolean(v.mediaData),
-                preview: v.mediaData?.preview ? typeof v.mediaData.preview : (v.preview ? typeof v.preview : null),
-                keys: Object.keys(v).filter(k => k.toLowerCase().includes('media') || k.toLowerCase().includes('url') || k.toLowerCase().includes('thumb') || k.toLowerCase().includes('data'))
-              });
-              cursor.continue();
-            } else {
-              db.close();
-              resolve({
-                total: results.length,
-                images: results.filter(r => r.type === 'image'),
-                allTypes: Array.from(new Set(results.map(r => r.type)))
-              });
-            }
-          };
-          cursorReq.onerror = () => { db.close(); resolve({ error: 'cursor error' }); };
-        };
-        req.onerror = () => resolve({ error: 'idb open error' });
-      });
-    }, targetId);
-    res.json(info);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/debug/test-send', authenticateToken, async (req, res) => {
-  const session = sessions.get('primary-whatsapp');
-  if (!session?.client) return res.json({ error: 'No client' });
-  const target = req.query.target || '79375424847946@lid';
-  try {
-    const result = await session.client.page.evaluate(async (to) => {
-      try {
-        if (window.WPP?.chat?.openChat) {
-          await window.WPP.chat.openChat(to).catch(() => null);
-        }
-        const sendRes = await window.WPP.chat.sendTextMessage(to, 'Test from WppFlow', { waitForAck: false });
-        return { success: true, sendRes };
-      } catch (err) {
-        return {
-          error: true,
-          message: err?.message || String(err),
-          stack: err?.stack,
-          stringified: JSON.stringify(err, Object.getOwnPropertyNames(err))
-        };
-      }
-    }, target);
-    res.json(result);
-  } catch (e) {
-    res.status(500).json({ error: e.message, stack: e.stack });
-  }
-});
-
 app.use('/api', dataRoutes);
 
 // Session and QR state changes continuously. Prevent browsers and Vercel's
@@ -1425,7 +1359,20 @@ app.post('/api/sessions/:session/send-message', authenticateToken, async (req, r
   if (!await canAccessSession(req.user.id, req.params.session, s)) return res.status(403).json({ status: 'error', message: 'Session is outside the current workspace' });
   try {
     if (!req.body?.message?.trim()) return res.status(400).json({ status: 'error', message: 'message is required' });
-    const result = await sendTextMessageSafe(s.client, req.body.phone, req.body.message);
+    let hintName = req.body.contactName || req.body.hintName || '';
+    if (!hintName && (req.body.chatId || req.body.phone)) {
+      const pool = getPool();
+      if (pool) {
+        const { rows } = await pool.query(
+          `SELECT contact_name, phone FROM chats WHERE id = $1 OR phone = $2 LIMIT 1`,
+          [req.body.chatId || '', req.body.phone || '']
+        );
+        if (rows.length > 0) {
+          hintName = rows[0].contact_name;
+        }
+      }
+    }
+    const result = await sendTextMessageSafe(s.client, req.body.phone, req.body.message, {}, hintName);
     res.json({ status: 'success', response: result });
   } catch (e) {
     console.error(`Send message error [${req.params.session}]:`, e.message);
