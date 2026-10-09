@@ -1469,15 +1469,23 @@ app.get('/api/sessions/:session/debug-chats', authenticateToken, async (req, res
             const list = [];
             cursorReq.onsuccess = () => {
               const cursor = cursorReq.result;
-              if (cursor && list.length < 20) {
+              if (cursor && list.length < 50) {
                 const v = cursor.value;
-                list.push({
-                  id: String(v.id?._serialized || v.id || ''),
-                  body: v.body || v.caption || '',
-                  fromMe: Boolean(v.fromMe),
-                  t: v.t,
-                  type: v.type
-                });
+                if (v.type === 'image' || list.length < 5) {
+                  let previewStr = null;
+                  if (v.mediaData?.preview) {
+                    previewStr = typeof v.mediaData.preview === 'string' ? v.mediaData.preview.slice(0, 60) : JSON.stringify(Object.keys(v.mediaData.preview));
+                  }
+                  list.push({
+                    id: String(v.id?._serialized || v.id || ''),
+                    type: v.type,
+                    t: v.t,
+                    bodyPrefix: typeof v.body === 'string' ? v.body.slice(0, 60) : null,
+                    hasMediaData: !!v.mediaData,
+                    mediaDataKeys: v.mediaData ? Object.keys(v.mediaData) : [],
+                    previewStr
+                  });
+                }
                 cursor.continue();
               } else {
                 db.close();
