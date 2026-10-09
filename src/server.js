@@ -1332,7 +1332,7 @@ app.get('/api/debug/wpp-chats', authenticateToken, async (req, res) => {
       const single = await session.client.page.evaluate(async (cid) => {
         const list = await window.WPP.chat.list();
         const c = list.find(x => String(x.id?._serialized || x.id || '').includes(cid));
-        if (!c) return { notFound: true };
+        if (!c) return { notFound: true, listLength: list?.length, sampleIds: list?.slice(0, 5).map(x => String(x.id?._serialized || x.id)) };
         const pm = c.previewMessage || {};
         return {
           id: c.id?._serialized || c.id,
