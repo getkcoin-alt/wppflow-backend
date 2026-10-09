@@ -1278,18 +1278,20 @@ app.get('/api/debug/inspect-image', authenticateToken, async (req, res) => {
   const targetId = req.query.target || '79375424847946@lid';
   try {
     const info = await session.client.page.evaluate(async (tid) => {
-      let chat = await window.WPP.chat.find(tid).catch(() => null);
-      if (!chat) {
-        const chats = await window.WPP.chat.list();
-        chat = chats.find(c => (c.id?._serialized === tid || c.name?.includes('Ardhangini')));
+      let chat = null;
+      if (window.WPP?.whatsapp?.ChatStore) {
+        chat = window.WPP.whatsapp.ChatStore.get(tid);
+      }
+      if (!chat && window.WPP?.chat?.find) {
+        chat = await window.WPP.chat.find(tid).catch(() => null);
       }
       if (!chat) return { error: 'chat not found', tid };
-      const msgs = await window.WPP.chat.getMessages(chat.id?._serialized || tid, { count: 30 });
-      const imgMsgs = msgs.filter(m => m.type === 'image');
+      const models = chat.msgs?.models || [];
+      const imgMsgs = models.filter(m => m.type === 'image');
       return {
         chatId: chat.id?._serialized,
         chatName: chat.name || chat.formattedTitle,
-        allCount: msgs.length,
+        allCount: models.length,
         imgCount: imgMsgs.length,
         samples: imgMsgs.map(m => ({
           id: m.id?._serialized || m.id,
