@@ -1338,16 +1338,26 @@ app.get('/api/debug/wpp-chats', authenticateToken, async (req, res) => {
           id: c.id?._serialized || c.id,
           name: c.name,
           formattedTitle: c.formattedTitle,
-          contactName: c.contact?.name || c.contact?.pushname || '',
+          contactKeys: c.contact ? Object.keys(c.contact) : [],
+          contactVerifiedName: c.contact?.verifiedName,
+          contactPushname: c.contact?.pushname,
+          contactName: c.contact?.name,
+          cVerifiedName: c.verifiedName,
+          cName: c.name,
+          cFormattedTitle: c.formattedTitle,
           previewMessageKeys: Object.keys(pm),
           previewMessageType: pm.type,
-          previewMessageBody: pm.body,
-          previewMessageCaption: pm.caption,
-          previewMessageTitle: pm.title,
-          previewMessageText: pm.text,
-          previewMessageMatchedText: pm.matchedText,
-          previewMessageInteractive: pm.interactiveMessage ? Object.keys(pm.interactiveMessage) : null,
-          previewMessageRaw: JSON.stringify(pm).slice(0, 500),
+          previewMessageInvis: pm.invis,
+          previewMessageRaw: JSON.stringify(pm).slice(0, 300),
+          recentMsgs: (await window.WPP.chat.getMessages(cid, { count: 3 }).catch(e => [{ error: e.message }])).map(m => ({
+            id: m.id?._serialized || m.id,
+            type: m.type,
+            body: (m.body || m.caption || '').slice(0, 100),
+            caption: m.caption?.slice(0, 100),
+            fromMe: m.fromMe,
+            invis: m.invis,
+            t: m.t
+          }))
         };
       }, targetChatId);
       return res.json(single);
