@@ -198,56 +198,112 @@ async function resolveSessionOwner(sessionName) {
 // Robust WhatsApp Target Resolution & Safe Messaging Primitives
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function resolveWhatsAppTarget(client, rawTarget) {
+async function resolveWhatsAppTarget(client, rawTarget, hintName = '') {
   if (!rawTarget || typeof rawTarget !== 'string') throw new Error('Target phone or chat identifier is required');
   const target = rawTarget.trim();
-  if (target.includes('@')) return target;
 
   try {
-    const resolved = await client.page.evaluate((id) => {
+    const resolved = await client.page.evaluate((id, name) => {
       if (typeof window.WPP === 'undefined' || !window.WPP.chat) return null;
-      const asLid = `${id}@lid`;
-      const asCus = `${id}@c.us`;
-      const asGus = `${id}@g.us`;
-
-      // 1. Direct get on ChatModel collection
-      try {
-        if (window.WPP.chat.get(asLid)) return asLid;
-        if (window.WPP.chat.get(asCus)) return asCus;
-        if (window.WPP.chat.get(asGus)) return asGus;
-      } catch {}
-
-      // 2. Search all loaded chats in WPP.chat.list()
       try {
         const list = window.WPP.chat.list();
         if (Array.isArray(list)) {
+          // If we have a hintName, find matching chat that has messages
+          if (name) {
+            const byName = list.filter(c => {
+              const cn = c.name || c.formattedTitle || c.contact?.name;
+              return cn && cn.toLowerCase() === name.toLowerCase();
+            });
+            if (byName.length === 1) {
+              return String(byName[0].id?._serialized || byName[0].id);
+            }
+            if (byName.length > 1) {
+              byName.sort((a, b) => (Number(b.t || 0) - Number(a.t || 0)));
+              return String(byName[0].id?._serialized || byName[0].id);
+            }
+          }
+
+          const asLid = `${id}@lid`;
+          const asCus = `${id}@c.us`;
+          const asGus = `${id}@g.us`;
+
+          // Direct match in loaded list
           const match = list.find(c => {
             const sid = String(c.id?._serialized || c.id || '');
             const uid = String(c.id?.user || '');
-            return sid === asLid || sid === asCus || sid === asGus || uid === id;
+            return sid === id || sid === asLid || sid === asCus || sid === asGus || uid === id.replace(/@.*$/, '');
           });
           if (match) return String(match.id?._serialized || match.id);
         }
       } catch {}
-
       return null;
-    }, target);
+    }, target, hintName);
 
     if (resolved) {
-      console.log(`🎯 [WPP] Resolved target '${target}' -> '${resolved}'`);
+      console.log(`🎯 [WPP] Resolved target '${target}' (hint: '${hintName}') -> '${resolved}'`);
       return resolved;
     }
   } catch (err) {
     console.warn(`Target resolution error:`, err.message);
   }
 
-  // 3. Fallback heuristic: LIDs are typically >= 13 digits
+  if (target.includes('@')) return target;
+
+  // Fallback heuristic: LIDs are typically >= 13 digits
   const digits = target.replace(/\D/g, '');
   if (digits.length >= 13) {
     return `${digits}@lid`;
   }
 
   return `${digits}@c.us`;
+}
+
+function formatCallDuration(seconds) {
+  const dur = Number(seconds || 0);
+  if (dur <= 0) return '0:00';
+  const mins = Math.floor(dur / 60);
+  const secs = dur % 60;
+  return mins > 0 ? (secs > 0 ? `${mins} min ${secs} sec` : `${mins} min`) : `${secs} sec`;
+}
+
+function formatCallText(msg) {
+  const isVideo = Boolean(msg.isVideoCall);
+  const dur = Number(msg.callDuration || 0);
+  const prefix = isVideo ? '📹 Video call' : '📞 Voice call';
+  if (dur > 0) {
+    const mins = Math.floor(dur / 60);
+    const secs = dur % 60;
+    const durStr = mins > 0 ? (secs > 0 ? `${mins} min ${secs} sec` : `${mins} min`) : `${secs} sec`;
+    return `${prefix} (${durStr})`;
+  }
+  return `${prefix} (${msg.fromMe ? 'No answer' : 'Missed'})`;
+}
+
+async function getMessageMediaDataUrl(client, msgId) {
+  if (!msgId) return '';
+  try {
+    return await client.page.evaluate(async (mid) => {
+      if (typeof window.WPP === 'undefined' || !window.WPP.chat?.downloadMedia) return '';
+      try {
+        const blob = await window.WPP.chat.downloadMedia(mid);
+        if (!blob) return '';
+        if (typeof blob === 'string') return blob;
+        if (window.WPP.util?.blobToBase64) {
+          return await window.WPP.util.blobToBase64(blob);
+        }
+        return await new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result || '');
+          reader.onerror = () => resolve('');
+          reader.readAsDataURL(blob);
+        });
+      } catch (e) {
+        return '';
+      }
+    }, msgId);
+  } catch {
+    return '';
+  }
 }
 
 async function sendTextMessageSafe(client, rawTarget, content, options = {}) {
@@ -270,47 +326,116 @@ async function sendTextMessageSafe(client, rawTarget, content, options = {}) {
   }, target, content, options);
 }
 
-async function fetchRecentChatMessages(client, rawTarget) {
-  const target = await resolveWhatsAppTarget(client, rawTarget);
+async function fetchRecentChatMessages(client, rawTarget, hintName = '') {
+  const target = await resolveWhatsAppTarget(client, rawTarget, hintName);
   let list = [];
 
-  // 1. Try modern WPP.chat.getMessages in page evaluate
+  // 1. Try getAllMessagesInChat (returns full message objects with call & media data)
   try {
-    const raw = await client.page.evaluate(async (chatId) => {
-      if (typeof window.WPP === 'undefined' || !window.WPP.chat?.getMessages) return [];
-      try {
-        const msgs = await window.WPP.chat.getMessages(chatId, { count: 30 });
-        if (!Array.isArray(msgs)) return [];
-        return msgs.map(m => ({
-          id: String(m.id?._serialized || m.id || ''),
-          body: m.body || m.caption || (m.type !== 'chat' ? `[${m.type}]` : ''),
-          fromMe: Boolean(m.fromMe),
-          type: m.type === 'chat' ? 'text' : (m.type || 'text'),
-          t: m.t ? Number(m.t) : Math.floor(Date.now() / 1000),
-          senderName: m.sender?.name || m.notifyName || (m.fromMe ? 'Agent' : '')
-        }));
-      } catch (err) {
-        return [];
-      }
-    }, target);
-    if (Array.isArray(raw) && raw.length > 0) {
-      list = raw;
-    }
-  } catch {}
+    const rawAll = await client.getAllMessagesInChat(target, true, false).catch(() => []);
+    if (Array.isArray(rawAll) && rawAll.length > 0) {
+      list = rawAll.map(m => {
+        const id = String(m.id?._serialized || m.id?.id || m.id || (m.rowId ? `row_${m.rowId}` : ''));
+        const type = m.type === 'chat' ? 'text' : (m.type || 'text');
+        const isVideoCall = Boolean(m.isVideoCall);
+        const callDuration = Number(m.callDuration || 0);
+        let body = m.body || m.caption || '';
+        if (type === 'call_log') {
+          body = formatCallText(m);
+        } else if (type === 'image') {
+          body = m.caption || '📷 Photo';
+        } else if (type === 'video') {
+          body = m.caption || '🎥 Video';
+        } else if (type === 'audio' || type === 'ptt') {
+          body = '🎵 Voice message';
+        } else if (type === 'document') {
+          body = m.caption || m.filename || '📄 Document';
+        } else if (type === 'e2e_notification') {
+          body = '🔒 Messages and calls are end-to-end encrypted';
+        } else if (!body && type !== 'text') {
+          body = `[${type}]`;
+        }
 
-  // 2. Fallback to client.getAllMessagesInChat
+        let mediaPreview = '';
+        if (m.mediaData?.preview) {
+          if (typeof m.mediaData.preview === 'string') {
+            mediaPreview = m.mediaData.preview.startsWith('data:') ? m.mediaData.preview : `data:image/jpeg;base64,${m.mediaData.preview}`;
+          } else if (m.mediaData.preview?._b64) {
+            mediaPreview = `data:image/jpeg;base64,${m.mediaData.preview._b64}`;
+          }
+        }
+
+        return {
+          id,
+          body,
+          fromMe: Boolean(m.fromMe),
+          type,
+          t: m.t ? Number(m.t) : (m.timestamp ? Number(m.timestamp) : Math.floor(Date.now() / 1000)),
+          isVideoCall,
+          callDuration,
+          callOutcome: m.callOutcome || '',
+          mediaUrl: mediaPreview,
+          fileName: m.filename || '',
+          fileSize: m.size ? `${Math.round(m.size / 1024)} KB` : '',
+          senderName: m.sender?.name || m.notifyName || (m.fromMe ? 'You' : '')
+        };
+      });
+    }
+  } catch (err) {
+    console.warn(`getAllMessagesInChat error for ${target}:`, err.message);
+  }
+
+  // 2. Fallback to WPP.chat.getMessages in page evaluate
   if (list.length === 0) {
     try {
-      const raw = await client.getAllMessagesInChat(target, true, false).catch(() => []);
+      const raw = await client.page.evaluate(async (chatId) => {
+        if (typeof window.WPP === 'undefined' || !window.WPP.chat?.getMessages) return [];
+        try {
+          const msgs = await window.WPP.chat.getMessages(chatId, { count: 50 });
+          if (!Array.isArray(msgs)) return [];
+          return msgs.map(m => {
+            const id = String(m.id?._serialized || m.id?.id || m.id || '');
+            const type = m.type === 'chat' ? 'text' : (m.type || 'text');
+            const isVideoCall = Boolean(m.isVideoCall);
+            const callDuration = Number(m.callDuration || 0);
+            let body = m.body || m.caption || '';
+            let mediaPreview = '';
+            if (m.mediaData?.preview) {
+              if (typeof m.mediaData.preview === 'string') {
+                mediaPreview = m.mediaData.preview.startsWith('data:') ? m.mediaData.preview : `data:image/jpeg;base64,${m.mediaData.preview}`;
+              } else if (m.mediaData.preview?._b64) {
+                mediaPreview = `data:image/jpeg;base64,${m.mediaData.preview._b64}`;
+              }
+            }
+            return {
+              id,
+              type,
+              body,
+              fromMe: Boolean(m.fromMe),
+              t: m.t ? Number(m.t) : Math.floor(Date.now() / 1000),
+              isVideoCall,
+              callDuration,
+              callOutcome: m.callOutcome || '',
+              mediaUrl: mediaPreview,
+              fileName: m.filename || '',
+              senderName: m.sender?.name || m.notifyName || (m.fromMe ? 'You' : '')
+            };
+          });
+        } catch {
+          return [];
+        }
+      }, target);
+
       if (Array.isArray(raw) && raw.length > 0) {
-        list = raw.map(m => ({
-          id: String(m.id?._serialized || m.id || ''),
-          body: m.body || m.caption || (m.type !== 'chat' ? `[${m.type}]` : ''),
-          fromMe: Boolean(m.fromMe),
-          type: m.type === 'chat' ? 'text' : (m.type || 'text'),
-          t: m.t ? Number(m.t) : Math.floor(Date.now() / 1000),
-          senderName: m.sender?.name || m.notifyName || (m.fromMe ? 'Agent' : '')
-        }));
+        list = raw.map(m => {
+          let body = m.body;
+          if (m.type === 'call_log') {
+            body = formatCallText(m);
+          } else if (m.type === 'image') {
+            body = m.body || '📷 Photo';
+          }
+          return { ...m, body };
+        });
       }
     } catch {}
   }
@@ -334,15 +459,15 @@ async function fetchRecentChatMessages(client, rawTarget) {
             const results = [];
             cursorReq.onsuccess = () => {
               const cursor = cursorReq.result;
-              if (cursor && results.length < 30) {
+              if (cursor && results.length < 50) {
                 const v = cursor.value;
                 results.push({
                   id: String(v.id?._serialized || v.id || ''),
-                  body: v.body || v.caption || (v.type !== 'chat' ? `[${v.type}]` : ''),
+                  body: v.body || v.caption || '',
                   fromMe: Boolean(v.fromMe),
                   type: v.type === 'chat' ? 'text' : (v.type || 'text'),
                   t: v.t ? Number(v.t) : Math.floor(Date.now() / 1000),
-                  senderName: v.fromMe ? 'Agent' : ''
+                  senderName: v.fromMe ? 'You' : ''
                 });
                 cursor.continue();
               } else {
@@ -357,6 +482,16 @@ async function fetchRecentChatMessages(client, rawTarget) {
       }, target);
       if (Array.isArray(idbList) && idbList.length > 0) list = idbList;
     } catch {}
+  }
+
+  // For recent media items without a loaded image URL, download media
+  for (const item of list.slice(-15)) {
+    if (['image', 'video', 'audio', 'document'].includes(item.type) && !item.mediaUrl && item.id && !item.id.startsWith('row_')) {
+      try {
+        const dl = await getMessageMediaDataUrl(client, item.id);
+        if (dl) item.mediaUrl = dl;
+      } catch {}
+    }
   }
 
   return list;
@@ -432,71 +567,139 @@ async function runAutomationEngine(sessionName, userId, message, client, incomin
   } catch (e) { console.error(`Automation engine error [${sessionName}]:`, e.message); }
 }
 
-async function handleInboundMessage(sessionName, message, client) {
-  if (message.fromMe) return;
+async function handleAnyMessage(sessionName, message, client) {
   const userId = await resolveSessionOwner(sessionName);
-  if (!userId) { console.warn(`⚠️  [${sessionName}] No owner — message not persisted.`); return; }
-  try {
-    const isGroup = Boolean(message.isGroupMsg || String(message.from).includes('@g.us'));
-    const remoteId = message.from;
-    const senderPhone = isGroup ? remoteId : String(remoteId).replace('@c.us', '');
-    const senderName = message.sender?.name || message.notifyName || (isGroup ? (message.author ? String(message.author).replace('@c.us', '') : 'Member') : senderPhone);
-    const groupName = message.chat?.name || message.chat?.contact?.name || 'WhatsApp Group';
-    const contactName = isGroup ? groupName : senderName;
+  if (!userId) {
+    console.warn(`⚠️  [${sessionName}] No owner — message not persisted.`);
+    return null;
+  }
 
+  try {
+    const isOut = Boolean(message.fromMe);
+    // Remote identifier: if fromMe, the recipient is in 'to'; if inbound, the sender is in 'from'
+    const rawRemote = isOut
+      ? (message.to || message.chatId?._serialized || message.chat?.id?._serialized || '')
+      : (message.from || message.chatId?._serialized || message.chat?.id?._serialized || '');
+
+    const remoteId = String(rawRemote);
+    const isGroup = Boolean(message.isGroupMsg || remoteId.includes('@g.us'));
+    const cleanPhone = isGroup ? remoteId : remoteId.replace(/@c\.us$/, '');
+
+    const senderName = isOut
+      ? 'You'
+      : (message.sender?.name || message.notifyName || (isGroup ? (message.author ? String(message.author).replace(/@c\.us$/, '') : 'Member') : cleanPhone));
+
+    const groupName = message.chat?.name || message.chat?.contact?.name || 'WhatsApp Group';
+    const contactName = isGroup ? groupName : (senderName !== cleanPhone ? senderName : (message.chat?.contact?.name || cleanPhone));
+
+    // Resolve or find existing chat
     const existing = await getChats(userId);
-    let chat = existing.find(c => c.phone === senderPhone || c.phone === remoteId);
+    let chat = existing.find(c =>
+      c.phone === cleanPhone ||
+      c.phone === remoteId ||
+      c.phone === remoteId.replace(/@lid$/, '') ||
+      (cleanPhone.length >= 10 && c.phone.endsWith(cleanPhone.slice(-10))) ||
+      (!isGroup && contactName && c.contactName === contactName)
+    );
+
     const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    const msgText = message.body || message.caption || (message.type !== 'chat' ? `[${message.type}]` : '');
+
+    // Format message text and type
+    let msgType = message.type === 'chat' ? 'text' : (message.type || 'text');
+    let msgText = message.body || message.caption || '';
+
+    if (msgType === 'call_log') {
+      msgText = formatCallText(message);
+    } else if (msgType === 'image') {
+      msgText = message.caption || '📷 Photo';
+    } else if (msgType === 'video') {
+      msgText = message.caption || '🎥 Video';
+    } else if (msgType === 'audio' || msgType === 'ptt') {
+      msgType = 'audio';
+      msgText = '🎵 Voice message';
+    } else if (msgType === 'document') {
+      msgText = message.caption || message.filename || '📄 Document';
+    } else if (msgType === 'e2e_notification') {
+      msgText = '🔒 Messages and calls are end-to-end encrypted';
+    } else if (!msgText && msgType !== 'text') {
+      msgText = `[${msgType}]`;
+    }
 
     if (!chat) {
       chat = await createChat(userId, {
         contactName,
-        phone: senderPhone,
+        phone: cleanPhone,
         avatar: message.chat?.contact?.profilePicThumbObj?.eurl || '',
         channel: sessionName,
         assignedTo: '',
         isGroup,
         groupMembersCount: isGroup ? (message.chat?.groupMetadata?.participants?.length || 0) : 0,
-        lastMessage: { text: msgText, timestamp: ts, status: 'delivered', fromMe: false },
+        lastMessage: { text: msgText, timestamp: ts, status: isOut ? 'sent' : 'delivered', fromMe: isOut },
         tags: isGroup ? ['Group'] : [],
       });
-      console.log(`💬 [${sessionName}] New chat: ${chat.id} (${contactName})`);
+      console.log(`💬 [${sessionName}] New chat created: ${chat.id} (${contactName})`);
       io.to(`workspace:${userId}`).emit('chat:created', { session: sessionName, chat });
     }
 
+    // Media download if applicable
+    let mediaUrl = message.mediaUrl || '';
+    if (['image', 'video', 'audio', 'document'].includes(msgType) && !mediaUrl) {
+      const mid = message.id?._serialized || message.id;
+      if (mid) {
+        try {
+          mediaUrl = await getMessageMediaDataUrl(client, mid);
+        } catch {}
+      }
+    }
+
     const saved = await createMessage(chat.id, {
-      sender: 'customer',
+      sender: isOut ? 'agent' : 'customer',
       agentName: senderName,
       text: msgText,
-      type: message.type === 'chat' ? 'text' : (message.type || 'text'),
-      mediaUrl: message.mediaUrl || '',
-      status: 'delivered',
+      type: msgType,
+      mediaUrl: mediaUrl || '',
+      fileName: message.filename || '',
+      fileSize: message.size ? `${Math.round(message.size / 1024)} KB` : '',
+      audioDuration: message.duration ? `${message.duration}s` : (msgType === 'call_log' ? formatCallDuration(message.callDuration) : ''),
+      status: isOut ? 'sent' : 'delivered',
       timestamp: ts,
-    });
+    }, userId);
 
     await updateChat(userId, chat.id, {
-      unreadCount: (chat.unreadCount || 0) + 1,
-      lastMessage: { text: msgText, timestamp: ts, status: 'delivered', fromMe: false },
+      unreadCount: isOut ? (chat.unreadCount || 0) : ((chat.unreadCount || 0) + 1),
+      lastMessage: { text: msgText, timestamp: ts, status: isOut ? 'sent' : 'delivered', fromMe: isOut },
     });
 
+    // Real-time broadcast to all browser tabs in the workspace
     io.to(`workspace:${userId}`).emit('session:message', {
       session: sessionName,
       chatId: chat.id,
       message: {
         id: message.id?._serialized || message.id || saved.id,
-        from: message.from,
+        chatId: chat.id,
+        from: isOut ? sessionName : remoteId,
         senderName,
         body: msgText,
-        type: message.type,
+        text: msgText,
+        type: msgType,
+        mediaUrl: mediaUrl || '',
         timestamp: ts,
         savedMessageId: saved.id,
+        fromMe: isOut,
+        status: isOut ? 'sent' : 'delivered',
       },
+    });
+
+    io.to(`workspace:${userId}`).emit('chat:updated', {
+      session: sessionName,
+      chatId: chat.id,
+      lastMessage: { text: msgText, timestamp: ts, status: isOut ? 'sent' : 'delivered', fromMe: isOut },
+      unreadCount: isOut ? (chat.unreadCount || 0) : ((chat.unreadCount || 0) + 1),
     });
 
     return { userId, chat };
   } catch (e) {
-    console.error(`Inbound error [${sessionName}]:`, e.message);
+    console.error(`Message handler error [${sessionName}]:`, e.message);
     return null;
   }
 }
@@ -640,7 +843,13 @@ async function syncRemoteChats(sessionName, client) {
       ? new Date(remote.timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       : '—';
 
-    let chat = existing.find((entry) => entry.phone === phone || entry.phone === remoteId || entry.phone === String(remoteId).replace(/@lid$/, '') || `${entry.phone}@lid` === remoteId);
+    let chat = existing.find((entry) =>
+      entry.phone === phone ||
+      entry.phone === remoteId ||
+      entry.phone === String(remoteId).replace(/@lid$/, '') ||
+      `${entry.phone}@lid` === remoteId ||
+      (!isGroup && contactName && entry.contactName === contactName)
+    );
     if (!chat) {
       chat = await createChat(userId, {
         contactName,
@@ -878,9 +1087,11 @@ async function startSession(sessionName, ownerId = null) {
       emitSessionEvent('session:status', sessionName, { session: sessionName, status: 'CONNECTED', phone: sd.phone, battery: sd.battery });
     }
 
-    client.onMessage(async (msg) => {
-      const result = await handleInboundMessage(sessionName, msg, client);
-      if (result?.userId) await runAutomationEngine(sessionName, result.userId, msg, client, result.chat);
+    client.onAnyMessage(async (msg) => {
+      const result = await handleAnyMessage(sessionName, msg, client);
+      if (result?.userId && !msg.fromMe) {
+        await runAutomationEngine(sessionName, result.userId, msg, client, result.chat);
+      }
     });
 
     syncRemoteChats(sessionName, client).catch((error) => {
@@ -949,10 +1160,16 @@ app.use('/api/auth', authRoutes);
 app.get('/api/chats/:chatId/messages', authenticateToken, async (req, res) => {
   const { chatId } = req.params;
   const userId = req.user.id;
+  const forceSync = req.query.sync === 'true';
+
   try {
     let messages = await getMessages(chatId, userId);
 
-    if (!messages || messages.length <= 1) {
+    // Sync from WhatsApp Web if requested, or if messages are empty/sparse, or if legacy [call_log] placeholders exist
+    const hasLegacyCallLogs = Array.isArray(messages) && messages.some(m => m.type === 'call_log' && m.text === '[call_log]');
+    const shouldSync = forceSync || !messages || messages.length <= 2 || hasLegacyCallLogs;
+
+    if (shouldSync) {
       const chats = await getChats(userId);
       const chat = chats.find(c => c.id === chatId);
       if (chat) {
@@ -960,28 +1177,59 @@ app.get('/api/chats/:chatId/messages', authenticateToken, async (req, res) => {
         const session = sessions.get(sessionName) || Array.from(sessions.values()).find(s => s.client && s.status === 'CONNECTED');
         if (session?.client) {
           try {
-            const target = await resolveWhatsAppTarget(session.client, chat.phone || chatId);
-            const remoteMsgs = await fetchRecentChatMessages(session.client, target);
+            const hint = chat.contactName || chat.contact_name || '';
+            const target = await resolveWhatsAppTarget(session.client, chat.phone || chatId, hint);
+            if (target && target !== chat.phone) {
+              await updateChat(userId, chat.id, { phone: target });
+            }
+
+            const remoteMsgs = await fetchRecentChatMessages(session.client, target, hint);
             if (Array.isArray(remoteMsgs) && remoteMsgs.length > 0) {
-              const existingTexts = new Set(messages.map(m => `${m.text}__${m.timestamp}`));
-              for (const rm of remoteMsgs.slice(-30)) {
+              const existingKeys = new Set(messages.map(m => `${m.text}__${m.timestamp}`));
+              const existingIds = new Set(messages.map(m => m.id));
+
+              // If legacy call logs existed with [call_log], clean them up before importing properly formatted ones
+              if (hasLegacyCallLogs) {
+                const pool = getPool();
+                if (pool) {
+                  await pool.query(`DELETE FROM messages WHERE chat_id = $1 AND text = '[call_log]'`, [chat.id]);
+                }
+              }
+
+              for (const rm of remoteMsgs.slice(-45)) {
                 const ts = rm.t
                   ? new Date(Number(rm.t) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
                   : 'Just now';
                 const key = `${rm.body}__${ts}`;
-                if (existingTexts.has(key)) continue;
-                existingTexts.add(key);
+                if (existingKeys.has(key) || (rm.id && existingIds.has(rm.id))) continue;
+                existingKeys.add(key);
 
-                const senderName = rm.fromMe ? 'Agent' : (rm.senderName || chat.contactName || chat.contact_name || 'Contact');
+                const senderName = rm.fromMe ? 'You' : (rm.senderName || hint || 'Contact');
                 await createMessage(chat.id, {
                   sender: rm.fromMe ? 'agent' : 'customer',
                   agentName: senderName,
                   text: rm.body || (rm.type !== 'chat' ? `[${rm.type}]` : ''),
-                  type: rm.type === 'chat' ? 'text' : (rm.type || 'text'),
+                  type: rm.type || 'text',
+                  mediaUrl: rm.mediaUrl || '',
+                  fileName: rm.fileName || '',
+                  fileSize: rm.fileSize || '',
+                  audioDuration: rm.callDuration ? formatCallDuration(rm.callDuration) : '',
                   status: rm.fromMe ? 'sent' : 'delivered',
                   timestamp: ts,
                 }, userId);
               }
+
+              // Update lastMessage on chat
+              const lastRemote = remoteMsgs[remoteMsgs.length - 1];
+              if (lastRemote) {
+                const lastTs = lastRemote.t
+                  ? new Date(Number(lastRemote.t) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                  : 'Just now';
+                await updateChat(userId, chat.id, {
+                  lastMessage: { text: lastRemote.body, timestamp: lastTs, status: lastRemote.fromMe ? 'sent' : 'delivered', fromMe: Boolean(lastRemote.fromMe) }
+                });
+              }
+
               messages = await getMessages(chatId, userId);
             }
           } catch (fetchErr) {
