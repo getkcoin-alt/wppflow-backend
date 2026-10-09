@@ -1329,16 +1329,25 @@ app.get('/api/debug/wpp-chats', authenticateToken, async (req, res) => {
   try {
     const targetChatId = req.query.chatId;
     if (targetChatId) {
-      const single = await session.client.page.evaluate((cid) => {
-        const c = window.WPP.chat.get(cid);
+      const single = await session.client.page.evaluate(async (cid) => {
+        const list = await window.WPP.chat.list();
+        const c = list.find(x => String(x.id?._serialized || x.id) === cid);
         if (!c) return { notFound: true };
+        const pm = c.previewMessage || {};
         return {
           id: c.id?._serialized || c.id,
           name: c.name,
           formattedTitle: c.formattedTitle,
           contact: c.contact,
-          previewMessage: c.previewMessage,
-          keys: Object.keys(c)
+          previewMessageKeys: Object.keys(pm),
+          previewMessageType: pm.type,
+          previewMessageBody: pm.body,
+          previewMessageCaption: pm.caption,
+          previewMessageTitle: pm.title,
+          previewMessageText: pm.text,
+          previewMessageMatchedText: pm.matchedText,
+          previewMessageInteractive: pm.interactiveMessage ? Object.keys(pm.interactiveMessage) : null,
+          previewMessageRaw: JSON.stringify(pm).slice(0, 500),
         };
       }, targetChatId);
       return res.json(single);
