@@ -1373,7 +1373,16 @@ app.get('/api/debug/wpp-chats', authenticateToken, async (req, res) => {
           cFormattedTitle: c.formattedTitle,
           picTest: await (async () => {
             try {
-              return await window.WPP.contact.getProfilePictureUrl(String(c.id?._serialized || c.id || ''));
+              const pn = c.contact?.__x_phoneNumber || c.contact?.phoneNumber;
+              const targets = [
+                pn ? `${pn}@c.us` : null,
+                String(c.id?._serialized || c.id || ''),
+              ].filter(Boolean);
+              for (const t of targets) {
+                const url = await window.WPP.contact.getProfilePictureUrl(t).catch(() => null);
+                if (url) return { target: t, url };
+              }
+              return { notFound: true, pn };
             } catch (e) {
               return 'err: ' + e.message;
             }
