@@ -1338,7 +1338,7 @@ app.get('/api/debug/wpp-chats', authenticateToken, async (req, res) => {
           id: c.id?._serialized || c.id,
           name: c.name,
           formattedTitle: c.formattedTitle,
-          contact: c.contact,
+          contactName: c.contact?.name || c.contact?.pushname || '',
           previewMessageKeys: Object.keys(pm),
           previewMessageType: pm.type,
           previewMessageBody: pm.body,
