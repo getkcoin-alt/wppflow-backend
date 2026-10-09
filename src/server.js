@@ -1287,6 +1287,43 @@ app.get('/api/chats/:chatId/messages', authenticateToken, async (req, res) => {
   }
 });
 
+app.get('/api/debug/wpp-chats', authenticateToken, async (req, res) => {
+  const session = sessions.get('primary-whatsapp');
+  if (!session?.client) return res.json({ error: 'No client' });
+  try {
+    const list = await session.client.page.evaluate(async () => {
+      const chats = await window.WPP.chat.list();
+      return chats.slice(0, 15).map(c => ({
+        id: c.id?._serialized || c.id,
+        name: c.name,
+        formattedTitle: c.formattedTitle,
+        contactName: c.contact?.name,
+        pushname: c.contact?.pushname,
+        t: c.t,
+        unreadCount: c.unreadCount,
+        isGroup: c.isGroup,
+        lastReceivedKey: c.lastReceivedKey,
+        previewMessage: c.previewMessage ? {
+          type: c.previewMessage.type,
+          body: c.previewMessage.body?.slice(0, 50),
+          fromMe: c.previewMessage.fromMe,
+          t: c.previewMessage.t
+        } : null,
+        msgsCount: c.msgs?.models?.length || 0,
+        lastMsg: c.msgs?.models?.length ? {
+          type: c.msgs.models[c.msgs.models.length - 1].type,
+          body: c.msgs.models[c.msgs.models.length - 1].body?.slice(0, 50),
+          fromMe: c.msgs.models[c.msgs.models.length - 1].fromMe,
+          t: c.msgs.models[c.msgs.models.length - 1].t
+        } : null
+      }));
+    });
+    res.json(list);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.use('/api', dataRoutes);
 
 // Session and QR state changes continuously. Prevent browsers and Vercel's
