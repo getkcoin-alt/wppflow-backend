@@ -803,7 +803,7 @@ async function syncRemoteChats(sessionName, client) {
           const rawId = String(c.id?._serialized || c.id || '');
           const isGroup = Boolean(c.isGroup || rawId.includes('@g.us'));
           const contact = c.contact || {};
-          const name = c.formattedTitle || c.name || contact.name || contact.pushname || contact.shortName || '';
+          let name = (contact.verifiedName || c.formattedTitle || c.name || contact.name || contact.pushname || contact.shortName || '').trim();
           const isLid = rawId.includes('@lid');
           const phone = (isGroup || isLid)
             ? rawId
@@ -811,25 +811,41 @@ async function syncRemoteChats(sessionName, client) {
 
           let lastBody = '';
           let fromMe = false;
-          if (c.previewMessage) {
+          if (c.previewMessage && !c.previewMessage.invis) {
             fromMe = Boolean(c.previewMessage.fromMe);
             const pType = c.previewMessage.type;
             if (pType === 'call_log') lastBody = '📞 Voice call';
-            else if (pType === 'image') lastBody = '📷 Photo';
-            else if (pType === 'video') lastBody = '🎥 Video';
+            else if (pType === 'image') lastBody = c.previewMessage.caption ? `📷 ${c.previewMessage.caption}` : '📷 Photo';
+            else if (pType === 'video') lastBody = c.previewMessage.caption ? `🎥 ${c.previewMessage.caption}` : '🎥 Video';
             else if (pType === 'audio' || pType === 'ptt') lastBody = '🎵 Voice message';
-            else if (pType === 'document') lastBody = '📄 Document';
+            else if (pType === 'document') lastBody = c.previewMessage.caption ? `📄 ${c.previewMessage.caption}` : '📄 Document';
             else if (pType === 'vcard') {
               const match = (c.previewMessage.body || '').match(/FN:(.+)/i) || (c.previewMessage.body || '').match(/N:(.+)/i);
               lastBody = match ? `👤 ${match[1].replace(/;/g, ' ').trim()}` : '👤 Contact';
+            } else if (pType === 'notification_template') {
+              lastBody = c.previewMessage.caption || c.previewMessage.body || '';
             } else {
-              lastBody = c.previewMessage.body || '';
+              lastBody = c.previewMessage.body || c.previewMessage.caption || '';
             }
           }
           if (!lastBody && c.msgs?.models?.length > 0) {
-            const last = c.msgs.models[c.msgs.models.length - 1];
-            lastBody = last?.body || last?.caption || (last?.type && last.type !== 'chat' ? `[${last.type}]` : '');
-            fromMe = Boolean(last?.fromMe);
+            for (let i = c.msgs.models.length - 1; i >= 0; i--) {
+              const m = c.msgs.models[i];
+              if (m.invis) continue;
+              if (m.type === 'call_log') lastBody = '📞 Voice call';
+              else if (m.type === 'image') lastBody = m.caption ? `📷 ${m.caption}` : '📷 Photo';
+              else if (m.type === 'video') lastBody = m.caption ? `🎥 ${m.caption}` : '🎥 Video';
+              else if (m.type === 'audio' || m.type === 'ptt') lastBody = '🎵 Voice message';
+              else if (m.type === 'document') lastBody = m.caption ? `📄 ${m.caption}` : '📄 Document';
+              else if (m.type === 'vcard') {
+                const match = (m.body || '').match(/FN:(.+)/i) || (m.body || '').match(/N:(.+)/i);
+                lastBody = match ? `👤 ${match[1].replace(/;/g, ' ').trim()}` : '👤 Contact';
+              } else {
+                lastBody = m.body || m.caption || (m.type !== 'chat' ? `[${m.type}]` : '');
+              }
+              fromMe = Boolean(m.fromMe);
+              if (lastBody) break;
+            }
           }
 
           const lastTimestamp = Number(c.t || 0);
@@ -898,6 +914,7 @@ async function syncRemoteChats(sessionName, client) {
   // 3. Persist and import conversations into database
   const existing = await getChats(userId);
   let chatsCreated = 0;
+  let historyImportedCount = 0;
 
   for (const remote of allConversations) {
     const remoteId = remote.rawId;
@@ -957,14 +974,23 @@ async function syncRemoteChats(sessionName, client) {
         updates.phone = remoteId;
         chat.phone = remoteId;
       }
-      if (avatar && (!chat.avatar || chat.avatar === '')) {
+      if (avatar) {
         updates.avatar = avatar;
       }
       await updateChat(userId, chat.id, updates);
+      io.to(`workspace:${userId}`).emit('chat:updated', {
+        session: sessionName,
+        chatId: chat.id,
+        contactName: updates.contactName,
+        unreadCount: updates.unreadCount,
+        lastMessage: updates.lastMessage || chat.lastMessage,
+        avatar: updates.avatar || chat.avatar,
+      });
     }
 
-    // Only import recent message history for the first 15 active conversations to avoid timeout
-    if (chatsCreated <= 15) {
+    // Only import recent message history for the top 15 active conversations to avoid timeout
+    if (historyImportedCount < 15) {
+      historyImportedCount++;
       try {
         const existingMsgs = await getMessages(chat.id);
         if (!existingMsgs || existingMsgs.length === 0) {
