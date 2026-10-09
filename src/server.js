@@ -1327,6 +1327,22 @@ app.get('/api/debug/wpp-chats', authenticateToken, async (req, res) => {
   const session = sessions.get('primary-whatsapp');
   if (!session?.client) return res.json({ error: 'No client' });
   try {
+    const targetChatId = req.query.chatId;
+    if (targetChatId) {
+      const single = await session.client.page.evaluate((cid) => {
+        const c = window.WPP.chat.get(cid);
+        if (!c) return { notFound: true };
+        return {
+          id: c.id?._serialized || c.id,
+          name: c.name,
+          formattedTitle: c.formattedTitle,
+          contact: c.contact,
+          previewMessage: c.previewMessage,
+          keys: Object.keys(c)
+        };
+      }, targetChatId);
+      return res.json(single);
+    }
     const list = await session.client.page.evaluate(async () => {
       const chats = await window.WPP.chat.list();
       return chats.slice(0, 15).map(c => ({
