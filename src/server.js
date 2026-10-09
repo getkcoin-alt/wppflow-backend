@@ -1272,6 +1272,38 @@ app.get('/api/chats/:chatId/messages', authenticateToken, async (req, res) => {
   }
 });
 
+app.get('/api/debug/inspect-image', authenticateToken, async (req, res) => {
+  const session = sessions.get('primary-whatsapp');
+  if (!session?.client) return res.json({ error: 'No client' });
+  try {
+    const info = await session.client.page.evaluate(async () => {
+      const chats = await window.WPP.chat.list();
+      const targetChat = chats.find(c => c.name?.includes('Ardhangini') || c.formattedTitle?.includes('Ardhangini'));
+      if (!targetChat) return { error: 'chat not found' };
+      const msgs = await window.WPP.chat.getMessages(targetChat.id._serialized, { count: 30 });
+      const imgMsgs = msgs.filter(m => m.type === 'image');
+      return {
+        chatId: targetChat.id._serialized,
+        imgCount: imgMsgs.length,
+        samples: imgMsgs.map(m => ({
+          id: m.id?._serialized || m.id,
+          type: m.type,
+          bodyLen: m.body ? m.body.length : 0,
+          bodyPrefix: m.body ? m.body.slice(0, 50) : '',
+          caption: m.caption,
+          mimetype: m.mimetype,
+          hasMediaData: Boolean(m.mediaData),
+          previewType: m.mediaData?.preview ? typeof m.mediaData.preview : null,
+          keys: Object.keys(m).slice(0, 25)
+        }))
+      };
+    });
+    res.json(info);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.use('/api', dataRoutes);
 
 // Session and QR state changes continuously. Prevent browsers and Vercel's
