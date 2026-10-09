@@ -1503,7 +1503,7 @@ app.get('/api/sessions/:session/debug-chats', authenticateToken, async (req, res
       target,
       wapiCount: Array.isArray(wapiMsgs) ? wapiMsgs.length : wapiMsgs,
       idbCount: Array.isArray(idbMsgs) ? idbMsgs.length : idbMsgs,
-      wapiSample: Array.isArray(wapiMsgs) ? wapiMsgs.slice(-3) : [],
+      wapiSample: Array.isArray(wapiMsgs) ? wapiMsgs.filter(m => m.type === 'image' || m.isMedia).map(m => ({ id: m.id, rowId: m.rowId, type: m.type, t: m.t, mimetype: m.mimetype, hasMediaData: !!m.mediaData, mediaDataKeys: m.mediaData ? Object.keys(m.mediaData) : [], bodyPrefix: (m.body || '').slice(0, 50), preview: m.mediaData?.preview ? typeof m.mediaData.preview : null })) : [],
       idbSample: Array.isArray(idbMsgs) ? idbMsgs.slice(0, 3) : []
     });
   } catch (e) {
