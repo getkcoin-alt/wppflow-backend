@@ -1,25 +1,28 @@
-import express from 'express';
-import { checkDatabaseHealth } from '../db/index.js';
-import { defaultWhatsAppProvider } from '../services/whatsapp/WhatsAppProvider.js';
+import express from "express";
+import { checkDatabaseHealth } from "../db/index.js";
+import { defaultWhatsAppProvider } from "../services/whatsapp/WhatsAppProvider.js";
 
 const router = express.Router();
 
-router.get('/health', async (req, res) => {
+router.get("/health", async (req, res) => {
   const dbHealth = await checkDatabaseHealth();
-  const activeSessionsCount = defaultWhatsAppProvider.sessions.size;
+  const activeSessionsCount = [
+    ...defaultWhatsAppProvider.sessions.values(),
+  ].filter((s) => s.status === "CONNECTED" && s.client).length;
 
   const isHealthy = dbHealth.isConnected;
   res.status(isHealthy ? 200 : 503).json({
-    status: isHealthy ? 'ok' : 'degraded',
-    engine: 'wppflow-enterprise-engine',
-    version: '3.0.0',
+    status: isHealthy ? "ok" : "degraded",
+    engine: "wppflow-enterprise-engine",
+    version: "3.0.0",
+    apiContract: 3,
     database: {
       connected: dbHealth.isConnected,
-      type: 'PostgreSQL'
+      type: "PostgreSQL",
     },
     activeSessions: activeSessionsCount,
     uptime: Math.floor(process.uptime()),
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   });
 });
 

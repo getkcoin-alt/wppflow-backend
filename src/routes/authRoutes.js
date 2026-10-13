@@ -1,511 +1,369 @@
-import express from 'express';
-import { 
-  registerTenantAndUser, 
-  comparePassword, 
-  generateAccessToken, 
-  generateRefreshToken, 
-  rotateRefreshToken, 
-  revokeAllRefreshTokens 
-} from '../services/authService.js';
-import { authenticateToken } from '../middleware/auth.js';
-import { authRateLimiter } from '../middleware/rateLimiter.js';
-import { query } from '../db/index.js';
-
+import express from "express";
+import crypto from "node:crypto";
+import {
+  registerTenantAndUser,
+  comparePassword,
+  hashPassword,
+  generateAccessToken,
+  generateRefreshToken,
+  rotateRefreshToken,
+} from "../services/authService.js";
+import {
+  authenticateToken,
+  requireTenantContext,
+  requireRole,
+} from "../middleware/auth.js";
+import { authRateLimiter } from "../middleware/rateLimiter.js";
+import { query, withTransaction } from "../db/index.js";
+import { ENV } from "../config/env.js";
+import { route, fail, text } from "../middleware/http.js";
 const router = express.Router();
-
-/**
- * POST /api/auth/signup
- */
-router.post('/signup', authRateLimiter, async (req, res) => {
-  try {
-    const { email, password, name, companyName } = req.body;
-
-    if (!email || !password || !name) {
-      return res.status(400).json({
-        status: 'error',
-        message: 'Name, email, and password (minimum 8 characters) are required.'
-      });
-    }
-
-    if (password.length < 8) {
-      return res.status(400).json({
-        status: 'error',
-        message: 'Password must be at least 8 characters long.'
-      });
-    }
-
-    const { rows: existing } = await query('SELECT id FROM users WHERE email = $1', [email.trim().toLowerCase()]);
-    if (existing.length > 0) {
-      return res.status(409).json({
-        status: 'error',
-        message: 'An account with this email already exists. Please log in.'
-      });
-    }
-
+const cookieOptions = {
+  httpOnly: true,
+  secure: ENV.NODE_ENV === "production",
+  sameSite: "lax",
+  path: "/api/auth",
+  maxAge: ENV.JWT_REFRESH_EXPIRES_IN_DAYS * 86400000,
+};
+const emailOf = (value) => {
+  const email = text(value, "Email", 254).toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+    throw fail(400, "Invalid email");
+  return email;
+};
+async function context(userId, tenantId) {
+  const { rows } = await query(
+    `SELECT t.*,m.role FROM memberships m JOIN tenants t ON t.id=m.tenant_id WHERE m.user_id=$1 AND m.status='active'
+    ${tenantId ? "AND t.id=$2" : ""} ORDER BY m.created_at,t.id LIMIT 1`,
+    tenantId ? [userId, tenantId] : [userId],
+  );
+  if (!rows[0]) throw fail(403, "Workspace access is unavailable");
+  return rows[0];
+}
+const userView = (user, tenant) => ({
+  id: user.id,
+  email: user.email,
+  name: user.name,
+  isSuperAdmin: Boolean(user.is_superadmin),
+  is_superadmin: Boolean(user.is_superadmin),
+  role: user.is_superadmin
+    ? "superadmin"
+    : ["owner", "admin"].includes(tenant.role)
+      ? "admin"
+      : "user",
+  membershipRole: tenant.role,
+  company_name: tenant.name,
+  plan: tenant.plan,
+  sessions_limit: tenant.sessions_limit,
+  status: user.status || "active",
+  created_at: user.created_at,
+});
+async function respondSession(res, user, tenant, issueRefresh = true) {
+  if (issueRefresh) {
+    const { refreshToken } = await generateRefreshToken(user.id, tenant.id);
+    res.cookie("refreshToken", refreshToken, cookieOptions);
+  }
+  res.json({
+    status: "success",
+    token: generateAccessToken(user, tenant.id, tenant.role),
+    user: userView(user, tenant),
+    tenant: { ...tenant, role: tenant.role },
+  });
+}
+router.post(
+  "/signup",
+  authRateLimiter,
+  route(async (req, res) => {
+    const name = text(req.body.name, "Name", 255),
+      email = emailOf(req.body.email),
+      password = text(req.body.password, "Password", 128);
+    if (password.length < 10)
+      throw fail(400, "Use at least 10 password characters");
     const { user, tenant, role } = await registerTenantAndUser({
+      name,
       email,
       password,
-      name,
-      companyName
+      companyName: req.body.companyName,
     });
-
-    const accessToken = generateAccessToken(user, tenant.id, role);
-    const { refreshToken } = await generateRefreshToken(user.id);
-
-    // Set secure HttpOnly refresh cookie
-    res.cookie('refreshToken', refreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge: 7 * 24 * 60 * 60 * 1000
-    });
-
-    res.status(201).json({
-      status: 'success',
-      message: 'Workspace created successfully!',
-      token: accessToken,
-      refreshToken,
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        isSuperAdmin: user.is_superadmin
-      },
-      tenant: {
-        id: tenant.id,
-        name: tenant.name,
-        slug: tenant.slug,
-        role
-      }
-    });
-  } catch (error) {
-    console.error('Signup error:', error);
-    res.status(500).json({ status: 'error', message: error.message || 'Internal signup error' });
-  }
-});
-
-/**
- * POST /api/auth/login
- */
-router.post('/login', authRateLimiter, async (req, res) => {
-  try {
-    const { email, password } = req.body;
-
-    if (!email || !password) {
-      return res.status(400).json({
-        status: 'error',
-        message: 'Email and password are required.'
-      });
-    }
-
-    const normalizedEmail = email.trim().toLowerCase();
-    const { rows: users } = await query(
-      `SELECT id, email, password_hash, name, is_superadmin, status FROM users WHERE email = $1`,
-      [normalizedEmail]
-    );
-
-    if (users.length === 0) {
-      return res.status(401).json({ status: 'error', message: 'Invalid email or password.' });
-    }
-
-    const user = users[0];
-
-    if (user.status !== 'active') {
-      return res.status(403).json({
-        status: 'error',
-        code: 'ACCOUNT_SUSPENDED',
-        message: 'Account is not active. Please contact your workspace administrator.'
-      });
-    }
-
-    const isMatch = await comparePassword(password, user.password_hash);
-    if (!isMatch) {
-      return res.status(401).json({ status: 'error', message: 'Invalid email or password.' });
-    }
-
-    // Resolve tenant memberships
-    const { rows: memberships } = await query(`
-      SELECT m.tenant_id, m.role, t.name as tenant_name, t.slug as tenant_slug, t.plan
-      FROM memberships m
-      JOIN tenants t ON m.tenant_id = t.id
-      WHERE m.user_id = $1
-      ORDER BY m.created_at ASC
-    `, [user.id]);
-
-    let activeTenant = null;
-    let activeRole = 'agent';
-
-    if (memberships.length > 0) {
-      activeTenant = {
-        id: memberships[0].tenant_id,
-        name: memberships[0].tenant_name,
-        slug: memberships[0].tenant_slug,
-        plan: memberships[0].plan
-      };
-      activeRole = memberships[0].role;
-    } else {
-      // Auto-provision a personal tenant if none exists
-      const tenantId = `tenant_user_${user.id}`;
-      await query(`
-        INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING
-      `, [tenantId, `${user.name}'s Workspace`, `workspace-${user.id}`]);
-      await query(`
-        INSERT INTO memberships (tenant_id, user_id, role) VALUES ($1, $2, 'owner') ON CONFLICT DO NOTHING
-      `, [tenantId, user.id]);
-      activeTenant = { id: tenantId, name: `${user.name}'s Workspace`, slug: `workspace-${user.id}` };
-      activeRole = 'owner';
-    }
-
-    const accessToken = generateAccessToken(user, activeTenant.id, activeRole);
-    const { refreshToken } = await generateRefreshToken(user.id);
-
-    // Audit log
-    await query(`
-      INSERT INTO audit_events (tenant_id, actor_id, event_type, metadata)
-      VALUES ($1, $2, 'auth.login_success', $3)
-    `, [activeTenant.id, user.id, JSON.stringify({ ip: req.ip })]);
-
-    res.cookie('refreshToken', refreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge: 7 * 24 * 60 * 60 * 1000
-    });
-
-    res.json({
-      status: 'success',
-      message: 'Login successful!',
-      token: accessToken,
-      refreshToken,
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        isSuperAdmin: user.is_superadmin
-      },
-      tenant: {
-        id: activeTenant.id,
-        name: activeTenant.name,
-        slug: activeTenant.slug,
-        role: activeRole
-      },
-      memberships: memberships.map(m => ({
-        tenantId: m.tenant_id,
-        tenantName: m.tenant_name,
-        role: m.role
-      }))
-    });
-  } catch (error) {
-    console.error('Login error:', error);
-    res.status(500).json({ status: 'error', message: error.message || 'Internal login error' });
-  }
-});
-
-/**
- * POST /api/auth/refresh
- */
-router.post('/refresh', async (req, res) => {
-  const tokenValue = req.body?.refreshToken || req.cookies?.refreshToken;
-  if (!tokenValue) {
-    return res.status(400).json({ status: 'error', message: 'Refresh token is required.' });
-  }
-
-  try {
-    const { refreshToken: newRefreshToken, tokenId } = await rotateRefreshToken(tokenValue);
-    const { rows } = await query(`
-      SELECT r.user_id, u.email, u.name, u.is_superadmin
-      FROM refresh_tokens r
-      JOIN users u ON r.user_id = u.id
-      WHERE r.id = $1
-    `, [tokenId]);
-
+    res.status(201);
+    await respondSession(res, user, { ...tenant, role });
+  }),
+);
+router.post(
+  "/login",
+  authRateLimiter,
+  route(async (req, res) => {
+    const email = emailOf(req.body.email),
+      password = text(req.body.password, "Password", 128);
+    const { rows } = await query("SELECT * FROM users WHERE email=$1", [email]);
     const user = rows[0];
-
-    // Resolve tenant
-    const { rows: memberships } = await query(`
-      SELECT tenant_id, role FROM memberships WHERE user_id = $1 ORDER BY created_at ASC LIMIT 1
-    `, [user.user_id]);
-
-    const tenantId = memberships[0]?.tenant_id || null;
-    const role = memberships[0]?.role || 'agent';
-
-    const accessToken = generateAccessToken(
-      { id: user.user_id, email: user.email, is_superadmin: user.is_superadmin },
-      tenantId,
-      role
+    if (
+      !user ||
+      user.status !== "active" ||
+      !(await comparePassword(password, user.password_hash))
+    )
+      throw fail(401, "Invalid email or password");
+    const tenant = await context(user.id);
+    await query(
+      "INSERT INTO audit_events(tenant_id,actor_id,event_type) VALUES($1,$2,'auth.login')",
+      [tenant.id, user.id],
     );
-
-    res.cookie('refreshToken', newRefreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge: 7 * 24 * 60 * 60 * 1000
-    });
-
-    res.json({
-      status: 'success',
-      token: accessToken,
-      refreshToken: newRefreshToken
-    });
-  } catch (err) {
-    return res.status(401).json({ status: 'error', message: err.message || 'Token refresh failed.' });
-  }
-});
-
-/**
- * POST /api/auth/logout
- */
-router.post('/logout', authenticateToken, async (req, res) => {
-  try {
-    await revokeAllRefreshTokens(req.user.id);
-    res.clearCookie('refreshToken');
-    res.json({ status: 'success', message: 'Logged out successfully.' });
-  } catch (err) {
-    res.status(500).json({ status: 'error', message: err.message });
-  }
-});
-
-/**
- * GET /api/auth/me
- */
-router.get('/me', authenticateToken, async (req, res) => {
-  try {
-    const { rows: users } = await query(
-      `SELECT id, email, name, is_superadmin, status, created_at FROM users WHERE id = $1`,
-      [req.user.id]
+    await respondSession(res, user, tenant);
+  }),
+);
+router.post(
+  "/refresh",
+  authRateLimiter,
+  route(async (req, res) => {
+    const value = req.cookies?.refreshToken;
+    if (!value) throw fail(401, "No refresh session");
+    let result;
+    try {
+      result = await rotateRefreshToken(value);
+    } catch {
+      res.clearCookie("refreshToken", cookieOptions);
+      throw fail(401, "Refresh session expired or revoked");
+    }
+    const { rows } = await query("SELECT * FROM users WHERE id=$1", [
+      result.userId,
+    ]);
+    const tenant = await context(result.userId, result.tenantId);
+    res.cookie("refreshToken", result.refreshToken, cookieOptions);
+    await respondSession(res, rows[0], tenant, false);
+  }),
+);
+router.post(
+  "/logout",
+  route(async (req, res) => {
+    const id = String(req.cookies?.refreshToken || "").split(".")[0];
+    if (id)
+      await query("UPDATE refresh_tokens SET revoked=true WHERE id=$1", [id]);
+    res.clearCookie("refreshToken", cookieOptions);
+    res.json({ status: "success" });
+  }),
+);
+router.get(
+  "/me",
+  authenticateToken,
+  requireTenantContext,
+  route(async (req, res) => {
+    if (req.apiKey) throw fail(403, "Interactive login required");
+    const tenant = await context(req.user.id, req.tenantId);
+    res.json({ status: "success", user: userView(req.user, tenant), tenant });
+  }),
+);
+router.post(
+  "/switch-tenant",
+  authenticateToken,
+  route(async (req, res) => {
+    if (req.apiKey) throw fail(403, "Interactive login required");
+    const tenant = await context(
+      req.user.id,
+      text(req.body.tenantId, "Workspace", 64),
     );
-
-    if (users.length === 0) {
-      return res.status(404).json({ status: 'error', message: 'User not found.' });
-    }
-
-    const { rows: memberships } = await query(`
-      SELECT m.tenant_id, m.role, t.name as tenant_name, t.slug as tenant_slug, t.plan
-      FROM memberships m
-      JOIN tenants t ON m.tenant_id = t.id
-      WHERE m.user_id = $1
-      ORDER BY m.created_at ASC
-    `, [req.user.id]);
-
-    const activeTenantId = req.tenantId || memberships[0]?.tenant_id;
-    const activeMembership = memberships.find(m => m.tenant_id === activeTenantId) || memberships[0];
-
+    await respondSession(res, req.user, tenant);
+  }),
+);
+router.get(
+  "/workspaces",
+  authenticateToken,
+  route(async (req, res) => {
+    if (req.apiKey) throw fail(403, "Interactive login required");
+    const { rows } = await query(
+      "SELECT t.id,t.name,m.role FROM memberships m JOIN tenants t ON t.id=m.tenant_id WHERE m.user_id=$1 AND m.status='active' ORDER BY t.name",
+      [req.user.id],
+    );
+    res.json({ status: "success", workspaces: rows });
+  }),
+);
+router.get(
+  "/users",
+  authenticateToken,
+  requireTenantContext,
+  requireRole("owner", "admin"),
+  route(async (req, res) => {
+    const { rows } = await query(
+      `SELECT u.id,u.name,u.email,m.role,m.status,u.created_at,t.name AS company,t.plan,t.sessions_limit,
+    (SELECT count(*)::int FROM memberships WHERE tenant_id=t.id AND status='active') AS seats,
+    (SELECT count(*)::int FROM whatsapp_sessions WHERE tenant_id=t.id AND status='CONNECTED') AS sessions
+    FROM memberships m JOIN users u ON u.id=m.user_id JOIN tenants t ON t.id=m.tenant_id WHERE m.tenant_id=$1 ORDER BY u.name`,
+      [req.tenantId],
+    );
     res.json({
-      status: 'success',
-      user: users[0],
-      tenant: activeMembership ? {
-        id: activeMembership.tenant_id,
-        name: activeMembership.tenant_name,
-        slug: activeMembership.tenant_slug,
-        role: activeMembership.role
-      } : null,
-      memberships: memberships.map(m => ({
-        tenantId: m.tenant_id,
-        tenantName: m.tenant_name,
-        role: m.role
-      }))
+      status: "success",
+      users: rows.map((u) => ({
+        ...u,
+        id: String(u.id),
+        company_name: u.company,
+        role: u.role === "owner" || u.role === "admin" ? "admin" : "user",
+        membershipRole: u.role,
+        whatsappSessionsQuota: u.sessions_limit,
+        activeSessionsCount: u.sessions,
+        teamSeats: u.seats,
+        monthlyBroadcastLimit: null,
+        broadcastsUsed: null,
+        apiCallsThisMonth: null,
+        lastLogin: null,
+        createdAt: u.created_at,
+      })),
     });
-  } catch (error) {
-    res.status(500).json({ status: 'error', message: error.message });
-  }
-});
-
-/**
- * POST /api/auth/switch-tenant
- */
-router.post('/switch-tenant', authenticateToken, async (req, res) => {
-  const { tenantId } = req.body;
-  if (!tenantId) {
-    return res.status(400).json({ status: 'error', message: 'tenantId is required.' });
-  }
-
-  try {
-    const { rows } = await query(`
-      SELECT m.role, t.id, t.name, t.slug, t.plan
-      FROM memberships m
-      JOIN tenants t ON m.tenant_id = t.id
-      WHERE m.user_id = $1 AND m.tenant_id = $2
-    `, [req.user.id, tenantId]);
-
-    if (rows.length === 0) {
-      return res.status(403).json({ status: 'error', message: 'You do not have access to this workspace.' });
-    }
-
-    const target = rows[0];
-    const { rows: users } = await query('SELECT * FROM users WHERE id = $1', [req.user.id]);
-    const newToken = generateAccessToken(users[0], target.id, target.role);
-
-    res.json({
-      status: 'success',
-      token: newToken,
-      tenant: {
-        id: target.id,
-        name: target.name,
-        slug: target.slug,
-        role: target.role
-      }
-    });
-  } catch (err) {
-    res.status(500).json({ status: 'error', message: err.message });
-  }
-});
-
-/**
- * GET /api/auth/users
- * List users in current tenant (or all users if platform superadmin)
- */
-router.get('/users', authenticateToken, async (req, res) => {
-  try {
-    const isSuperAdmin = Boolean(req.user.isSuperAdmin || req.user.is_superadmin);
-    let usersQuery;
-    let params;
-
-    if (isSuperAdmin && !req.tenantId) {
-      usersQuery = `
-        SELECT u.id, u.email, u.name, u.status, u.is_superadmin, u.created_at,
-               COALESCE(m.role, 'user') as role,
-               COALESCE(t.name, 'WppFlow Workspace') as company
-        FROM users u
-        LEFT JOIN memberships m ON m.user_id = u.id
-        LEFT JOIN tenants t ON m.tenant_id = t.id
-        ORDER BY u.created_at DESC
-      `;
-      params = [];
-    } else {
-      const tenantId = req.tenantId || req.user.tenantId;
-      usersQuery = `
-        SELECT u.id, u.email, u.name, u.status, u.is_superadmin, u.created_at,
-               m.role, t.name as company
-        FROM memberships m
-        JOIN users u ON m.user_id = u.id
-        JOIN tenants t ON m.tenant_id = t.id
-        WHERE m.tenant_id = $1
-        ORDER BY u.created_at ASC
-      `;
-      params = [tenantId];
-    }
-
-    const { rows } = await query(usersQuery, params);
-    const formatted = rows.map(u => ({
-      id: String(u.id),
-      name: u.name,
-      email: u.email,
-      avatar: `https://images.unsplash.com/photo-1535713875002?w=120&auto=format&fit=crop&q=80`,
-      role: u.role === 'owner' ? 'tenant_admin' : (u.role === 'admin' ? 'tenant_admin' : 'agent'),
-      company: u.company || 'WppFlow Workspace',
-      plan: 'enterprise',
-      status: u.status || 'active',
-      whatsappSessionsQuota: 5,
-      activeSessionsCount: 1,
-      monthlyBroadcastLimit: 10000,
-      broadcastsUsed: 0,
-      teamSeats: 10,
-      apiCallsThisMonth: 0,
-      createdAt: u.created_at,
-      lastLogin: u.created_at
-    }));
-
-    res.json({ status: 'success', users: formatted });
-  } catch (err) {
-    res.status(500).json({ status: 'error', message: err.message });
-  }
-});
-
-/**
- * POST /api/auth/users
- * Add user / member to tenant
- */
-router.post('/users', authenticateToken, async (req, res) => {
-  try {
-    const { email, password, name, role = 'agent' } = req.body;
-    if (!email || !name) {
-      return res.status(400).json({ status: 'error', message: 'Name and email are required.' });
-    }
-
-    const tenantId = req.tenantId || req.user.tenantId;
-    if (!tenantId) {
-      return res.status(400).json({ status: 'error', message: 'Tenant context required.' });
-    }
-
-    const normalizedEmail = email.trim().toLowerCase();
-    const defaultPassword = password || 'TempPass123!';
-    const passwordHash = await hashPassword(defaultPassword);
-
-    let userId;
-    const { rows: existingUser } = await query('SELECT id FROM users WHERE email = $1', [normalizedEmail]);
-    if (existingUser.length > 0) {
-      userId = existingUser[0].id;
-    } else {
-      const { rows: newUser } = await query(`
-        INSERT INTO users (email, password_hash, name, status)
-        VALUES ($1, $2, $3, 'active')
-        RETURNING id
-      `, [normalizedEmail, passwordHash, name.trim()]);
-      userId = newUser[0].id;
-    }
-
-    const membershipRole = role.includes('admin') ? 'admin' : 'agent';
-    await query(`
-      INSERT INTO memberships (tenant_id, user_id, role)
-      VALUES ($1, $2, $3)
-      ON CONFLICT (tenant_id, user_id) DO UPDATE SET role = EXCLUDED.role
-    `, [tenantId, userId, membershipRole]);
-
+  }),
+);
+router.post(
+  "/users",
+  authenticateToken,
+  requireTenantContext,
+  requireRole("owner", "admin"),
+  route(async (req, res) => {
+    const name = text(req.body.name, "Name", 255),
+      email = emailOf(req.body.email),
+      requested = req.body.role || "agent";
+    const role = ["admin", "tenant_admin"].includes(requested)
+      ? "admin"
+      : "agent";
+    if (
+      role === "admin" &&
+      req.membership.role !== "owner" &&
+      !req.user.isSuperAdmin
+    )
+      throw fail(403, "Only an owner can invite an administrator");
+    const token = crypto.randomBytes(32).toString("hex"),
+      id = crypto.randomUUID();
+    await query(
+      `INSERT INTO invitations(id,tenant_id,email,name,role,token_hash,expires_at) VALUES($1,$2,$3,$4,$5,$6,now()+interval '24 hours')`,
+      [
+        id,
+        req.tenantId,
+        email,
+        name,
+        role,
+        crypto.createHash("sha256").update(token).digest("hex"),
+      ],
+    );
+    await query(
+      "INSERT INTO audit_events(tenant_id,actor_id,event_type,metadata) VALUES($1,$2,'member.invited',$3)",
+      [req.tenantId, req.user.id, JSON.stringify({ email, role })],
+    );
     res.status(201).json({
-      status: 'success',
-      message: 'User added to workspace successfully.',
-      user: { id: String(userId), email: normalizedEmail, name: name.trim(), role: membershipRole }
+      status: "success",
+      message: "Invitation created. Share this single-use setup link.",
+      activationLink: `${ENV.APP_URL}/?invite=${token}`,
+      expiresInHours: 24,
     });
-  } catch (err) {
-    res.status(500).json({ status: 'error', message: err.message });
-  }
-});
-
-/**
- * PATCH /api/auth/users/:id
- * Update user status or role
- */
-router.patch('/users/:id', authenticateToken, async (req, res) => {
-  try {
-    const userId = parseInt(req.params.id, 10);
-    const tenantId = req.tenantId || req.user.tenantId;
-    const { status, role } = req.body;
-
-    if (status) {
-      await query(`UPDATE users SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`, [status, userId]);
-    }
-
-    if (role && tenantId) {
-      const membershipRole = role.includes('admin') ? 'admin' : 'agent';
-      await query(`
-        UPDATE memberships SET role = $1, updated_at = CURRENT_TIMESTAMP
-        WHERE user_id = $2 AND tenant_id = $3
-      `, [membershipRole, userId, tenantId]);
-    }
-
-    res.json({ status: 'success', message: 'User updated successfully' });
-  } catch (err) {
-    res.status(500).json({ status: 'error', message: err.message });
-  }
-});
-
-/**
- * DELETE /api/auth/users/:id
- * Remove user from workspace
- */
-router.delete('/users/:id', authenticateToken, async (req, res) => {
-  try {
-    const userId = parseInt(req.params.id, 10);
-    const tenantId = req.tenantId || req.user.tenantId;
-
-    if (tenantId) {
-      await query(`DELETE FROM memberships WHERE user_id = $1 AND tenant_id = $2`, [userId, tenantId]);
-    }
-
-    res.json({ status: 'success', message: 'User removed from workspace.' });
-  } catch (err) {
-    res.status(500).json({ status: 'error', message: err.message });
-  }
-});
-
+  }),
+);
+router.post(
+  "/accept-invite",
+  authRateLimiter,
+  route(async (req, res) => {
+    const token = text(req.body.token, "Invitation", 128),
+      password = text(req.body.password, "Password", 128);
+    await withTransaction(async (c) => {
+      const { rows } = await c.query(
+        "SELECT * FROM invitations WHERE token_hash=$1 AND accepted_at IS NULL AND expires_at>now() FOR UPDATE",
+        [crypto.createHash("sha256").update(token).digest("hex")],
+      );
+      const inv = rows[0];
+      if (!inv) throw fail(400, "Invitation is invalid or expired");
+      const existing = await c.query(
+        "SELECT id,password_hash,status FROM users WHERE email=$1",
+        [inv.email],
+      );
+      let userId = existing.rows[0]?.id;
+      if (userId) {
+        if (
+          existing.rows[0].status !== "active" ||
+          !(await comparePassword(password, existing.rows[0].password_hash))
+        )
+          throw fail(
+            401,
+            "Use the existing account password to accept this invitation",
+          );
+      } else {
+        if (password.length < 10)
+          throw fail(400, "New accounts need at least 10 password characters");
+        const user = await c.query(
+          "INSERT INTO users(email,password_hash,name,status) VALUES($1,$2,$3,'active') RETURNING id",
+          [inv.email, await hashPassword(password), inv.name],
+        );
+        userId = user.rows[0].id;
+      }
+      await c.query(
+        "INSERT INTO memberships(tenant_id,user_id,role) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
+        [inv.tenant_id, userId, inv.role],
+      );
+      await c.query("UPDATE invitations SET accepted_at=now() WHERE id=$1", [
+        inv.id,
+      ]);
+    });
+    res.json({
+      status: "success",
+      message: "Account activated. Log in to continue.",
+    });
+  }),
+);
+router.patch(
+  "/users/:id",
+  authenticateToken,
+  requireTenantContext,
+  requireRole("owner", "admin"),
+  route(async (req, res) => {
+    await withTransaction(async (c) => {
+      const { rows } = await c.query(
+        "SELECT * FROM memberships WHERE tenant_id=$1 AND user_id=$2 FOR UPDATE",
+        [req.tenantId, req.params.id],
+      );
+      const member = rows[0];
+      if (!member) throw fail(404, "Member not found");
+      if (member.role === "owner")
+        throw fail(403, "Workspace ownership cannot be changed here");
+      if (
+        req.body.role &&
+        req.membership.role !== "owner" &&
+        !req.user.isSuperAdmin
+      )
+        throw fail(403, "Only an owner can change roles");
+      const role = req.body.role
+        ? ["admin", "tenant_admin"].includes(req.body.role)
+          ? "admin"
+          : "agent"
+        : member.role;
+      const status = req.body.status
+        ? ["active", "suspended", "blocked"].includes(req.body.status)
+          ? req.body.status
+          : null
+        : member.status;
+      if (!status) throw fail(400, "Invalid status");
+      await c.query(
+        "UPDATE memberships SET role=$1,status=$2,updated_at=now() WHERE id=$3",
+        [role, status, member.id],
+      );
+      await c.query(
+        "INSERT INTO audit_events(tenant_id,actor_id,event_type,metadata) VALUES($1,$2,'member.updated',$3)",
+        [
+          req.tenantId,
+          req.user.id,
+          JSON.stringify({ userId: req.params.id, role, status }),
+        ],
+      );
+    });
+    req.app.get("io")?.in(`user:${req.params.id}`).disconnectSockets();
+    res.json({ status: "success" });
+  }),
+);
+router.delete(
+  "/users/:id",
+  authenticateToken,
+  requireTenantContext,
+  requireRole("owner", "admin"),
+  route(async (req, res) => {
+    const { rows } = await query(
+      "DELETE FROM memberships WHERE tenant_id=$1 AND user_id=$2 AND role<>'owner' RETURNING id",
+      [req.tenantId, req.params.id],
+    );
+    if (!rows.length) throw fail(404, "Removable member not found");
+    req.app.get("io")?.in(`user:${req.params.id}`).disconnectSockets();
+    res.json({ status: "success" });
+  }),
+);
 export default router;

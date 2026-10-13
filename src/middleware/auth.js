@@ -1,94 +1,82 @@
-import jwt from 'jsonwebtoken';
-import { ENV } from '../config/env.js';
-import { query } from '../db/index.js';
+import jwt from "jsonwebtoken";
+import crypto from "node:crypto";
+import { ENV } from "../config/env.js";
+import { query } from "../db/index.js";
+import { fail } from "./http.js";
 
-export function authenticateToken(req, res, next) {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
-
-  if (!token) {
-    return res.status(401).json({ status: 'error', message: 'Authentication required. No token provided.' });
-  }
-
+export async function authenticateToken(req, res, next) {
   try {
-    const decoded = jwt.verify(token, ENV.JWT_SECRET);
-    req.user = {
-      id: decoded.userId || decoded.id,
-      email: decoded.email,
-      isSuperAdmin: Boolean(decoded.isSuperAdmin)
-    };
-    req.tenantId = decoded.tenantId || req.headers['x-tenant-id'] || null;
-    req.role = decoded.role || 'agent';
+    const token = req.headers.authorization?.replace(/^Bearer /, "");
+    if (!token) throw fail(401, "Authentication required");
+    if (token.startsWith("wpp_")) {
+      const { rows } = await query(
+        "UPDATE api_keys SET last_used_at=now() WHERE key_hash=$1 AND revoked_at IS NULL RETURNING id,tenant_id,scopes",
+        [crypto.createHash("sha256").update(token).digest("hex")],
+      );
+      if (!rows[0]) throw fail(401, "Invalid API credential");
+      req.apiKey = rows[0];
+      req.tenantId = rows[0].tenant_id;
+      req.user = { id: null, name: "API", isSuperAdmin: false };
+      return next();
+    }
+    let decoded;
+    try {
+      decoded = jwt.verify(token, ENV.JWT_SECRET);
+    } catch {
+      throw fail(401, "Access session expired");
+    }
+    const { rows } = await query(
+      "SELECT id,email,name,status,is_superadmin FROM users WHERE id=$1",
+      [decoded.userId || decoded.id],
+    );
+    if (!rows[0] || rows[0].status !== "active")
+      throw fail(401, "Account is inactive");
+    req.user = { ...rows[0], isSuperAdmin: Boolean(rows[0].is_superadmin) };
+    req.tenantId = decoded.tenantId || null;
     next();
-  } catch (err) {
-    return res.status(403).json({ status: 'error', message: 'Invalid or expired access token.' });
+  } catch (error) {
+    next(error);
   }
 }
-
-/**
- * Middleware: Derives and enforces active tenant context from database membership
- */
 export async function requireTenantContext(req, res, next) {
-  if (!req.user?.id) {
-    return res.status(401).json({ status: 'error', message: 'User authentication required.' });
-  }
-
-  const requestedTenantId = req.headers['x-tenant-id'] || req.tenantId;
-
   try {
-    let membershipQuery = `
-      SELECT m.tenant_id, m.role, t.name as tenant_name, t.slug as tenant_slug, t.sessions_limit
-      FROM memberships m
-      JOIN tenants t ON m.tenant_id = t.id
-      WHERE m.user_id = $1
-    `;
-    const params = [req.user.id];
-
-    if (requestedTenantId) {
-      membershipQuery += ' AND m.tenant_id = $2';
-      params.push(requestedTenantId);
-    } else {
-      membershipQuery += ' ORDER BY m.created_at ASC LIMIT 1';
+    if (req.apiKey) {
+      req.membership = { role: "api" };
+      return next();
     }
-
-    const { rows } = await query(membershipQuery, params);
-
-    if (rows.length === 0) {
-      return res.status(403).json({
-        status: 'error',
-        message: 'No active tenant membership found for this user.'
-      });
-    }
-
-    const activeMembership = rows[0];
-    req.tenantId = activeMembership.tenant_id;
-    req.tenant = {
-      id: activeMembership.tenant_id,
-      name: activeMembership.tenant_name,
-      slug: activeMembership.tenant_slug,
-      sessionsLimit: activeMembership.sessions_limit
-    };
-    req.membership = {
-      role: activeMembership.role
-    };
-
+    const requested = req.headers["x-tenant-id"] || req.tenantId;
+    const { rows } = await query(
+      `SELECT t.*,m.role,m.status AS membership_status FROM memberships m JOIN tenants t ON t.id=m.tenant_id
+      WHERE m.user_id=$1 AND m.status='active' ${requested ? "AND t.id=$2" : ""} ORDER BY m.created_at,t.id LIMIT 1`,
+      requested ? [req.user.id, requested] : [req.user.id],
+    );
+    if (!rows[0]) throw fail(403, "No authorized workspace membership");
+    req.tenantId = rows[0].id;
+    req.tenant = { ...rows[0], sessionsLimit: rows[0].sessions_limit };
+    req.membership = { role: rows[0].role };
     next();
-  } catch (err) {
-    console.error('Tenant context error:', err);
-    return res.status(500).json({ status: 'error', message: 'Failed to resolve tenant authorization.' });
+  } catch (error) {
+    next(error);
   }
 }
-
-export function requireRole(...allowedRoles) {
-  return (req, res, next) => {
-    if (req.user?.isSuperAdmin) return next();
-    const userRole = req.membership?.role || req.role;
-    if (!allowedRoles.includes(userRole)) {
-      return res.status(403).json({
-        status: 'error',
-        message: `Forbidden: requires one of roles [${allowedRoles.join(', ')}]`
-      });
-    }
-    next();
+export const requireRole =
+  (...roles) =>
+  (req, res, next) => {
+    if (req.user?.isSuperAdmin || roles.includes(req.membership?.role))
+      return next();
+    next(fail(403, "You do not have permission for this action"));
   };
-}
+export const requireScope = (scope) => (req, res, next) => {
+  if (!req.apiKey || req.apiKey.scopes.includes(scope)) return next();
+  next(fail(403, "API credential lacks the required scope"));
+};
+export const requireWriteAccess = (req, res, next) => {
+  if (
+    ["GET", "HEAD", "OPTIONS"].includes(req.method) ||
+    req.apiKey ||
+    req.user?.isSuperAdmin ||
+    ["owner", "admin", "agent"].includes(req.membership?.role)
+  )
+    return next();
+  next(fail(403, "This membership is read-only"));
+};

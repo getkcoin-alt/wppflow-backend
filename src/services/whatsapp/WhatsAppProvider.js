@@ -1,8 +1,8 @@
-import wppconnect from '@wppconnect-team/wppconnect';
-import path from 'path';
-import fs from 'fs';
-import { ENV } from '../../config/env.js';
-import { ACK_STATUS, SESSION_STATUS } from '../../config/constants.js';
+import wppconnect from "@wppconnect-team/wppconnect";
+import path from "path";
+import fs from "fs";
+import { ENV } from "../../config/env.js";
+import { ACK_STATUS, SESSION_STATUS } from "../../config/constants.js";
 
 export class WhatsAppProvider {
   constructor() {
@@ -25,24 +25,38 @@ export class WhatsAppProvider {
     const key = this.sessionKey(tenantId, sessionName);
     if (this.sessions.has(key)) {
       const existing = this.sessions.get(key);
-      if (existing.status === SESSION_STATUS.CONNECTED) {
+      if (
+        [
+          SESSION_STATUS.CONNECTED,
+          SESSION_STATUS.STARTING,
+          SESSION_STATUS.QRCODE,
+          SESSION_STATUS.AUTHENTICATING,
+        ].includes(existing.status)
+      ) {
         return existing;
       }
     }
 
     const legacyTokenDir = path.join(ENV.TOKEN_DIR, sessionName);
-    const sessionTokenDir = path.join(ENV.TOKEN_DIR, `tenant_${tenantId}_${sessionName}`);
+    const sessionTokenDir = path.join(
+      ENV.TOKEN_DIR,
+      `tenant_${tenantId}_${sessionName}`,
+    );
     if (!fs.existsSync(sessionTokenDir)) {
-      if (fs.existsSync(legacyTokenDir)) {
+      const owners = JSON.parse(process.env.LEGACY_SESSION_OWNERS || "{}");
+      if (owners[sessionName] === tenantId && fs.existsSync(legacyTokenDir)) {
         try {
           fs.cpSync(legacyTokenDir, sessionTokenDir, { recursive: true });
-          console.log(`🔑 Preserved legacy session tokens from ${legacyTokenDir} to ${sessionTokenDir}`);
+          console.log(
+            `🔑 Preserved legacy session tokens from ${legacyTokenDir} to ${sessionTokenDir}`,
+          );
         } catch (e) {
-          console.warn(`Failed copying legacy token directory:`, e.message);
-          fs.mkdirSync(sessionTokenDir, { recursive: true });
+          throw new Error(
+            "Legacy session copy failed; original credentials preserved",
+          );
         }
       } else {
-        fs.mkdirSync(sessionTokenDir, { recursive: true });
+        fs.mkdirSync(sessionTokenDir, { recursive: true, mode: 0o700 });
       }
     }
 
@@ -53,36 +67,45 @@ export class WhatsAppProvider {
       client: null,
       qrcode: null,
       phone: null,
-      battery: 100,
-      antiBanHealth: 100,
-      createdAt: new Date().toISOString()
+      battery: null,
+      antiBanHealth: null,
+      createdAt: new Date().toISOString(),
     };
     this.sessions.set(key, sessionState);
 
+    const notify = (fn, ...args) => {
+      if (fn)
+        Promise.resolve()
+          .then(() => fn(...args))
+          .catch((error) => console.error("Provider event:", error.message));
+    };
     const client = await wppconnect.create({
       session: `tenant_${tenantId}_${sessionName}`,
       catchQR: (base64Qr, asciiQR, attempts, urlCode) => {
         sessionState.status = SESSION_STATUS.QRCODE;
         sessionState.qrcode = base64Qr;
-        if (callbacks.onQr) callbacks.onQr(base64Qr, attempts);
-        if (callbacks.onStatus) callbacks.onStatus(SESSION_STATUS.QRCODE);
+        notify(callbacks.onQr, base64Qr, attempts);
+        notify(callbacks.onStatus, SESSION_STATUS.QRCODE);
       },
       statusFind: (statusSession, session) => {
-        if (statusSession === 'isLogged' || statusSession === 'inChat') {
+        if (statusSession === "isLogged" || statusSession === "inChat") {
           sessionState.status = SESSION_STATUS.CONNECTED;
           sessionState.qrcode = null;
-          if (callbacks.onStatus) callbacks.onStatus(SESSION_STATUS.CONNECTED);
-        } else if (statusSession === 'qrReadSuccess') {
+          notify(callbacks.onStatus, SESSION_STATUS.CONNECTED);
+        } else if (statusSession === "qrReadSuccess") {
           sessionState.status = SESSION_STATUS.AUTHENTICATING;
           sessionState.qrcode = null;
-          if (callbacks.onStatus) callbacks.onStatus(SESSION_STATUS.AUTHENTICATING);
-        } else if (statusSession === 'autocloseCalled') {
+          notify(callbacks.onStatus, SESSION_STATUS.AUTHENTICATING);
+        } else if (statusSession === "autocloseCalled") {
           sessionState.status = SESSION_STATUS.EXPIRED;
           sessionState.qrcode = null;
-          if (callbacks.onStatus) callbacks.onStatus(SESSION_STATUS.EXPIRED);
-        } else if (statusSession === 'browserClose' || statusSession === 'serverClose') {
+          notify(callbacks.onStatus, SESSION_STATUS.EXPIRED);
+        } else if (
+          statusSession === "browserClose" ||
+          statusSession === "serverClose"
+        ) {
           sessionState.status = SESSION_STATUS.DISCONNECTED;
-          if (callbacks.onStatus) callbacks.onStatus(SESSION_STATUS.DISCONNECTED);
+          notify(callbacks.onStatus, SESSION_STATUS.DISCONNECTED);
         }
       },
       headless: true,
@@ -90,28 +113,39 @@ export class WhatsAppProvider {
       devtools: false,
       folderNameToken: sessionTokenDir,
       browserArgs: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--disable-gpu',
-      ]
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-accelerated-2d-canvas",
+        "--no-first-run",
+        "--disable-gpu",
+      ],
     });
 
+    if (this.sessions.get(key) !== sessionState) {
+      await client.close();
+      throw new Error("Session startup was cancelled");
+    }
     sessionState.client = client;
+    sessionState.phone = await client.getWid().catch(() => null);
+    sessionState.status = SESSION_STATUS.CONNECTED;
+    if (callbacks.onStatus) await callbacks.onStatus(SESSION_STATUS.CONNECTED);
 
     // Register incoming message handler
     if (client?.onAnyMessage && callbacks.onMessage) {
       client.onAnyMessage((msg) => {
-        callbacks.onMessage(this.normalizeMessage(msg));
+        const normalized = this.normalizeMessage(msg);
+        normalized.downloadMedia = () => client.decryptFile(msg);
+        normalized.mimeType = msg.mimetype?.split(";")[0]?.trim();
+        normalized.byteSize = msg.size;
+        notify(callbacks.onMessage, normalized);
       });
     }
 
     // Register ACK event handler
     if (client?.onAck && callbacks.onAck) {
       client.onAck((ackData) => {
-        callbacks.onAck(this.normalizeAck(ackData));
+        notify(callbacks.onAck, this.normalizeAck(ackData));
       });
     }
 
@@ -135,97 +169,117 @@ export class WhatsAppProvider {
     const key = this.sessionKey(tenantId, sessionName);
     const session = this.sessions.get(key);
     if (!session?.client) {
-      throw new Error(`WhatsApp session '${sessionName}' not connected for this workspace.`);
+      const error = new Error(`WhatsApp session '${sessionName}' is offline.`);
+      error.code = "SESSION_OFFLINE";
+      throw error;
     }
 
     const rawStr = String(to).trim();
-    const digits = rawStr.replace(/\D/g, '');
-    const cleanTarget = rawStr.includes('@')
-      ? rawStr
-      : digits.length >= 13
-        ? `${digits}@lid`
-        : `${digits}@c.us`;
+    const digits = rawStr.replace(/\D/g, "");
+    const cleanTarget = rawStr.includes("@") ? rawStr : `${digits}@c.us`;
 
-    // Send through WPPConnect / WA-JS 4.6.1+ (which uses getMyUserLid() for @lid chats)
-    let result = null;
+    // Use the supported provider API once. Never fall back to a second send.
+    let result, timer;
     try {
-      if (session.client.page?.evaluate) {
-        result = await session.client.page.evaluate(async (target, msg) => {
-          if (!window.WPP?.chat?.sendTextMessage) throw new Error('WA-JS chat engine not ready');
-          let resolvedTarget = target;
-          try {
-            const list = window.WPP.chat.list?.() || [];
-            const bare = target.replace(/@.*$/, '');
-            const found = list.find(c => {
-              const sid = String(c.id?._serialized || c.id || '');
-              return sid === target || sid === `${bare}@lid` || sid === `${bare}@c.us` || sid === `${bare}@g.us`;
-            });
-            if (found) resolvedTarget = String(found.id?._serialized || found.id);
-          } catch {}
-          const sendPromise = window.WPP.chat.sendTextMessage(resolvedTarget, msg, { createChat: true, waitForAck: true });
-          const timeoutPromise = new Promise(resolve => setTimeout(() => resolve({ timedOut: true }), 15000));
-          return await Promise.race([sendPromise, timeoutPromise]);
-        }, cleanTarget, text);
-      } else {
-        result = await session.client.sendText(cleanTarget, text);
-      }
-    } catch (err) {
-      result = await session.client.sendText(cleanTarget, text);
+      result = await Promise.race([
+        session.client.sendText(cleanTarget, text, {
+          createChat: true,
+          waitForAck: true,
+        }),
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("Delivery confirmation timed out")),
+            20000,
+          );
+        }),
+      ]);
+    } catch {
+      const error = new Error(
+        "WhatsApp delivery outcome is uncertain. Reconcile before retrying.",
+      );
+      error.code = "DELIVERY_UNCERTAIN";
+      throw error;
+    } finally {
+      clearTimeout(timer);
     }
 
-    const providerMessageId = result?.id?._serialized || result?.id?.id || result?.id || null;
+    const providerMessageId =
+      result?.id?._serialized || result?.id?.id || result?.id || null;
+    if (!providerMessageId || result?.timedOut) {
+      const error = new Error("WhatsApp did not confirm a message identifier.");
+      error.code = "DELIVERY_UNCERTAIN";
+      throw error;
+    }
     return {
       providerMessageId,
       to: cleanTarget,
       text,
-      ack: result?.ack ?? ACK_STATUS.SERVER,
-      raw: result
+      ack: result?.ack ?? ACK_STATUS.PENDING,
+      raw: result,
     };
   }
 
   async syncConversations(tenantId, sessionName) {
     const session = this.getSession(tenantId, sessionName);
-    if (!session?.client) return [];
+    if (!session?.client) throw new Error("WhatsApp session is offline");
 
     try {
       const chats = await session.client.page.evaluate(async () => {
         if (!window.WPP?.chat?.list) return [];
         const rawList = await window.WPP.chat.list();
         return rawList.map((c) => {
-          const rawId = String(c.id?._serialized || c.id || '');
-          const isGroup = Boolean(c.isGroup || rawId.includes('@g.us'));
+          const rawId = String(c.id?._serialized || c.id || "");
+          const isGroup = Boolean(c.isGroup || rawId.includes("@g.us"));
           const contact = c.contact || {};
-          const name = (contact.verifiedName || c.formattedTitle || c.name || contact.name || contact.pushname || '').trim();
-          
-          let lastBody = '';
+          const name = (
+            contact.verifiedName ||
+            c.formattedTitle ||
+            c.name ||
+            contact.name ||
+            contact.pushname ||
+            ""
+          ).trim();
+
+          let lastBody = "";
           let fromMe = false;
           if (c.previewMessage && !c.previewMessage.invis) {
             fromMe = Boolean(c.previewMessage.fromMe);
             const pType = c.previewMessage.type;
-            if (pType === 'call_log') lastBody = '📞 Voice call';
-            else if (pType === 'image') lastBody = c.previewMessage.caption ? `📷 ${c.previewMessage.caption}` : '📷 Photo';
-            else if (pType === 'video') lastBody = c.previewMessage.caption ? `🎥 ${c.previewMessage.caption}` : '🎥 Video';
-            else if (pType === 'audio' || pType === 'ptt') lastBody = '🎵 Voice message';
-            else if (pType === 'document') lastBody = c.previewMessage.caption ? `📄 ${c.previewMessage.caption}` : '📄 Document';
+            if (pType === "call_log") lastBody = "📞 Voice call";
+            else if (pType === "image")
+              lastBody = c.previewMessage.caption
+                ? `📷 ${c.previewMessage.caption}`
+                : "📷 Photo";
+            else if (pType === "video")
+              lastBody = c.previewMessage.caption
+                ? `🎥 ${c.previewMessage.caption}`
+                : "🎥 Video";
+            else if (pType === "audio" || pType === "ptt")
+              lastBody = "🎵 Voice message";
+            else if (pType === "document")
+              lastBody = c.previewMessage.caption
+                ? `📄 ${c.previewMessage.caption}`
+                : "📄 Document";
             else {
-              lastBody = c.previewMessage.body || c.previewMessage.caption || '';
+              lastBody =
+                c.previewMessage.body || c.previewMessage.caption || "";
             }
           }
 
           return {
             id: rawId,
             phone: rawId,
-            contactName: name || (isGroup ? 'WhatsApp Group' : rawId),
-            avatar: contact.profilePicThumbObj?.eurl || '',
+            contactName: name || (isGroup ? "WhatsApp Group" : rawId),
+            avatar: contact.profilePicThumbObj?.eurl || "",
             isGroup,
             groupMembersCount: c.groupMetadata?.participants?.length || 0,
             unreadCount: Number(c.unreadCount || 0),
             lastActiveEpoch: Number(c.t || 0),
             lastMessage: {
-              text: lastBody || (isGroup ? 'Group joined' : 'Chat active'),
-              status: fromMe ? 'sent' : 'delivered',
-              fromMe
-            }
+              text: lastBody || (isGroup ? "Group joined" : "Chat active"),
+              status: fromMe ? "sent" : "delivered",
+              fromMe,
+            },
           };
         });
       });
@@ -233,38 +287,107 @@ export class WhatsAppProvider {
       return Array.isArray(chats) ? chats : [];
     } catch (err) {
       console.warn(`Conversation sync error for ${sessionName}:`, err.message);
-      return [];
+      throw err;
     }
   }
 
   normalizeMessage(raw) {
-    const id = String(raw.id?._serialized || raw.id?.id || raw.id || '');
+    const id = String(raw.id?._serialized || raw.id?.id || raw.id || "");
     const fromMe = Boolean(raw.fromMe);
     const remoteId = fromMe
-      ? String(raw.to || raw.chatId?._serialized || raw.chat?.id?._serialized || '')
-      : String(raw.from || raw.chatId?._serialized || raw.chat?.id?._serialized || '');
-    const text = raw.body || raw.caption || '';
-    const type = raw.type === 'chat' ? 'text' : (raw.type || 'text');
-    const timestampEpoch = raw.t ? Number(raw.t) : Math.floor(Date.now() / 1000);
+      ? String(
+          raw.to || raw.chatId?._serialized || raw.chat?.id?._serialized || "",
+        )
+      : String(
+          raw.from ||
+            raw.chatId?._serialized ||
+            raw.chat?.id?._serialized ||
+            "",
+        );
+    const text = raw.body || raw.caption || "";
+    const type =
+      raw.type === "chat"
+        ? "text"
+        : raw.type === "ptt"
+          ? "audio"
+          : raw.type || "text";
+    const timestampEpoch =
+      Number(raw.timestamp || raw.t) || Math.floor(Date.now() / 1000);
 
     return {
       providerMessageId: id,
       fromMe,
+      ack: Number.isInteger(raw.ack) ? raw.ack : 0,
       remoteId,
-      senderName: raw.sender?.name || raw.notifyName || (fromMe ? 'You' : 'Customer'),
+      senderName:
+        raw.sender?.name || raw.notifyName || (fromMe ? "You" : "Customer"),
       text,
       type,
       timestampEpoch,
-      mediaUrl: raw.mediaUrl || '',
-      fileName: raw.filename || '',
-      fileSize: raw.size ? `${Math.round(raw.size / 1024)} KB` : ''
+      mediaUrl: "", // Never persist expiring provider URLs as durable media.
+      fileName: raw.filename || "",
+      fileSize: raw.size ? `${Math.round(raw.size / 1024)} KB` : "",
     };
   }
 
+  async getContacts(tenantId, sessionName) {
+    const client = this.getSession(tenantId, sessionName)?.client;
+    if (!client) throw new Error("WhatsApp session is offline");
+    return client.getAllContacts();
+  }
+  async sendAttachment(tenantId, sessionName, to, attachmentId, type, caption) {
+    const client = this.getSession(tenantId, sessionName)?.client;
+    if (!client) {
+      const e = new Error("WhatsApp session is offline");
+      e.code = "SESSION_OFFLINE";
+      throw e;
+    }
+    const { query } = await import("../../db/index.js");
+    const { readMedia } = await import("../mediaService.js");
+    const { rows } = await query(
+      "SELECT * FROM attachments WHERE id=$1 AND tenant_id=$2 AND upload_status='ready'",
+      [attachmentId, tenantId],
+    );
+    if (!rows[0]) throw new Error("Attachment is unavailable");
+    const a = rows[0],
+      buffer = await readMedia(a.storage_key);
+    let result;
+    try {
+      result = await client.sendFile(
+        to,
+        `data:${a.mime_type};base64,${buffer.toString("base64")}`,
+        { filename: a.original_name, caption },
+      );
+    } catch {
+      const e = new Error("Attachment delivery is uncertain");
+      e.code = "DELIVERY_UNCERTAIN";
+      throw e;
+    }
+    const id = result?.id?._serialized || result?.id?.id || result?.id;
+    if (!id) {
+      const e = new Error("Attachment delivery is uncertain");
+      e.code = "DELIVERY_UNCERTAIN";
+      throw e;
+    }
+    return { providerMessageId: id, ack: result.ack ?? 0 };
+  }
+  async getHistory(tenantId, sessionName, chatId) {
+    const client = this.getSession(tenantId, sessionName)?.client;
+    if (!client) throw new Error("WhatsApp session is offline");
+    return (await client.getMessages(chatId, { count: 100 })).map((raw) =>
+      this.normalizeMessage(raw),
+    );
+  }
+  async markRead(tenantId, sessionName, chatId) {
+    const client = this.getSession(tenantId, sessionName)?.client;
+    if (!client) throw new Error("WhatsApp session is offline");
+    await client.sendSeen(chatId);
+  }
+
   normalizeAck(raw) {
-    const id = String(raw.id?._serialized || raw.id?.id || raw.id || '');
+    const id = String(raw.id?._serialized || raw.id?.id || raw.id || "");
     const ackNumber = Number(raw.ack || 0);
-    let mappedAck = ACK_STATUS.SERVER;
+    let mappedAck = ackNumber === 0 ? ACK_STATUS.PENDING : ACK_STATUS.SERVER;
 
     if (ackNumber === 2) mappedAck = ACK_STATUS.DELIVERY;
     else if (ackNumber >= 3) mappedAck = ACK_STATUS.READ;
@@ -273,7 +396,7 @@ export class WhatsAppProvider {
     return {
       providerMessageId: id,
       ack: mappedAck,
-      rawAck: ackNumber
+      rawAck: ackNumber,
     };
   }
 }

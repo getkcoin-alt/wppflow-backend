@@ -1,403 +1,415 @@
-import crypto from 'crypto';
-import { query, withTransaction } from '../db/index.js';
-import { ACK_STATUS } from '../config/constants.js';
-import { enqueueOutgoingMessage } from './queue/messageQueue.js';
+import crypto from "node:crypto";
+import { query, withTransaction } from "../db/index.js";
+import { fail, text as validateText } from "../middleware/http.js";
+import { recordWebhook } from "./webhookService.js";
+import {
+  mediaEnabled,
+  mediaTypes,
+  MAX_MEDIA_BYTES,
+  storeIncoming,
+  downloadUrl,
+} from "./mediaService.js";
 
 export function formatMessage(m) {
-  if (!m) return null;
-  return {
-    id: m.id,
-    tenantId: m.tenant_id,
-    conversationId: m.conversation_id,
-    chatId: m.conversation_id, // frontend model compatibility
-    providerMessageId: m.provider_message_id || '',
-    idempotencyKey: m.idempotency_key || '',
-    sender: m.sender,
-    agentName: m.agent_name || '',
-    text: m.text || '',
-    type: m.type || 'text',
-    status: m.status || 'sent',
-    ack: Number(m.ack || 0),
-    mediaUrl: m.media_url || '',
-    fileName: m.file_name || '',
-    fileSize: m.file_size || '',
-    audioDuration: m.audio_duration || '',
-    timestamp: m.timestamp || '',
-    timestampEpoch: Number(m.timestamp_epoch || 0),
-    createdAt: m.created_at,
-    // snake_case mirrors for legacy callers
-    tenant_id: m.tenant_id,
-    conversation_id: m.conversation_id,
-    provider_message_id: m.provider_message_id,
-    idempotency_key: m.idempotency_key,
-    agent_name: m.agent_name,
-    media_url: m.media_url,
-    file_name: m.file_name,
-    file_size: m.file_size,
-    audio_duration: m.audio_duration,
-    timestamp_epoch: Number(m.timestamp_epoch || 0),
-    created_at: m.created_at
-  };
+  return m
+    ? {
+        ...m,
+        tenantId: m.tenant_id,
+        conversationId: m.conversation_id,
+        chatId: m.conversation_id,
+        providerMessageId: m.provider_message_id,
+        idempotencyKey: m.idempotency_key,
+        agentName: m.agent_name,
+        text: m.text || "",
+        mediaUrl: m.media_url,
+        fileName: m.file_name,
+        fileSize: m.file_size,
+        audioDuration: m.audio_duration,
+        timestampEpoch: Number(m.timestamp_epoch),
+        isNote: m.type === "internal_note",
+      }
+    : null;
 }
-
+const emitMessage = (io, tenant, event, message) =>
+  io?.to(`tenant:${tenant}`).emit(event, {
+    conversationId: message.conversation_id,
+    chatId: message.conversation_id,
+    message: formatMessage(message),
+  });
 export async function sendTextMessage({
   tenantId,
   conversationId,
   text,
-  idempotencyKey = null,
-  agentName = 'Agent',
-  io = null
+  idempotencyKey,
+  agentName = "Agent",
+  io = null,
+  type = "text",
+  attachment = null,
+  campaignId = null,
 }) {
-  if (!text || !text.trim()) {
-    throw new Error('Message text is required.');
-  }
-
-  // 1. Pre-check idempotency key if provided
-  if (idempotencyKey) {
-    const { rows: existing } = await query(`
-      SELECT * FROM messages
-      WHERE tenant_id = $1 AND idempotency_key = $2
-      LIMIT 1
-    `, [tenantId, idempotencyKey]);
-
-    if (existing.length > 0) {
-      return { message: formatMessage(existing[0]), duplicate: true };
-    }
-  }
-
-  // 2. Fetch conversation with session info
-  const { rows: convs } = await query(`
-    SELECT id, tenant_id, session_name, provider_chat_id, phone, contact_name
-    FROM conversations
-    WHERE id = $1 AND tenant_id = $2
-    LIMIT 1
-  `, [conversationId, tenantId]);
-
-  if (convs.length === 0) {
-    throw new Error('Conversation not found in current workspace.');
-  }
-  const conv = convs[0];
-
-  // 3. Suppression check
-  const { rows: suppressions } = await query(`
-    SELECT 1 FROM suppressions WHERE tenant_id = $1 AND phone = $2 LIMIT 1
-  `, [tenantId, conv.phone]);
-
-  if (suppressions.length > 0) {
-    throw new Error('Recipient has opted out or is suppressed.');
-  }
-
-  const messageId = `msg_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-  const nowEpoch = Math.floor(Date.now() / 1000);
-  const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-  // 4. Save message and outbox event atomically
-  let message;
-  try {
-    message = await withTransaction(async (client) => {
-      const msgRes = await client.query(`
-        INSERT INTO messages (
-          id, tenant_id, conversation_id, idempotency_key, sender,
-          agent_name, text, type, status, ack, timestamp, timestamp_epoch
-        )
-        VALUES ($1, $2, $3, $4, 'agent', $5, $6, 'text', 'sending', $7, $8, $9)
-        RETURNING *
-      `, [
-        messageId, tenantId, conv.id, idempotencyKey,
-        agentName, text.trim(), ACK_STATUS.PENDING, timeStr, nowEpoch
-      ]);
-
-      const inserted = msgRes.rows[0];
-
-      // Insert transactional outbox event
-      await client.query(`
-        INSERT INTO outbox_events (
-          tenant_id, aggregate_type, aggregate_id, event_type, payload, status
-        )
-        VALUES ($1, 'message', $2, 'message.outgoing', $3, 'pending')
-      `, [
-        tenantId,
-        inserted.id,
-        JSON.stringify({
-          tenantId,
-          sessionName: conv.session_name,
-          conversationId: conv.id,
-          messageId: inserted.id,
-          to: conv.provider_chat_id || conv.phone,
-          text: text.trim()
-        })
-      ]);
-
-      // Update conversation last activity
-      await client.query(`
-        UPDATE conversations
-        SET last_active_epoch = $1,
-            last_message = $2,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = $3 AND tenant_id = $4
-      `, [
-        nowEpoch,
-        JSON.stringify({ text: text.trim(), timestamp: timeStr, status: 'sending', fromMe: true }),
-        conv.id,
-        tenantId
-      ]);
-
-      return inserted;
-    });
-  } catch (err) {
-    // Catch unique constraint violation on idempotency_key (concurrent identical request)
-    if (err.code === '23505' && idempotencyKey) {
-      const { rows: existing } = await query(`
-        SELECT * FROM messages WHERE tenant_id = $1 AND idempotency_key = $2 LIMIT 1
-      `, [tenantId, idempotencyKey]);
-      if (existing.length > 0) {
-        return { message: formatMessage(existing[0]), duplicate: true };
+  text = validateText(text, "Message", 10000);
+  idempotencyKey = validateText(idempotencyKey, "Idempotency key", 128);
+  if (
+    !["text", "internal_note", "image", "video", "audio", "document"].includes(
+      type,
+    )
+  )
+    throw fail(400, "Unsupported message type");
+  const result = await withTransaction(async (c) => {
+    await c.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+      `${tenantId}:${idempotencyKey}`,
+    ]);
+    const existing = await c.query(
+      "SELECT * FROM messages WHERE tenant_id=$1 AND idempotency_key=$2",
+      [tenantId, idempotencyKey],
+    );
+    if (existing.rows[0]) {
+      const m = existing.rows[0];
+      if (
+        m.conversation_id !== conversationId ||
+        m.text !== text ||
+        m.type !== type
+      )
+        throw fail(
+          409,
+          "Idempotency key was already used for another operation",
+        );
+      if (attachment) {
+        const linked = await c.query(
+          "SELECT 1 FROM attachments WHERE id=$1 AND tenant_id=$2 AND message_id=$3",
+          [attachment.id, tenantId, m.id],
+        );
+        if (!linked.rowCount)
+          throw fail(409, "Idempotency key belongs to a different attachment");
       }
+      return { message: m, duplicate: true };
     }
-    throw err;
-  }
-
-  const formattedMsg = formatMessage(message);
-
-  // 5. Real-time broadcast to tenant room
-  if (io) {
-    io.to(`tenant:${tenantId}`).emit('message:created', {
-      conversationId: conv.id,
-      chatId: conv.id,
-      message: formattedMsg
-    });
-    io.to(`tenant:${tenantId}`).emit('conversation:updated', {
-      conversationId: conv.id,
-      chatId: conv.id,
-      lastMessage: { text: text.trim(), timestamp: timeStr, status: 'sending', fromMe: true },
-      lastActiveEpoch: nowEpoch
-    });
-  }
-
-  // 6. Enqueue outgoing message with stable BullMQ jobId
-  enqueueOutgoingMessage({
-    tenantId,
-    sessionName: conv.session_name,
-    conversationId: conv.id,
-    messageId: message.id,
-    to: conv.provider_chat_id || conv.phone,
-    text: text.trim(),
-    io
-  }).catch(err => {
-    console.error(`Failed to dispatch message ${messageId}:`, err.message);
+    const { rows } = await c.query(
+      "SELECT * FROM conversations WHERE id=$1 AND tenant_id=$2",
+      [conversationId, tenantId],
+    );
+    const conv = rows[0];
+    if (!conv) throw fail(404, "Conversation not found");
+    if (type !== "internal_note") {
+      const suppressed = await c.query(
+        "SELECT 1 FROM suppressions WHERE tenant_id=$1 AND phone=$2",
+        [tenantId, conv.phone],
+      );
+      if (suppressed.rowCount) throw fail(403, "Recipient is suppressed");
+    }
+    if (attachment) {
+      const a = await c.query(
+        "SELECT id FROM attachments WHERE id=$1 AND tenant_id=$2 AND conversation_id=$3 AND upload_status='ready' AND message_id IS NULL FOR UPDATE",
+        [attachment.id, tenantId, conversationId],
+      );
+      if (!a.rowCount) throw fail(400, "Attachment is not ready");
+    }
+    const id = crypto.randomUUID(),
+      epoch = Math.floor(Date.now() / 1000),
+      stamp = new Date().toISOString(),
+      note = type === "internal_note";
+    const saved = await c.query(
+      `INSERT INTO messages(id,tenant_id,conversation_id,idempotency_key,sender,agent_name,text,type,status,ack,timestamp,timestamp_epoch)
+      VALUES($1,$2,$3,$4,'agent',$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      [
+        id,
+        tenantId,
+        conversationId,
+        idempotencyKey,
+        agentName,
+        text,
+        type,
+        note ? "sent" : "sending",
+        note ? 1 : 0,
+        stamp,
+        epoch,
+      ],
+    );
+    if (!note) {
+      await c.query(
+        `INSERT INTO outbox_events(tenant_id,aggregate_type,aggregate_id,event_type,payload) VALUES($1,'message',$2,'message.outgoing',$3)`,
+        [
+          tenantId,
+          id,
+          JSON.stringify({
+            tenantId,
+            sessionName: conv.session_name,
+            conversationId,
+            messageId: id,
+            to: conv.provider_chat_id,
+            text,
+            type,
+            attachmentId: attachment?.id,
+            campaignId,
+          }),
+        ],
+      );
+      await c.query(
+        "UPDATE conversations SET last_active_epoch=$1,last_message=$2,updated_at=now() WHERE id=$3 AND tenant_id=$4",
+        [
+          epoch,
+          JSON.stringify({
+            text,
+            timestamp: stamp,
+            status: "sending",
+            fromMe: true,
+          }),
+          conversationId,
+          tenantId,
+        ],
+      );
+    }
+    if (attachment)
+      await c.query(
+        "UPDATE attachments SET message_id=$1 WHERE id=$2 AND tenant_id=$3",
+        [id, attachment.id, tenantId],
+      );
+    return { message: saved.rows[0], duplicate: false };
   });
-
-  return { message: formattedMsg, duplicate: false };
+  if (!result.duplicate)
+    emitMessage(io, tenantId, "message:created", result.message);
+  return { ...result, message: formatMessage(result.message) };
 }
-
 export async function handleIncomingMessage({
   tenantId,
   sessionName,
   msg,
-  io = null
+  io = null,
+  history = false,
 }) {
-  const { providerMessageId, fromMe, remoteId, text, senderName, timestampEpoch, mediaUrl, fileName, fileSize } = msg;
-
-  // 1. Idempotency Check for provider message ID
-  if (providerMessageId) {
-    const { rows: existing } = await query(`
-      SELECT * FROM messages WHERE tenant_id = $1 AND provider_message_id = $2 LIMIT 1
-    `, [tenantId, providerMessageId]);
-
-    if (existing.length > 0) {
-      // Message already exists; deduplicate repeat provider events
-      return null;
+  if (!msg.providerMessageId || !msg.remoteId) return null;
+  const inserted = await withTransaction(async (c) => {
+    const old = await c.query(
+      "SELECT id FROM messages WHERE tenant_id=$1 AND provider_message_id=$2",
+      [tenantId, msg.providerMessageId],
+    );
+    if (old.rowCount) return null;
+    const phone = msg.remoteId.replace(/@c\.us$/, ""),
+      epoch = Number(msg.timestampEpoch) || Math.floor(Date.now() / 1000),
+      stamp = new Date(epoch * 1000).toISOString();
+    const contact = await c.query(
+      `INSERT INTO contacts(id,tenant_id,name,phone) VALUES($1,$2,$3,$4) ON CONFLICT(tenant_id,phone) DO UPDATE SET updated_at=contacts.updated_at RETURNING id`,
+      [crypto.randomUUID(), tenantId, msg.senderName || phone, phone],
+    );
+    const conv = await c.query(
+      `INSERT INTO conversations(id,tenant_id,session_name,provider_chat_id,contact_id,phone,contact_name,is_group)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(tenant_id,session_name,provider_chat_id) DO UPDATE SET contact_id=COALESCE(conversations.contact_id,EXCLUDED.contact_id) RETURNING id`,
+      [
+        crypto.randomUUID(),
+        tenantId,
+        sessionName,
+        msg.remoteId,
+        contact.rows[0].id,
+        phone,
+        msg.senderName || phone,
+        msg.remoteId.endsWith("@g.us"),
+      ],
+    );
+    const id = conv.rows[0].id;
+    const saved = await c.query(
+      `INSERT INTO messages(id,tenant_id,conversation_id,provider_message_id,sender,agent_name,text,type,status,ack,media_url,file_name,file_size,timestamp,timestamp_epoch)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT(tenant_id,provider_message_id) DO NOTHING RETURNING *`,
+      [
+        crypto.randomUUID(),
+        tenantId,
+        id,
+        msg.providerMessageId,
+        msg.fromMe ? "agent" : "customer",
+        msg.senderName || "",
+        msg.text || "",
+        msg.type || "text",
+        msg.fromMe
+          ? msg.ack >= 3
+            ? "read"
+            : msg.ack === 2
+              ? "delivered"
+              : msg.ack === 1
+                ? "sent"
+                : "sending"
+          : "delivered",
+        msg.fromMe ? Math.max(0, msg.ack || 0) : 2,
+        msg.mediaUrl || "",
+        msg.fileName || "",
+        msg.fileSize || "",
+        stamp,
+        epoch,
+      ],
+    );
+    if (!saved.rowCount) return null;
+    if (!history && !msg.fromMe) {
+      await c.query(
+        "INSERT INTO outbox_events(tenant_id,aggregate_type,aggregate_id,event_type,payload) VALUES($1,'message',$2,'automation.incoming',$3) ON CONFLICT DO NOTHING",
+        [
+          tenantId,
+          saved.rows[0].id,
+          JSON.stringify({ messageId: saved.rows[0].id }),
+        ],
+      );
+      await recordWebhook(
+        tenantId,
+        "message.received",
+        {
+          messageId: saved.rows[0].id,
+          conversationId: id,
+          text: msg.text || "",
+        },
+        c,
+      );
     }
-  }
-
-  const cleanPhone = String(remoteId || '').replace(/@c\.us$/, '');
-  const nowEpoch = timestampEpoch || Math.floor(Date.now() / 1000);
-  const timeStr = new Date(nowEpoch * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  const isOutgoingEcho = Boolean(fromMe);
-
-  // 2. Resolve or create conversation
-  let convId = null;
-  const { rows: existingConv } = await query(`
-    SELECT id, unread_count FROM conversations
-    WHERE tenant_id = $1 AND session_name = $2 AND (provider_chat_id = $3 OR phone = $4)
-    LIMIT 1
-  `, [tenantId, sessionName, remoteId, cleanPhone]);
-
-  if (existingConv.length > 0) {
-    convId = existingConv[0].id;
-    // Only increment unread count if message is from the customer (not outgoing echo)
-    const unreadIncrement = isOutgoingEcho ? 0 : 1;
-    await query(`
-      UPDATE conversations
-      SET unread_count = unread_count + $1,
-          last_active_epoch = $2,
-          last_message = $3,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = $4 AND tenant_id = $5
-    `, [
-      unreadIncrement,
-      nowEpoch,
-      JSON.stringify({ text, timestamp: timeStr, status: isOutgoingEcho ? 'sent' : 'delivered', fromMe: isOutgoingEcho }),
-      convId,
-      tenantId
-    ]);
-  } else {
-    convId = `conv_${tenantId}_${sessionName}_${String(remoteId || cleanPhone).replace(/[^a-zA-Z0-9]/g, '_')}`;
-    const isGroup = remoteId.includes('@g.us');
-    await query(`
-      INSERT INTO conversations (
-        id, tenant_id, session_name, provider_chat_id, phone, contact_name,
-        unread_count, is_group, last_active_epoch, last_message
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-      ON CONFLICT (tenant_id, session_name, provider_chat_id) DO UPDATE SET
-        unread_count = conversations.unread_count + EXCLUDED.unread_count,
-        last_active_epoch = EXCLUDED.last_active_epoch,
-        last_message = EXCLUDED.last_message,
-        updated_at = CURRENT_TIMESTAMP
-    `, [
-      convId, tenantId, sessionName, remoteId, cleanPhone, senderName || cleanPhone,
-      isOutgoingEcho ? 0 : 1, isGroup, nowEpoch,
-      JSON.stringify({ text, timestamp: timeStr, status: isOutgoingEcho ? 'sent' : 'delivered', fromMe: isOutgoingEcho })
-    ]);
-  }
-
-  // 3. Insert incoming / echoed message
-  const messageId = `msg_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-  const senderRole = isOutgoingEcho ? 'agent' : 'customer';
-  const initialStatus = isOutgoingEcho ? 'sent' : 'delivered';
-  const initialAck = isOutgoingEcho ? ACK_STATUS.SERVER : ACK_STATUS.DELIVERY;
-
-  const { rows: savedMsg } = await query(`
-    INSERT INTO messages (
-      id, tenant_id, conversation_id, provider_message_id, sender,
-      agent_name, text, type, status, ack, media_url, file_name, file_size,
-      timestamp, timestamp_epoch
-    )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-    ON CONFLICT (tenant_id, provider_message_id) DO UPDATE SET
-      ack = GREATEST(messages.ack, EXCLUDED.ack),
-      status = EXCLUDED.status
-    RETURNING *
-  `, [
-    messageId, tenantId, convId, providerMessageId,
-    senderRole, senderName || '', text, msg.type || 'text',
-    initialStatus, initialAck, mediaUrl, fileName, fileSize, timeStr, nowEpoch
-  ]);
-
-  const inserted = formatMessage(savedMsg[0]);
-
-  // 4. Emit to tenant room
-  if (io) {
-    io.to(`tenant:${tenantId}`).emit('message:received', {
-      conversationId: convId,
-      chatId: convId,
-      message: inserted
-    });
-    io.to(`tenant:${tenantId}`).emit('conversation:updated', {
-      conversationId: convId,
-      chatId: convId,
-      lastMessage: { text, timestamp: timeStr, status: initialStatus, fromMe: isOutgoingEcho },
-      lastActiveEpoch: nowEpoch,
-      unreadCountIncrement: isOutgoingEcho ? 0 : 1
+    await c.query(
+      `UPDATE conversations SET unread_count=unread_count+$1,last_message=CASE WHEN last_active_epoch<=$2 THEN $3 ELSE last_message END,last_active_epoch=GREATEST(last_active_epoch,$2),updated_at=now() WHERE id=$4 AND tenant_id=$5`,
+      [
+        !history && !msg.fromMe ? 1 : 0,
+        epoch,
+        JSON.stringify({
+          text: msg.text || "",
+          timestamp: stamp,
+          status: msg.fromMe ? "sent" : "delivered",
+          fromMe: Boolean(msg.fromMe),
+        }),
+        id,
+        tenantId,
+      ],
+    );
+    return saved.rows[0];
+  });
+  if (inserted) {
+    if (
+      msg.downloadMedia &&
+      mediaEnabled() &&
+      mediaTypes[msg.mimeType] &&
+      Number(msg.byteSize) > 0 &&
+      Number(msg.byteSize) <= MAX_MEDIA_BYTES
+    ) {
+      try {
+        const attachment = await storeIncoming(
+          tenantId,
+          await msg.downloadMedia(),
+          msg.mimeType,
+        );
+        await query(
+          `INSERT INTO attachments(id,tenant_id,conversation_id,message_id,storage_key,original_name,mime_type,byte_size,upload_status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'ready')`,
+          [
+            attachment.id,
+            tenantId,
+            inserted.conversation_id,
+            inserted.id,
+            attachment.key,
+            msg.fileName || "WhatsApp media",
+            attachment.mime,
+            attachment.bytes,
+          ],
+        );
+      } catch (error) {
+        console.error("Incoming media unavailable:", error.message);
+      }
+    }
+    emitMessage(io, tenantId, "message:received", inserted);
+    io?.to(`tenant:${tenantId}`).emit("conversation:updated", {
+      conversationId: inserted.conversation_id,
+      chatId: inserted.conversation_id,
     });
   }
-
-  return inserted;
+  if (msg.fromMe && Number.isInteger(msg.ack) && msg.ack !== 0)
+    await handleAckEvent({
+      tenantId,
+      ackData: { providerMessageId: msg.providerMessageId, ack: msg.ack },
+      io,
+    });
+  return formatMessage(inserted);
 }
-
 export async function handleAckEvent({ tenantId, ackData, io = null }) {
   const { providerMessageId, ack } = ackData;
-  if (!providerMessageId) return null;
-
-  const { rows: msgRows } = await query(`
-    SELECT id, conversation_id, ack, status
-    FROM messages
-    WHERE tenant_id = $1 AND provider_message_id = $2
-    LIMIT 1
-  `, [tenantId, providerMessageId]);
-
-  if (msgRows.length === 0) return null;
-  const msg = msgRows[0];
-
-  // Disallow backwards ACK transitions
-  if (msg.ack >= ack) return null;
-
-  const status = ack >= ACK_STATUS.READ ? 'read' : (ack >= ACK_STATUS.DELIVERY ? 'delivered' : 'sent');
-
-  await withTransaction(async (client) => {
-    await client.query(`
-      UPDATE messages
-      SET ack = GREATEST(ack, $1), status = $2
-      WHERE id = $3 AND tenant_id = $4
-    `, [ack, status, msg.id, tenantId]);
-
-    await client.query(`
-      INSERT INTO message_receipts (tenant_id, message_id, provider_message_id, ack)
-      VALUES ($1, $2, $3, $4)
-    `, [tenantId, msg.id, providerMessageId, ack]);
+  if (!providerMessageId || !Number.isInteger(ack)) return null;
+  const m = await withTransaction(async (c) => {
+    const result = await c.query(
+      `UPDATE messages SET ack=GREATEST(ack,$1),status=CASE WHEN $1<0 THEN 'failed' WHEN $1>=3 THEN 'read' WHEN $1=2 THEN 'delivered' WHEN $1=1 THEN 'sent' ELSE 'sending' END,updated_at=now()
+      WHERE tenant_id=$2 AND provider_message_id=$3 AND (ack<$1 OR ($1<0 AND ack=0 AND status<>'failed')) RETURNING *`,
+      [ack, tenantId, providerMessageId],
+    );
+    if (!result.rows[0]) {
+      const exists = await c.query(
+        "SELECT 1 FROM messages WHERE tenant_id=$1 AND provider_message_id=$2",
+        [tenantId, providerMessageId],
+      );
+      if (!exists.rowCount)
+        await c.query(
+          `INSERT INTO early_receipts(tenant_id,provider_message_id,ack) VALUES($1,$2,$3) ON CONFLICT(tenant_id,provider_message_id) DO UPDATE SET ack=CASE WHEN EXCLUDED.ack>0 THEN GREATEST(early_receipts.ack,EXCLUDED.ack) ELSE LEAST(early_receipts.ack,EXCLUDED.ack) END`,
+          [tenantId, providerMessageId, ack],
+        );
+      return null;
+    }
+    const row = result.rows[0];
+    await c.query(
+      "INSERT INTO message_receipts(tenant_id,message_id,provider_message_id,ack) VALUES($1,$2,$3,$4)",
+      [tenantId, row.id, providerMessageId, ack],
+    );
+    await recordWebhook(
+      tenantId,
+      "message.status",
+      {
+        messageId: row.id,
+        conversationId: row.conversation_id,
+        ack: row.ack,
+        status: row.status,
+      },
+      c,
+    );
+    return row;
   });
-
-  if (io) {
-    io.to(`tenant:${tenantId}`).emit('message:ack', {
-      conversationId: msg.conversation_id,
-      chatId: msg.conversation_id,
-      messageId: msg.id,
+  if (m)
+    io?.to(`tenant:${tenantId}`).emit("message:ack", {
+      conversationId: m.conversation_id,
+      messageId: m.id,
       providerMessageId,
-      ack,
-      status
+      ack: m.ack,
+      status: m.status,
     });
-  }
-
-  return { messageId: msg.id, ack, status };
+  return m ? { messageId: m.id, ack: m.ack, status: m.status } : null;
 }
-
 export async function getConversationMessages({
   tenantId,
   conversationId,
   limit = 50,
-  cursor = null
+  cursor = null,
 }) {
-  const parsedLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
-  let sql = `
-    SELECT id, tenant_id, conversation_id, provider_message_id, idempotency_key,
-           sender, agent_name, text, type, status, ack, media_url, file_name,
-           file_size, audio_duration, timestamp, timestamp_epoch, created_at
-    FROM messages
-    WHERE tenant_id = $1 AND conversation_id = $2
-  `;
-  const params = [tenantId, conversationId];
-
-  // Compound cursor for messages: (timestamp_epoch, id)
+  const count = Math.min(Math.max(Number(limit) || 50, 1), 100),
+    params = [tenantId, conversationId];
+  let filter = "";
   if (cursor) {
-    const parts = String(cursor).split(':');
-    const cursorEpoch = Number(parts[0]);
-    const cursorId = parts[1];
-    if (cursorId) {
-      params.push(cursorEpoch, cursorId);
-      sql += ` AND (timestamp_epoch < $${params.length - 1} OR (timestamp_epoch = $${params.length - 1} AND id < $${params.length}))`;
-    } else {
-      params.push(cursorEpoch);
-      sql += ` AND timestamp_epoch < $${params.length}`;
-    }
+    const [epoch, id] = String(cursor).split(":");
+    if (!id || !Number.isFinite(Number(epoch)))
+      throw fail(400, "Invalid cursor");
+    params.push(Number(epoch), id);
+    filter = " AND (timestamp_epoch,id)<($3,$4)";
   }
-
-  sql += ` ORDER BY timestamp_epoch DESC, id DESC LIMIT $${params.length + 1}`;
-  params.push(parsedLimit + 1);
-
-  const { rows } = await query(sql, params);
-  const hasMore = rows.length > parsedLimit;
-  const items = hasMore ? rows.slice(0, parsedLimit) : rows;
-
-  const nextCursor = items.length > 0
-    ? `${items[items.length - 1].timestamp_epoch}:${items[items.length - 1].id}`
-    : null;
-
-  const formatted = items.map(formatMessage).reverse();
-
+  const { rows } = await query(
+    `SELECT * FROM messages WHERE tenant_id=$1 AND conversation_id=$2${filter} ORDER BY timestamp_epoch DESC,id DESC LIMIT $${params.length + 1}`,
+    [...params, count + 1],
+  );
+  const hasMore = rows.length > count,
+    items = rows.slice(0, count),
+    last = items.at(-1),
+    messages = items.map(formatMessage).reverse();
+  if (mediaEnabled() && items.length) {
+    const attachments = await query(
+      "SELECT message_id,storage_key,original_name,byte_size FROM attachments WHERE tenant_id=$1 AND message_id=ANY($2) AND upload_status='ready'",
+      [tenantId, items.map((m) => m.id)],
+    );
+    await Promise.all(
+      attachments.rows.map(async (a) => {
+        const message = messages.find((m) => m.id === a.message_id);
+        if (message) {
+          message.mediaUrl = await downloadUrl(a.storage_key);
+          message.fileName = a.original_name;
+          message.fileSize = `${Math.ceil(Number(a.byte_size) / 1024)} KB`;
+        }
+      }),
+    );
+  }
   return {
-    messages: formatted,
-    nextCursor: hasMore ? nextCursor : null,
-    hasMore
+    messages,
+    hasMore,
+    nextCursor: hasMore ? `${last.timestamp_epoch}:${last.id}` : null,
   };
 }

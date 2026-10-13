@@ -1,17 +1,19 @@
 {
   "name": "wppflow-backend",
-  "version": "2.4.0",
+  "version": "3.0.0",
   "description": "High-performance multi-session WhatsApp automation backend engine for WppFlow",
   "main": "src/server.js",
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node --test 'tests/**/*.test.js'",
-    "seed:demo": "node src/db/seed.js"
+    "test": "node scripts/test.mjs",
+    "db:migrate": "node src/db/migrate.js"
   },
   "dependencies": {
-    "@wppconnect-team/wppconnect": "1.41.3",
+    "@aws-sdk/client-s3": "^3.1150.0",
+    "@aws-sdk/s3-request-presigner": "^3.1150.0",
+    "@wppconnect-team/wppconnect": "2.3.4",
     "bcryptjs": "^3.0.3",
     "bullmq": "^6.3.12",
     "cookie-parser": "^1.4.7",
@@ -26,10 +28,12 @@
     "socket.io": "^4.7.5"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "overrides": {
-    "@wppconnect/wa-js": "4.6.1"
+    "@wppconnect/wa-js": "4.6.1",
+    "sharp": "0.35.5",
+    "basic-ftp": "6.2.3"
   },
   "devDependencies": {
     "supertest": "^7.3.1"

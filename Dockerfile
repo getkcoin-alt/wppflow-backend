@@ -2,7 +2,7 @@
 # Alpine Linux + Chromium from apk — no Xvfb, no display server needed.
 # See: https://github.com/wppconnect-team/wppconnect-server/blob/main/Dockerfile
 
-FROM node:20-alpine
+FROM node:22-alpine
 
 WORKDIR /app
 
@@ -19,6 +19,7 @@ RUN apk update && apk add --no-cache \
     && rm -rf /var/cache/apk/*
 
 # Tell Puppeteer to use the system Chromium, skip its own download
+ENV PUPPETEER_SKIP_DOWNLOAD=true
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
     PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser \
     PORT=8080 \
@@ -27,7 +28,7 @@ ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
 
 # Copy package files and install production dependencies
 COPY package*.json ./
-RUN npm install --omit=dev
+RUN npm ci --omit=dev
 
 # Copy application source
 COPY . .
