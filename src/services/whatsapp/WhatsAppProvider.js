@@ -127,18 +127,39 @@ export class WhatsAppProvider {
       throw new Error(`WhatsApp session '${sessionName}' not connected for this workspace.`);
     }
 
-    const cleanTarget = String(to).includes('@') ? to : `${String(to).replace(/\D/g, '')}@c.us`;
+    const rawStr = String(to).trim();
+    const digits = rawStr.replace(/\D/g, '');
+    const cleanTarget = rawStr.includes('@')
+      ? rawStr
+      : digits.length >= 13
+        ? `${digits}@lid`
+        : `${digits}@c.us`;
 
-    // Send through WPPConnect
+    // Send through WPPConnect / WA-JS 4.6.1+ (which uses getMyUserLid() for @lid chats)
     let result = null;
     try {
-      result = await session.client.sendText(cleanTarget, text);
+      if (session.client.page?.evaluate) {
+        result = await session.client.page.evaluate(async (target, msg) => {
+          if (!window.WPP?.chat?.sendTextMessage) throw new Error('WA-JS chat engine not ready');
+          let resolvedTarget = target;
+          try {
+            const list = window.WPP.chat.list?.() || [];
+            const bare = target.replace(/@.*$/, '');
+            const found = list.find(c => {
+              const sid = String(c.id?._serialized || c.id || '');
+              return sid === target || sid === `${bare}@lid` || sid === `${bare}@c.us` || sid === `${bare}@g.us`;
+            });
+            if (found) resolvedTarget = String(found.id?._serialized || found.id);
+          } catch {}
+          const sendPromise = window.WPP.chat.sendTextMessage(resolvedTarget, msg, { createChat: true, waitForAck: true });
+          const timeoutPromise = new Promise(resolve => setTimeout(() => resolve({ timedOut: true }), 15000));
+          return await Promise.race([sendPromise, timeoutPromise]);
+        }, cleanTarget, text);
+      } else {
+        result = await session.client.sendText(cleanTarget, text);
+      }
     } catch (err) {
-      // Fallback via page evaluate if sendText fails on specific LID/Wid variations
-      result = await session.client.page.evaluate(async (target, msg) => {
-        if (!window.WPP?.chat?.sendTextMessage) throw new Error('WA-JS chat engine not ready');
-        return await window.WPP.chat.sendTextMessage(target, msg, { createChat: true });
-      }, cleanTarget, text);
+      result = await session.client.sendText(cleanTarget, text);
     }
 
     const providerMessageId = result?.id?._serialized || result?.id?.id || result?.id || null;
@@ -146,7 +167,7 @@ export class WhatsAppProvider {
       providerMessageId,
       to: cleanTarget,
       text,
-      ack: ACK_STATUS.SERVER,
+      ack: result?.ack ?? ACK_STATUS.SERVER,
       raw: result
     };
   }

@@ -28,6 +28,9 @@
   "engines": {
     "node": ">=20.0.0"
   },
+  "overrides": {
+    "@wppconnect/wa-js": "4.6.1"
+  },
   "devDependencies": {
     "supertest": "^7.3.1"
   }
