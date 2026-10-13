@@ -595,6 +595,34 @@ export async function createCampaign(userId, data) {
   return normalizeCampaign(camp);
 }
 
+export async function updateCampaign(userId, campaignId, updates) {
+  if (isPgConnected && pool) {
+    try {
+      const sets = [];
+      const vals = [];
+      let idx = 1;
+      if (updates.status !== undefined) { sets.push(`status = $${idx++}`); vals.push(updates.status); }
+      if (updates.sentCount !== undefined) { sets.push(`sent_count = $${idx++}`); vals.push(updates.sentCount); }
+      if (updates.deliveredCount !== undefined) { sets.push(`delivered_count = $${idx++}`); vals.push(updates.deliveredCount); }
+      if (updates.readCount !== undefined) { sets.push(`read_count = $${idx++}`); vals.push(updates.readCount); }
+      if (updates.repliedCount !== undefined) { sets.push(`replied_count = $${idx++}`); vals.push(updates.repliedCount); }
+      if (updates.failedCount !== undefined) { sets.push(`failed_count = $${idx++}`); vals.push(updates.failedCount); }
+      if (sets.length > 0) {
+        vals.push(campaignId, userId);
+        const q = `UPDATE campaigns SET ${sets.join(', ')} WHERE id = $${idx++} AND user_id = $${idx} RETURNING *`;
+        const res = await pool.query(q, vals);
+        if (res.rows.length > 0) return normalizeCampaign(res.rows[0]);
+      }
+    } catch (err) { console.warn('PG campaign update error:', err.message); }
+  }
+  const existing = memoryCampaigns.get(campaignId);
+  if (existing && existing.user_id === userId) {
+    Object.assign(existing, updates);
+    return normalizeCampaign(existing);
+  }
+  return null;
+}
+
 function normalizeCampaign(row) {
   return {
     id: row.id, name: row.name, targetSegment: row.target_segment,

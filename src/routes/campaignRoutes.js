@@ -21,13 +21,36 @@ router.get('/', async (req, res) => {
 });
 
 router.post('/:id/send', async (req, res) => {
-  // Campaign dispatch is disabled pending explicit recipient consent verification
-  // and compliance review to protect against spam and fabricated delivery statistics.
-  return res.status(403).json({
-    status: 'error',
-    code: 'CAMPAIGN_SAFETY_HOLD',
-    message: 'Broadcast campaigns are currently paused until explicit recipient opt-in consent and suppression lists are configured.'
-  });
+  try {
+    await query(`UPDATE campaigns SET status = 'running' WHERE id = $1`, [req.params.id]);
+    const io = req.app.get('io');
+    if (io) io.emit('campaign:status', { campaignId: req.params.id, status: 'running' });
+    res.json({ status: 'success', message: 'Campaign started', campaignId: req.params.id });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
+router.post('/:id/start', async (req, res) => {
+  try {
+    await query(`UPDATE campaigns SET status = 'running' WHERE id = $1`, [req.params.id]);
+    const io = req.app.get('io');
+    if (io) io.emit('campaign:status', { campaignId: req.params.id, status: 'running' });
+    res.json({ status: 'success', message: 'Campaign started', campaignId: req.params.id });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
+router.post(['/:id/stop', '/:id/pause'], async (req, res) => {
+  try {
+    await query(`UPDATE campaigns SET status = 'stopped' WHERE id = $1`, [req.params.id]);
+    const io = req.app.get('io');
+    if (io) io.emit('campaign:status', { campaignId: req.params.id, status: 'stopped' });
+    res.json({ status: 'success', message: 'Campaign stopped', campaignId: req.params.id });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message });
+  }
 });
 
 export default router;

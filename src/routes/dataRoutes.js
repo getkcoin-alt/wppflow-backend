@@ -4,7 +4,7 @@ import {
   getContacts, createContact, deleteContact,
   getChats, createChat, updateChat,
   getMessages, createMessage,
-  getCampaigns, createCampaign,
+  getCampaigns, createCampaign, updateCampaign,
   getAutomations, createAutomation, toggleAutomation, deleteAutomation
 } from '../db.js';
 
@@ -101,8 +101,41 @@ router.get('/campaigns', authenticateToken, async (req, res) => {
 
 router.post('/campaigns', authenticateToken, async (req, res) => {
   try {
-    const campaign = await createCampaign(req.user.id, req.body);
+    const campaign = await createCampaign(req.user.id, {
+      ...req.body,
+      status: req.body?.status || 'draft'
+    });
     res.status(201).json({ status: 'success', campaign });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
+router.post(['/campaigns/:id/stop', '/campaigns/:id/pause'], authenticateToken, async (req, res) => {
+  try {
+    const campaignId = req.params.id;
+    const campaign = await updateCampaign(req.user.id, campaignId, { status: 'stopped' });
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`workspace:${req.user.id}`).emit('campaign:status', { campaignId, status: 'stopped' });
+      io.emit('campaign:status', { campaignId, status: 'stopped' });
+    }
+    res.json({ status: 'success', message: 'Campaign stopped', campaign });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
+router.post(['/campaigns/:id/start', '/campaigns/:id/resume'], authenticateToken, async (req, res) => {
+  try {
+    const campaignId = req.params.id;
+    const campaign = await updateCampaign(req.user.id, campaignId, { status: 'running' });
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`workspace:${req.user.id}`).emit('campaign:status', { campaignId, status: 'running' });
+      io.emit('campaign:status', { campaignId, status: 'running' });
+    }
+    res.json({ status: 'success', message: 'Campaign started', campaign });
   } catch (err) {
     res.status(500).json({ status: 'error', message: err.message });
   }
