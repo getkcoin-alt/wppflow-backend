@@ -151,5 +151,16 @@ test('Database Migrations Suite', async (t) => {
     // Verify message migrated
     const { rows: msgs } = await query('SELECT * FROM messages WHERE tenant_id = $1', [sharedTenantId]);
     assert.ok(msgs.some(m => m.id === 'msg_legacy_1'), 'Message should be backfilled');
+
+    // Verify Welcome Greeting automations are disabled by default
+    const { rows: welcomeRules } = await query(`
+      SELECT * FROM automations 
+      WHERE id LIKE 'auto_welcome%' 
+         OR name = 'Welcome Greeting' 
+         OR action_summary LIKE '%Thank you for messaging us%'
+    `);
+    for (const rule of welcomeRules) {
+      assert.strictEqual(rule.is_enabled, false, 'Welcome greeting auto-reply must be disabled');
+    }
   });
 });

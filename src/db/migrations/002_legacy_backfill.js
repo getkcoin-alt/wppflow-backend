@@ -314,19 +314,31 @@ export async function up(client) {
       const tenantId = userToTenant.get(auto.user_id);
       if (!tenantId) continue;
 
+      const isWelcome = auto.id?.startsWith('auto_welcome') || auto.name === 'Welcome Greeting' || String(auto.action_summary || '').includes('Thank you for messaging us');
+      const isEnabled = isWelcome ? false : (auto.is_enabled ?? true);
+
       await client.query(`
         INSERT INTO automations (
           id, tenant_id, name, trigger_type, trigger_condition, action_type,
           action_summary, is_enabled, executions_count, created_at
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-        ON CONFLICT (id) DO NOTHING
+        ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled
       `, [
         auto.id, tenantId, auto.name, auto.trigger_type || 'keyword', auto.trigger_condition || '',
-        auto.action_type || 'reply_text', auto.action_summary || '', auto.is_enabled ?? true,
+        auto.action_type || 'reply_text', auto.action_summary || '', isEnabled,
         auto.executions_count || 0, auto.created_at
       ]);
     }
+
+    // Ensure any previously backfilled or seeded auto_welcome records are explicitly disabled
+    await client.query(`
+      UPDATE automations
+      SET is_enabled = false
+      WHERE id LIKE 'auto_welcome%'
+         OR name = 'Welcome Greeting'
+         OR action_summary LIKE '%Thank you for messaging us%'
+    `);
   }
 
   // 7. Explicit session ownership mapping

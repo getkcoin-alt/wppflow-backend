@@ -180,8 +180,8 @@ async function seedDefaultUsers() {
           INSERT INTO automations (id, user_id, name, trigger_type, trigger_condition, action_type, action_summary, is_enabled, executions_count)
           VALUES
             ('auto_welcome', 1, 'Welcome Greeting', 'contains', 'hi', 'reply_text', 'Hello! 👋 Thank you for messaging us. How can we help you today?', false, 0),
-            ('auto_pricing', 1, 'Pricing & Catalog', 'contains', 'price', 'reply_text', 'Our full catalog & pricing are available on our website! Reply 1 for Sales, 2 for Support.', true, 0),
-            ('auto_support', 1, 'Support Assistant', 'contains', 'help', 'reply_text', 'A support specialist has been alerted and will join this chat momentarily.', true, 0)
+            ('auto_pricing', 1, 'Pricing & Catalog', 'contains', 'price', 'reply_text', 'Our full catalog & pricing are available on our website! Reply 1 for Sales, 2 for Support.', false, 0),
+            ('auto_support', 1, 'Support Assistant', 'contains', 'help', 'reply_text', 'A support specialist has been alerted and will join this chat momentarily.', false, 0)
         `);
         console.log('🌱 Seeded default chatbot automations into PostgreSQL');
       }
@@ -195,8 +195,8 @@ async function seedDefaultUsers() {
 
   if (memoryAutomations.size === 0) {
     memoryAutomations.set('auto_welcome', { id: 'auto_welcome', user_id: 1, name: 'Welcome Greeting', trigger_type: 'contains', trigger_condition: 'hi', action_type: 'reply_text', action_summary: 'Hello! 👋 Thank you for messaging us. How can we help you today?', is_enabled: false, executions_count: 0, created_at: new Date().toISOString() });
-    memoryAutomations.set('auto_pricing', { id: 'auto_pricing', user_id: 1, name: 'Pricing & Catalog', trigger_type: 'contains', trigger_condition: 'price', action_type: 'reply_text', action_summary: 'Our full catalog & pricing are available on our website! Reply 1 for Sales, 2 for Support.', is_enabled: true, executions_count: 0, created_at: new Date().toISOString() });
-    memoryAutomations.set('auto_support', { id: 'auto_support', user_id: 1, name: 'Support Assistant', trigger_type: 'contains', trigger_condition: 'help', action_type: 'reply_text', action_summary: 'A support specialist has been alerted and will join this chat momentarily.', is_enabled: true, executions_count: 0, created_at: new Date().toISOString() });
+    memoryAutomations.set('auto_pricing', { id: 'auto_pricing', user_id: 1, name: 'Pricing & Catalog', trigger_type: 'contains', trigger_condition: 'price', action_type: 'reply_text', action_summary: 'Our full catalog & pricing are available on our website! Reply 1 for Sales, 2 for Support.', is_enabled: false, executions_count: 0, created_at: new Date().toISOString() });
+    memoryAutomations.set('auto_support', { id: 'auto_support', user_id: 1, name: 'Support Assistant', trigger_type: 'contains', trigger_condition: 'help', action_type: 'reply_text', action_summary: 'A support specialist has been alerted and will join this chat momentarily.', is_enabled: false, executions_count: 0, created_at: new Date().toISOString() });
   }
 }
 
@@ -220,8 +220,8 @@ export async function createUser({ email, password, name, company_name = 'WppFlo
           INSERT INTO automations (id, user_id, name, trigger_type, trigger_condition, action_type, action_summary, is_enabled, executions_count)
           VALUES
             ($1, $2, 'Welcome Greeting', 'contains', 'hi', 'reply_text', 'Hello! 👋 Thank you for messaging us. How can we help you today?', false, 0),
-            ($3, $2, 'Pricing & Catalog', 'contains', 'price', 'reply_text', 'Our full catalog & pricing are available on our website! Reply 1 for Sales, 2 for Support.', true, 0),
-            ($4, $2, 'Support Assistant', 'contains', 'help', 'reply_text', 'A support specialist has been alerted and will join this chat momentarily.', true, 0)
+            ($3, $2, 'Pricing & Catalog', 'contains', 'price', 'reply_text', 'Our full catalog & pricing are available on our website! Reply 1 for Sales, 2 for Support.', false, 0),
+            ($4, $2, 'Support Assistant', 'contains', 'help', 'reply_text', 'A support specialist has been alerted and will join this chat momentarily.', false, 0)
           ON CONFLICT (id) DO NOTHING
         `, [`auto_welcome_${user.id}`, user.id, `auto_pricing_${user.id}`, `auto_support_${user.id}`]);
       } catch {}
