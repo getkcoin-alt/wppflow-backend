@@ -30,9 +30,20 @@ export class WhatsAppProvider {
       }
     }
 
+    const legacyTokenDir = path.join(ENV.TOKEN_DIR, sessionName);
     const sessionTokenDir = path.join(ENV.TOKEN_DIR, `tenant_${tenantId}_${sessionName}`);
     if (!fs.existsSync(sessionTokenDir)) {
-      fs.mkdirSync(sessionTokenDir, { recursive: true });
+      if (fs.existsSync(legacyTokenDir)) {
+        try {
+          fs.cpSync(legacyTokenDir, sessionTokenDir, { recursive: true });
+          console.log(`🔑 Preserved legacy session tokens from ${legacyTokenDir} to ${sessionTokenDir}`);
+        } catch (e) {
+          console.warn(`Failed copying legacy token directory:`, e.message);
+          fs.mkdirSync(sessionTokenDir, { recursive: true });
+        }
+      } else {
+        fs.mkdirSync(sessionTokenDir, { recursive: true });
+      }
     }
 
     const sessionState = {
@@ -229,7 +240,9 @@ export class WhatsAppProvider {
   normalizeMessage(raw) {
     const id = String(raw.id?._serialized || raw.id?.id || raw.id || '');
     const fromMe = Boolean(raw.fromMe);
-    const remoteId = String(raw.from || raw.to || raw.chatId?._serialized || '');
+    const remoteId = fromMe
+      ? String(raw.to || raw.chatId?._serialized || raw.chat?.id?._serialized || '')
+      : String(raw.from || raw.chatId?._serialized || raw.chat?.id?._serialized || '');
     const text = raw.body || raw.caption || '';
     const type = raw.type === 'chat' ? 'text' : (raw.type || 'text');
     const timestampEpoch = raw.t ? Number(raw.t) : Math.floor(Date.now() / 1000);

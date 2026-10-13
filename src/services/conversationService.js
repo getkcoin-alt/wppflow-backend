@@ -1,8 +1,51 @@
+import crypto from 'crypto';
 import { query, withTransaction } from '../db/index.js';
 import { defaultWhatsAppProvider } from './whatsapp/WhatsAppProvider.js';
 
+export function formatConversation(c) {
+  if (!c) return null;
+  const lastMsg = typeof c.last_message === 'string'
+    ? JSON.parse(c.last_message)
+    : (c.last_message || {});
+
+  return {
+    id: c.id,
+    tenantId: c.tenant_id,
+    sessionName: c.session_name,
+    sessionKey: c.session_name,
+    channel: c.session_name,
+    providerChatId: c.provider_chat_id || c.phone,
+    contactId: c.contact_id || '',
+    phone: c.phone,
+    contactName: c.contact_name,
+    avatar: c.avatar || '',
+    unreadCount: Number(c.unread_count || 0),
+    isGroup: Boolean(c.is_group),
+    groupMembersCount: Number(c.group_members_count || 0),
+    assignedTo: c.assigned_to || '',
+    isClosed: Boolean(c.is_closed),
+    isPinned: Boolean(c.is_pinned),
+    isArchived: Boolean(c.is_archived),
+    lastActiveEpoch: Number(c.last_active_epoch || 0),
+    lastMessage: lastMsg,
+    tags: Array.isArray(c.tags) ? c.tags : [],
+    createdAt: c.created_at,
+    updatedAt: c.updated_at,
+    // snake_case mirrors for backwards-compatibility
+    tenant_id: c.tenant_id,
+    session_name: c.session_name,
+    provider_chat_id: c.provider_chat_id || c.phone,
+    contact_name: c.contact_name,
+    unread_count: Number(c.unread_count || 0),
+    is_group: Boolean(c.is_group),
+    last_active_epoch: Number(c.last_active_epoch || 0),
+    last_message: lastMsg
+  };
+}
+
 export async function getConversations({
   tenantId,
+  sessionName = null,
   limit = 30,
   cursor = null,
   filter = 'all',
@@ -10,14 +53,19 @@ export async function getConversations({
 }) {
   const parsedLimit = Math.min(Math.max(parseInt(limit, 10) || 30, 1), 100);
   let sql = `
-    SELECT id, tenant_id, session_name, contact_id, phone, contact_name,
-           avatar, unread_count, is_group, group_members_count, assigned_to,
-           is_closed, is_pinned, is_archived, last_active_epoch, last_message,
-           tags, created_at, updated_at
+    SELECT id, tenant_id, session_name, provider_chat_id, contact_id, phone,
+           contact_name, avatar, unread_count, is_group, group_members_count,
+           assigned_to, is_closed, is_pinned, is_archived, last_active_epoch,
+           last_message, tags, created_at, updated_at
     FROM conversations
     WHERE tenant_id = $1
   `;
   const params = [tenantId];
+
+  if (sessionName) {
+    params.push(sessionName);
+    sql += ` AND session_name = $${params.length}`;
+  }
 
   if (filter === 'unread') {
     sql += ` AND unread_count > 0`;
@@ -30,22 +78,37 @@ export async function getConversations({
     sql += ` AND (contact_name ILIKE $${params.length} OR phone ILIKE $${params.length})`;
   }
 
+  // Compound cursor: (last_active_epoch, id)
   if (cursor) {
-    params.push(Number(cursor));
-    sql += ` AND last_active_epoch < $${params.length}`;
+    const parts = String(cursor).split(':');
+    const cursorEpoch = Number(parts[0]);
+    const cursorId = parts[1];
+
+    if (cursorId) {
+      params.push(cursorEpoch, cursorId);
+      sql += ` AND (last_active_epoch < $${params.length - 1} OR (last_active_epoch = $${params.length - 1} AND id < $${params.length}))`;
+    } else {
+      params.push(cursorEpoch);
+      sql += ` AND last_active_epoch < $${params.length}`;
+    }
   }
 
   params.push(parsedLimit + 1);
-  sql += ` ORDER BY last_active_epoch DESC LIMIT $${params.length}`;
+  sql += ` ORDER BY last_active_epoch DESC, id DESC LIMIT $${params.length}`;
 
   const { rows } = await query(sql, params);
   const hasMore = rows.length > parsedLimit;
   const items = hasMore ? rows.slice(0, parsedLimit) : rows;
 
-  const nextCursor = items.length > 0 ? items[items.length - 1].last_active_epoch : null;
+  const nextCursor = items.length > 0
+    ? `${items[items.length - 1].last_active_epoch}:${items[items.length - 1].id}`
+    : null;
+
+  const formatted = items.map(formatConversation);
 
   return {
-    conversations: items,
+    conversations: formatted,
+    chats: formatted, // alias for frontend compatibility
     nextCursor: hasMore ? nextCursor : null,
     hasMore
   };
@@ -56,20 +119,23 @@ export async function markConversationRead({ tenantId, conversationId, io = null
     UPDATE conversations
     SET unread_count = 0, updated_at = CURRENT_TIMESTAMP
     WHERE id = $1 AND tenant_id = $2
-    RETURNING id, unread_count
+    RETURNING *
   `, [conversationId, tenantId]);
 
   if (rows.length === 0) {
     throw new Error('Conversation not found in current workspace.');
   }
 
+  const updated = formatConversation(rows[0]);
+
   if (io) {
     io.to(`tenant:${tenantId}`).emit('conversation:read', {
-      conversationId
+      conversationId: updated.id,
+      chatId: updated.id
     });
   }
 
-  return rows[0];
+  return updated;
 }
 
 export async function syncConversations({ tenantId, sessionName, io = null }) {
@@ -77,14 +143,17 @@ export async function syncConversations({ tenantId, sessionName, io = null }) {
   let upsertedCount = 0;
 
   for (const remote of remoteConversations) {
+    const providerChatId = String(remote.id || remote.phone);
+    const convId = `conv_${crypto.randomUUID()}`;
+
     await query(`
       INSERT INTO conversations (
-        id, tenant_id, session_name, phone, contact_name, avatar,
+        id, tenant_id, session_name, provider_chat_id, phone, contact_name, avatar,
         unread_count, is_group, group_members_count, last_active_epoch,
         last_message
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-      ON CONFLICT (tenant_id, phone) DO UPDATE SET
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      ON CONFLICT (tenant_id, session_name, provider_chat_id) DO UPDATE SET
         contact_name = EXCLUDED.contact_name,
         avatar = COALESCE(NULLIF(EXCLUDED.avatar, ''), conversations.avatar),
         unread_count = EXCLUDED.unread_count,
@@ -93,11 +162,13 @@ export async function syncConversations({ tenantId, sessionName, io = null }) {
           WHEN EXCLUDED.last_message->>'text' != 'Chat active' AND EXCLUDED.last_message->>'text' != 'Group joined'
           THEN EXCLUDED.last_message
           ELSE conversations.last_message
-        END
+        END,
+        updated_at = CURRENT_TIMESTAMP
     `, [
-      `conv_${remote.phone.replace(/[^a-zA-Z0-9]/g, '_')}`,
+      convId,
       tenantId,
       sessionName,
+      providerChatId,
       remote.phone,
       remote.contactName,
       remote.avatar || '',
@@ -113,6 +184,7 @@ export async function syncConversations({ tenantId, sessionName, io = null }) {
   if (io) {
     io.to(`tenant:${tenantId}`).emit('conversations:synced', {
       sessionName,
+      sessionKey: sessionName,
       count: upsertedCount
     });
   }

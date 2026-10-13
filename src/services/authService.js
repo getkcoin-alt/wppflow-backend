@@ -46,33 +46,47 @@ export async function rotateRefreshToken(tokenValue) {
   const [tokenId, tokenSecret] = parts;
   const tokenHash = crypto.createHash('sha256').update(tokenSecret).digest('hex');
 
-  const { rows } = await query(`
-    SELECT r.id, r.user_id, r.revoked, r.expires_at, u.status, u.email, u.name, u.is_superadmin
-    FROM refresh_tokens r
-    JOIN users u ON r.user_id = u.id
-    WHERE r.id = $1 AND r.token_hash = $2
-  `, [tokenId, tokenHash]);
+  return await withTransaction(async (client) => {
+    const { rows } = await client.query(`
+      SELECT r.id, r.user_id, r.revoked, r.expires_at, u.status, u.email, u.name, u.is_superadmin
+      FROM refresh_tokens r
+      JOIN users u ON r.user_id = u.id
+      WHERE r.id = $1 AND r.token_hash = $2
+      FOR UPDATE OF r
+    `, [tokenId, tokenHash]);
 
-  if (rows.length === 0) throw new Error('Refresh token not found.');
-  const tokenRecord = rows[0];
+    if (rows.length === 0) throw new Error('Refresh token not found.');
+    const tokenRecord = rows[0];
 
-  if (tokenRecord.revoked) {
-    // Possible token reuse attack! Revoke all tokens for user
-    await query(`UPDATE refresh_tokens SET revoked = true WHERE user_id = $1`, [tokenRecord.user_id]);
-    throw new Error('Revoked refresh token reuse detected.');
-  }
+    if (tokenRecord.revoked) {
+      // Possible token reuse attack! Revoke all tokens for user
+      await client.query(`UPDATE refresh_tokens SET revoked = true WHERE user_id = $1`, [tokenRecord.user_id]);
+      throw new Error('Revoked refresh token reuse detected.');
+    }
 
-  if (new Date() > new Date(tokenRecord.expires_at)) {
-    throw new Error('Refresh token expired.');
-  }
+    if (new Date() > new Date(tokenRecord.expires_at)) {
+      throw new Error('Refresh token expired.');
+    }
 
-  if (tokenRecord.status !== 'active') {
-    throw new Error('Account is not active.');
-  }
+    if (tokenRecord.status !== 'active') {
+      throw new Error('Account is not active.');
+    }
 
-  // Revoke old token and issue new pair
-  await query(`UPDATE refresh_tokens SET revoked = true WHERE id = $1`, [tokenId]);
-  return await generateRefreshToken(tokenRecord.user_id);
+    // Revoke old token and issue new pair atomically
+    await client.query(`UPDATE refresh_tokens SET revoked = true WHERE id = $1`, [tokenId]);
+
+    const tokenString = crypto.randomBytes(40).toString('hex');
+    const newTokenHash = crypto.createHash('sha256').update(tokenString).digest('hex');
+    const newTokenId = `rf_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    const expiresAt = new Date(Date.now() + ENV.JWT_REFRESH_EXPIRES_IN_DAYS * 24 * 60 * 60 * 1000);
+
+    await client.query(`
+      INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at)
+      VALUES ($1, $2, $3, $4)
+    `, [newTokenId, tokenRecord.user_id, newTokenHash, expiresAt]);
+
+    return { tokenId: newTokenId, refreshToken: `${newTokenId}.${tokenString}` };
+  });
 }
 
 export async function revokeAllRefreshTokens(userId) {

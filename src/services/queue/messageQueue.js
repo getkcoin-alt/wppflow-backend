@@ -42,16 +42,26 @@ export async function initMessageQueue(io) {
         text
       );
 
-      // Update message with providerMessageId in DB
-      await query(`
-        UPDATE messages
-        SET provider_message_id = $1, ack = $2, status = 'sent'
-        WHERE id = $3 AND tenant_id = $4
-      `, [sendResult.providerMessageId, ACK_STATUS.SERVER, messageId, tenantId]);
+      // Update message & outbox event atomically
+      await withTransaction(async (client) => {
+        await client.query(`
+          UPDATE messages
+          SET provider_message_id = $1, ack = $2, status = 'sent'
+          WHERE id = $3 AND tenant_id = $4
+        `, [sendResult.providerMessageId, ACK_STATUS.SERVER, messageId, tenantId]);
 
-      // Emit real-time confirmation to tenant room
+        await client.query(`
+          UPDATE outbox_events
+          SET status = 'processed', processed_at = CURRENT_TIMESTAMP
+          WHERE aggregate_id = $1 AND tenant_id = $2
+        `, [messageId, tenantId]);
+      });
+
+      // Emit real-time confirmation to tenant room with dual chatId/conversationId
       if (io) {
         io.to(`tenant:${tenantId}`).emit('message:updated', {
+          conversationId,
+          chatId: conversationId,
           messageId,
           providerMessageId: sendResult.providerMessageId,
           status: 'sent',
@@ -72,17 +82,23 @@ export async function initMessageQueue(io) {
           UPDATE messages SET status = 'failed', ack = $1
           WHERE id = $2 AND tenant_id = $3
         `, [ACK_STATUS.ERROR, job.data.messageId, job.data.tenantId]);
+
+        await query(`
+          UPDATE outbox_events SET status = 'failed'
+          WHERE aggregate_id = $1 AND tenant_id = $2
+        `, [job.data.messageId, job.data.tenantId]);
       }
     });
 
   } catch (err) {
-    console.warn(`ℹ️ Redis unavailable (${err.message}). Using direct transactional delivery.`);
+    console.warn(`ℹ️ Redis unavailable (${err.message}). Using direct transactional delivery with outbox tracking.`);
     isRedisAvailable = false;
   }
 }
 
 export async function enqueueOutgoingMessage({ tenantId, sessionName, conversationId, messageId, to, text, io }) {
   if (isRedisAvailable && messageQueue) {
+    // Add job with stable messageId to guarantee deduplication in queue
     await messageQueue.add('send-text', {
       tenantId,
       sessionName,
@@ -90,11 +106,13 @@ export async function enqueueOutgoingMessage({ tenantId, sessionName, conversati
       messageId,
       to,
       text
+    }, {
+      jobId: messageId
     });
     return { queued: true };
   }
 
-  // Direct transactional execution fallback
+  // Direct transactional execution fallback with full outbox tracking
   try {
     const sendResult = await defaultWhatsAppProvider.sendTextMessage(
       tenantId,
@@ -103,14 +121,24 @@ export async function enqueueOutgoingMessage({ tenantId, sessionName, conversati
       text
     );
 
-    await query(`
-      UPDATE messages
-      SET provider_message_id = $1, ack = $2, status = 'sent'
-      WHERE id = $3 AND tenant_id = $4
-    `, [sendResult.providerMessageId, ACK_STATUS.SERVER, messageId, tenantId]);
+    await withTransaction(async (client) => {
+      await client.query(`
+        UPDATE messages
+        SET provider_message_id = $1, ack = $2, status = 'sent'
+        WHERE id = $3 AND tenant_id = $4
+      `, [sendResult.providerMessageId, ACK_STATUS.SERVER, messageId, tenantId]);
+
+      await client.query(`
+        UPDATE outbox_events
+        SET status = 'processed', processed_at = CURRENT_TIMESTAMP
+        WHERE aggregate_id = $1 AND tenant_id = $2
+      `, [messageId, tenantId]);
+    });
 
     if (io) {
       io.to(`tenant:${tenantId}`).emit('message:updated', {
+        conversationId,
+        chatId: conversationId,
         messageId,
         providerMessageId: sendResult.providerMessageId,
         status: 'sent',
@@ -124,6 +152,12 @@ export async function enqueueOutgoingMessage({ tenantId, sessionName, conversati
       UPDATE messages SET status = 'failed', ack = $1
       WHERE id = $2 AND tenant_id = $3
     `, [ACK_STATUS.ERROR, messageId, tenantId]);
+
+    await query(`
+      UPDATE outbox_events SET status = 'failed'
+      WHERE aggregate_id = $1 AND tenant_id = $2
+    `, [messageId, tenantId]);
+
     throw err;
   }
 }

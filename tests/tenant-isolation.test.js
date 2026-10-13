@@ -81,4 +81,61 @@ test('Tenant Isolation Suite', async (t) => {
 
     assert.strictEqual(res.status, 403, 'Should reject access to unauthorized tenant');
   });
+
+  await t.test('Two tenants syncing the same recipient phone number succeed without 23505 pkey collision', async () => {
+    const sharedPhone = '+15559998888';
+    const sharedProviderChatId = `${sharedPhone.replace(/\D/g, '')}@c.us`;
+
+    // Tenant A syncs the contact
+    const convIdA = `conv_${crypto.randomUUID()}`;
+    await query(`
+      INSERT INTO conversations (id, tenant_id, session_name, provider_chat_id, phone, contact_name, last_active_epoch)
+      VALUES ($1, $2, 'primary-whatsapp', $3, $4, 'Common Customer', 1700000000)
+      ON CONFLICT (tenant_id, session_name, provider_chat_id) DO UPDATE SET contact_name = EXCLUDED.contact_name
+    `, [convIdA, tA.tenant.id, sharedProviderChatId, sharedPhone]);
+
+    // Tenant B syncs the exact same recipient phone number
+    const convIdB = `conv_${crypto.randomUUID()}`;
+    await query(`
+      INSERT INTO conversations (id, tenant_id, session_name, provider_chat_id, phone, contact_name, last_active_epoch)
+      VALUES ($1, $2, 'primary-whatsapp', $3, $4, 'Common Customer', 1700000000)
+      ON CONFLICT (tenant_id, session_name, provider_chat_id) DO UPDATE SET contact_name = EXCLUDED.contact_name
+    `, [convIdB, tB.tenant.id, sharedProviderChatId, sharedPhone]);
+
+    assert.notStrictEqual(convIdA, convIdB, 'Conversation IDs must be distinct');
+
+    const { rows: rowsA } = await query('SELECT id FROM conversations WHERE tenant_id = $1 AND provider_chat_id = $2', [tA.tenant.id, sharedProviderChatId]);
+    const { rows: rowsB } = await query('SELECT id FROM conversations WHERE tenant_id = $1 AND provider_chat_id = $2', [tB.tenant.id, sharedProviderChatId]);
+
+    assert.strictEqual(rowsA.length, 1);
+    assert.strictEqual(rowsB.length, 1);
+    assert.strictEqual(rowsA[0].id, convIdA);
+    assert.strictEqual(rowsB[0].id, convIdB);
+  });
+
+  await t.test('Two sessions in same tenant can hold separate threads with the same contact', async () => {
+    const contactPhone = '+15557776666';
+    const providerChatId = `${contactPhone.replace(/\D/g, '')}@c.us`;
+
+    const convSales = `conv_${crypto.randomUUID()}`;
+    const convSupport = `conv_${crypto.randomUUID()}`;
+
+    await query(`
+      INSERT INTO conversations (id, tenant_id, session_name, provider_chat_id, phone, contact_name, last_active_epoch)
+      VALUES ($1, $2, 'sales-wa', $3, $4, 'Shared Lead', 1700000000)
+      ON CONFLICT (tenant_id, session_name, provider_chat_id) DO UPDATE SET contact_name = EXCLUDED.contact_name
+    `, [convSales, tA.tenant.id, providerChatId, contactPhone]);
+
+    await query(`
+      INSERT INTO conversations (id, tenant_id, session_name, provider_chat_id, phone, contact_name, last_active_epoch)
+      VALUES ($1, $2, 'support-wa', $3, $4, 'Shared Lead', 1700000000)
+      ON CONFLICT (tenant_id, session_name, provider_chat_id) DO UPDATE SET contact_name = EXCLUDED.contact_name
+    `, [convSupport, tA.tenant.id, providerChatId, contactPhone]);
+
+    const { rows } = await query(`
+      SELECT session_name, id FROM conversations WHERE tenant_id = $1 AND provider_chat_id = $2
+    `, [tA.tenant.id, providerChatId]);
+
+    assert.strictEqual(rows.length, 2, 'Tenant A should have 2 distinct conversation threads for the two sessions');
+  });
 });

@@ -350,4 +350,162 @@ router.post('/switch-tenant', authenticateToken, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/auth/users
+ * List users in current tenant (or all users if platform superadmin)
+ */
+router.get('/users', authenticateToken, async (req, res) => {
+  try {
+    const isSuperAdmin = Boolean(req.user.isSuperAdmin || req.user.is_superadmin);
+    let usersQuery;
+    let params;
+
+    if (isSuperAdmin && !req.tenantId) {
+      usersQuery = `
+        SELECT u.id, u.email, u.name, u.status, u.is_superadmin, u.created_at,
+               COALESCE(m.role, 'user') as role,
+               COALESCE(t.name, 'WppFlow Workspace') as company
+        FROM users u
+        LEFT JOIN memberships m ON m.user_id = u.id
+        LEFT JOIN tenants t ON m.tenant_id = t.id
+        ORDER BY u.created_at DESC
+      `;
+      params = [];
+    } else {
+      const tenantId = req.tenantId || req.user.tenantId;
+      usersQuery = `
+        SELECT u.id, u.email, u.name, u.status, u.is_superadmin, u.created_at,
+               m.role, t.name as company
+        FROM memberships m
+        JOIN users u ON m.user_id = u.id
+        JOIN tenants t ON m.tenant_id = t.id
+        WHERE m.tenant_id = $1
+        ORDER BY u.created_at ASC
+      `;
+      params = [tenantId];
+    }
+
+    const { rows } = await query(usersQuery, params);
+    const formatted = rows.map(u => ({
+      id: String(u.id),
+      name: u.name,
+      email: u.email,
+      avatar: `https://images.unsplash.com/photo-1535713875002?w=120&auto=format&fit=crop&q=80`,
+      role: u.role === 'owner' ? 'tenant_admin' : (u.role === 'admin' ? 'tenant_admin' : 'agent'),
+      company: u.company || 'WppFlow Workspace',
+      plan: 'enterprise',
+      status: u.status || 'active',
+      whatsappSessionsQuota: 5,
+      activeSessionsCount: 1,
+      monthlyBroadcastLimit: 10000,
+      broadcastsUsed: 0,
+      teamSeats: 10,
+      apiCallsThisMonth: 0,
+      createdAt: u.created_at,
+      lastLogin: u.created_at
+    }));
+
+    res.json({ status: 'success', users: formatted });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
+/**
+ * POST /api/auth/users
+ * Add user / member to tenant
+ */
+router.post('/users', authenticateToken, async (req, res) => {
+  try {
+    const { email, password, name, role = 'agent' } = req.body;
+    if (!email || !name) {
+      return res.status(400).json({ status: 'error', message: 'Name and email are required.' });
+    }
+
+    const tenantId = req.tenantId || req.user.tenantId;
+    if (!tenantId) {
+      return res.status(400).json({ status: 'error', message: 'Tenant context required.' });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const defaultPassword = password || 'TempPass123!';
+    const passwordHash = await hashPassword(defaultPassword);
+
+    let userId;
+    const { rows: existingUser } = await query('SELECT id FROM users WHERE email = $1', [normalizedEmail]);
+    if (existingUser.length > 0) {
+      userId = existingUser[0].id;
+    } else {
+      const { rows: newUser } = await query(`
+        INSERT INTO users (email, password_hash, name, status)
+        VALUES ($1, $2, $3, 'active')
+        RETURNING id
+      `, [normalizedEmail, passwordHash, name.trim()]);
+      userId = newUser[0].id;
+    }
+
+    const membershipRole = role.includes('admin') ? 'admin' : 'agent';
+    await query(`
+      INSERT INTO memberships (tenant_id, user_id, role)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (tenant_id, user_id) DO UPDATE SET role = EXCLUDED.role
+    `, [tenantId, userId, membershipRole]);
+
+    res.status(201).json({
+      status: 'success',
+      message: 'User added to workspace successfully.',
+      user: { id: String(userId), email: normalizedEmail, name: name.trim(), role: membershipRole }
+    });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
+/**
+ * PATCH /api/auth/users/:id
+ * Update user status or role
+ */
+router.patch('/users/:id', authenticateToken, async (req, res) => {
+  try {
+    const userId = parseInt(req.params.id, 10);
+    const tenantId = req.tenantId || req.user.tenantId;
+    const { status, role } = req.body;
+
+    if (status) {
+      await query(`UPDATE users SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`, [status, userId]);
+    }
+
+    if (role && tenantId) {
+      const membershipRole = role.includes('admin') ? 'admin' : 'agent';
+      await query(`
+        UPDATE memberships SET role = $1, updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = $2 AND tenant_id = $3
+      `, [membershipRole, userId, tenantId]);
+    }
+
+    res.json({ status: 'success', message: 'User updated successfully' });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
+/**
+ * DELETE /api/auth/users/:id
+ * Remove user from workspace
+ */
+router.delete('/users/:id', authenticateToken, async (req, res) => {
+  try {
+    const userId = parseInt(req.params.id, 10);
+    const tenantId = req.tenantId || req.user.tenantId;
+
+    if (tenantId) {
+      await query(`DELETE FROM memberships WHERE user_id = $1 AND tenant_id = $2`, [userId, tenantId]);
+    }
+
+    res.json({ status: 'success', message: 'User removed from workspace.' });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
 export default router;

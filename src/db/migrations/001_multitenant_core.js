@@ -1,6 +1,32 @@
 export const version = '001_multitenant_core';
 
 export async function up(client) {
+  // 0. Non-destructive legacy table check & preservation
+  // If legacy tables exist without tenant_id, safely rename them to legacy_*
+  const legacyCandidates = ['contacts', 'chats', 'messages', 'campaigns', 'automations'];
+  for (const t of legacyCandidates) {
+    const tableExists = await client.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' AND table_name = $1
+      );
+    `, [t]);
+
+    if (tableExists.rows[0].exists) {
+      const colExists = await client.query(`
+        SELECT EXISTS (
+          SELECT FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = $1 AND column_name = 'tenant_id'
+        );
+      `, [t]);
+
+      if (!colExists.rows[0].exists) {
+        console.log(`📦 Preserving legacy table '${t}' as 'legacy_${t}'...`);
+        await client.query(`ALTER TABLE "${t}" RENAME TO "legacy_${t}"`);
+      }
+    }
+  }
+
   // 1. Tenants
   await client.query(`
     CREATE TABLE IF NOT EXISTS tenants (
@@ -14,19 +40,34 @@ export async function up(client) {
     );
   `);
 
-  // 2. Users (Platform users)
-  await client.query(`
-    CREATE TABLE IF NOT EXISTS users (
-      id SERIAL PRIMARY KEY,
-      email VARCHAR(255) UNIQUE NOT NULL,
-      password_hash VARCHAR(255) NOT NULL,
-      name VARCHAR(255) NOT NULL,
-      is_superadmin BOOLEAN DEFAULT false,
-      status VARCHAR(30) DEFAULT 'active',
-      created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+  // 2. Users (Platform users) - Additive upgrade if already exists
+  const usersExists = await client.query(`
+    SELECT EXISTS (
+      SELECT FROM information_schema.tables 
+      WHERE table_schema = 'public' AND table_name = 'users'
     );
   `);
+
+  if (!usersExists.rows[0].exists) {
+    await client.query(`
+      CREATE TABLE users (
+        id SERIAL PRIMARY KEY,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        is_superadmin BOOLEAN DEFAULT false,
+        status VARCHAR(30) DEFAULT 'active',
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+  } else {
+    await client.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS is_superadmin BOOLEAN DEFAULT false;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(30) DEFAULT 'active';
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
+    `);
+  }
 
   // 3. Memberships (Tenant <-> User with role)
   await client.query(`
@@ -93,12 +134,13 @@ export async function up(client) {
     CREATE INDEX IF NOT EXISTS idx_contacts_tenant ON contacts(tenant_id);
   `);
 
-  // 7. Conversations (Tenant-owned, replaced legacy chats)
+  // 7. Conversations (Tenant-owned with multi-session support and compound index)
   await client.query(`
     CREATE TABLE IF NOT EXISTS conversations (
       id VARCHAR(64) PRIMARY KEY,
       tenant_id VARCHAR(64) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
       session_name VARCHAR(128) NOT NULL,
+      provider_chat_id VARCHAR(128) NOT NULL,
       contact_id VARCHAR(64) REFERENCES contacts(id) ON DELETE SET NULL,
       phone VARCHAR(64) NOT NULL,
       contact_name VARCHAR(255) NOT NULL,
@@ -115,13 +157,13 @@ export async function up(client) {
       tags JSONB DEFAULT '[]',
       created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE (tenant_id, phone)
+      CONSTRAINT uq_tenant_session_chat UNIQUE (tenant_id, session_name, provider_chat_id)
     );
-    CREATE INDEX IF NOT EXISTS idx_conversations_tenant_epoch ON conversations(tenant_id, last_active_epoch DESC);
+    CREATE INDEX IF NOT EXISTS idx_conversations_tenant_epoch_id ON conversations(tenant_id, last_active_epoch DESC, id DESC);
     CREATE INDEX IF NOT EXISTS idx_conversations_tenant_unread ON conversations(tenant_id, unread_count);
   `);
 
-  // 8. Messages (Tenant-owned)
+  // 8. Messages (Tenant-owned with strict idempotency and provider ID uniqueness)
   await client.query(`
     CREATE TABLE IF NOT EXISTS messages (
       id VARCHAR(64) PRIMARY KEY,
@@ -142,10 +184,10 @@ export async function up(client) {
       timestamp VARCHAR(50) DEFAULT '',
       timestamp_epoch BIGINT DEFAULT 0,
       created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-      CONSTRAINT uq_tenant_provider_msg UNIQUE (tenant_id, provider_message_id)
+      CONSTRAINT uq_tenant_provider_msg UNIQUE (tenant_id, provider_message_id),
+      CONSTRAINT uq_tenant_idempotency UNIQUE (tenant_id, idempotency_key)
     );
-    CREATE INDEX IF NOT EXISTS idx_messages_tenant_conv_epoch ON messages(tenant_id, conversation_id, timestamp_epoch DESC);
-    CREATE INDEX IF NOT EXISTS idx_messages_tenant_idempotency ON messages(tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_messages_tenant_conv_epoch_id ON messages(tenant_id, conversation_id, timestamp_epoch DESC, id DESC);
   `);
 
   // 9. Message Receipts (ACK auditing)
@@ -228,10 +270,70 @@ export async function up(client) {
     );
     CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox_events(status, created_at) WHERE status = 'pending';
   `);
+
+  // 14. Campaigns & Campaign Recipients (Tenant-owned)
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS campaigns (
+      id VARCHAR(64) PRIMARY KEY,
+      tenant_id VARCHAR(64) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      name VARCHAR(255) NOT NULL,
+      target_segment VARCHAR(255) DEFAULT '',
+      total_recipients INT DEFAULT 0,
+      sent_count INT DEFAULT 0,
+      delivered_count INT DEFAULT 0,
+      read_count INT DEFAULT 0,
+      replied_count INT DEFAULT 0,
+      failed_count INT DEFAULT 0,
+      cost_saved_meta NUMERIC DEFAULT 0,
+      status VARCHAR(50) DEFAULT 'draft',
+      template_text TEXT DEFAULT '',
+      anti_ban_delay_seconds INT DEFAULT 4,
+      scheduled_for VARCHAR(100) DEFAULT '',
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_campaigns_tenant ON campaigns(tenant_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS campaign_recipients (
+      id SERIAL PRIMARY KEY,
+      tenant_id VARCHAR(64) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      campaign_id VARCHAR(64) NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      phone VARCHAR(64) NOT NULL,
+      status VARCHAR(50) DEFAULT 'pending',
+      error TEXT DEFAULT '',
+      sent_at TIMESTAMP WITH TIME ZONE,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT uq_campaign_recipient UNIQUE (tenant_id, campaign_id, phone)
+    );
+    CREATE INDEX IF NOT EXISTS idx_campaign_recipients_tenant ON campaign_recipients(tenant_id, campaign_id);
+  `);
+
+  // 15. Automations (Tenant-owned)
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS automations (
+      id VARCHAR(64) PRIMARY KEY,
+      tenant_id VARCHAR(64) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      name VARCHAR(255) NOT NULL,
+      trigger_type VARCHAR(100) DEFAULT 'keyword',
+      trigger_condition TEXT DEFAULT '',
+      action_type VARCHAR(100) DEFAULT 'reply_text',
+      action_summary TEXT DEFAULT '',
+      is_enabled BOOLEAN DEFAULT true,
+      executions_count INT DEFAULT 0,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_automations_tenant ON automations(tenant_id);
+  `);
 }
 
 export async function down(client) {
+  // Safe rollback: drops newly added multitenant auxiliary tables.
+  // Intentionally NEVER drops 'users' or any 'legacy_*' tables to guarantee zero data loss.
   await client.query(`
+    DROP TABLE IF EXISTS campaign_recipients CASCADE;
+    DROP TABLE IF EXISTS campaigns CASCADE;
+    DROP TABLE IF EXISTS automations CASCADE;
     DROP TABLE IF EXISTS outbox_events CASCADE;
     DROP TABLE IF EXISTS audit_events CASCADE;
     DROP TABLE IF EXISTS suppressions CASCADE;
@@ -244,7 +346,6 @@ export async function down(client) {
     DROP TABLE IF EXISTS whatsapp_sessions CASCADE;
     DROP TABLE IF EXISTS refresh_tokens CASCADE;
     DROP TABLE IF EXISTS memberships CASCADE;
-    DROP TABLE IF EXISTS users CASCADE;
     DROP TABLE IF EXISTS tenants CASCADE;
   `);
 }

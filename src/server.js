@@ -6,7 +6,7 @@ import { Server as SocketIOServer } from 'socket.io';
 import jwt from 'jsonwebtoken';
 
 import { ENV } from './config/env.js';
-import { checkDatabaseHealth, closePool } from './db/index.js';
+import { checkDatabaseHealth, closePool, query } from './db/index.js';
 import { runMigrations } from './db/migrate.js';
 import { initMessageQueue, closeQueue } from './services/queue/messageQueue.js';
 
@@ -14,6 +14,8 @@ import authRoutes from './routes/authRoutes.js';
 import conversationRoutes from './routes/conversationRoutes.js';
 import sessionRoutes from './routes/sessionRoutes.js';
 import campaignRoutes from './routes/campaignRoutes.js';
+import contactRoutes from './routes/contactRoutes.js';
+import automationRoutes from './routes/automationRoutes.js';
 import healthRoutes from './routes/healthRoutes.js';
 
 const app = express();
@@ -38,7 +40,7 @@ app.use(cookieParser());
 app.use(express.json({ limit: ENV.BODY_LIMIT }));
 app.use(express.urlencoded({ extended: true, limit: ENV.BODY_LIMIT }));
 
-// 2. Authenticated Socket.IO Server
+// 2. Authenticated Socket.IO Server with strict membership authorization
 const io = new SocketIOServer(server, {
   cors: {
     origin: ENV.ALLOWED_ORIGINS,
@@ -47,7 +49,7 @@ const io = new SocketIOServer(server, {
 });
 app.set('io', io);
 
-io.use((socket, next) => {
+io.use(async (socket, next) => {
   const token = socket.handshake.auth?.token || socket.handshake.query?.token;
   if (!token) {
     return next(new Error('Authentication token required'));
@@ -56,8 +58,40 @@ io.use((socket, next) => {
   try {
     const cleanToken = token.startsWith('Bearer ') ? token.slice(7) : token;
     const decoded = jwt.verify(cleanToken, ENV.JWT_SECRET);
-    socket.user = decoded;
-    socket.tenantId = decoded.tenantId || socket.handshake.auth?.tenantId || null;
+    const userId = decoded.userId || decoded.id;
+
+    // Verify user is active in database and resolve authorized tenant memberships
+    const { rows: userRows } = await query(
+      'SELECT id, email, status, is_superadmin FROM users WHERE id = $1',
+      [userId]
+    );
+
+    if (userRows.length === 0 || userRows[0].status !== 'active') {
+      return next(new Error('User account is invalid or deactivated'));
+    }
+
+    const { rows: memberships } = await query(
+      'SELECT tenant_id, role FROM memberships WHERE user_id = $1',
+      [userId]
+    );
+
+    socket.user = {
+      ...decoded,
+      isSuperAdmin: Boolean(userRows[0].is_superadmin)
+    };
+
+    const requestedTenant = socket.handshake.auth?.tenantId || socket.handshake.query?.tenantId || decoded.tenantId;
+
+    // Only join tenant rooms where user holds server-verified membership
+    const hasMembership = memberships.some(m => m.tenant_id === requestedTenant);
+    if (requestedTenant && (hasMembership || userRows[0].is_superadmin)) {
+      socket.tenantId = requestedTenant;
+    } else if (memberships.length > 0) {
+      socket.tenantId = memberships[0].tenant_id;
+    } else {
+      socket.tenantId = null;
+    }
+
     next();
   } catch (err) {
     next(new Error('Invalid socket authentication token'));
@@ -84,6 +118,8 @@ app.use('/api/auth', authRoutes);
 app.use('/api/conversations', conversationRoutes);
 app.use('/api/sessions', sessionRoutes);
 app.use('/api/campaigns', campaignRoutes);
+app.use('/api/contacts', contactRoutes);
+app.use('/api/automations', automationRoutes);
 
 // Backward compatibility alias for /api/chats
 app.use('/api/chats', conversationRoutes);

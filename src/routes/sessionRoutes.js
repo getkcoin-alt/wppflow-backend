@@ -3,6 +3,7 @@ import { authenticateToken, requireTenantContext } from '../middleware/auth.js';
 import { defaultWhatsAppProvider } from '../services/whatsapp/WhatsAppProvider.js';
 import { query } from '../db/index.js';
 import { handleIncomingMessage, handleAckEvent } from '../services/messageService.js';
+import { syncConversations } from '../services/conversationService.js';
 
 const router = express.Router();
 
@@ -25,11 +26,23 @@ router.get('/', async (req, res) => {
     // Augment with in-memory provider state if connected
     const enriched = sessions.map(s => {
       const live = defaultWhatsAppProvider.getSession(req.tenantId, s.session_name);
+      const liveStatus = live ? live.status : s.status;
       return {
-        ...s,
-        liveStatus: live ? live.status : s.status,
+        id: s.id,
+        session_name: s.session_name,
+        sessionName: s.session_name,
+        sessionKey: s.session_name,
+        displayName: s.session_name,
+        status: liveStatus,
+        liveStatus,
+        phone: s.phone || (live ? live.phone : null),
+        battery: s.battery,
+        antiBanHealth: s.anti_ban_health,
+        anti_ban_health: s.anti_ban_health,
         hasQr: Boolean(live?.qrcode),
-        qrcode: live?.qrcode || null
+        qrcode: live?.qrcode || null,
+        created_at: s.created_at,
+        updated_at: s.updated_at
       };
     });
 
@@ -44,7 +57,7 @@ router.get('/', async (req, res) => {
  * Start or restore a WhatsApp session for this tenant
  */
 router.post('/start', async (req, res) => {
-  const sessionName = req.body?.sessionName || 'primary-whatsapp';
+  const sessionName = req.body?.sessionName || req.body?.sessionKey || 'primary-whatsapp';
   const io = req.app.get('io');
 
   try {
@@ -73,6 +86,8 @@ router.post('/start', async (req, res) => {
         if (io) {
           io.to(`tenant:${req.tenantId}`).emit('session:qr', {
             sessionName,
+            session: sessionName,
+            sessionKey: sessionName,
             qrcode: qrCode
           });
         }
@@ -86,6 +101,8 @@ router.post('/start', async (req, res) => {
         if (io) {
           io.to(`tenant:${req.tenantId}`).emit('session:status', {
             sessionName,
+            session: sessionName,
+            sessionKey: sessionName,
             status
           });
         }
@@ -112,7 +129,8 @@ router.post('/start', async (req, res) => {
     res.json({
       status: 'success',
       message: `Session '${sessionName}' initialization started.`,
-      sessionName
+      sessionName,
+      sessionKey: sessionName
     });
   } catch (err) {
     res.status(500).json({ status: 'error', message: err.message });
@@ -120,10 +138,10 @@ router.post('/start', async (req, res) => {
 });
 
 /**
- * POST /api/sessions/logout
+ * POST /api/sessions/logout or /api/sessions/:sessionName/logout
  */
-router.post('/logout', async (req, res) => {
-  const sessionName = req.body?.sessionName || 'primary-whatsapp';
+router.post(['/logout', '/:sessionName/logout', '/:sessionName/close'], async (req, res) => {
+  const sessionName = req.params.sessionName || req.body?.sessionName || req.body?.sessionKey || 'primary-whatsapp';
   try {
     await defaultWhatsAppProvider.closeSession(req.tenantId, sessionName);
     await query(`
@@ -135,6 +153,8 @@ router.post('/logout', async (req, res) => {
     if (io) {
       io.to(`tenant:${req.tenantId}`).emit('session:status', {
         sessionName,
+        session: sessionName,
+        sessionKey: sessionName,
         status: 'DISCONNECTED'
       });
     }
@@ -143,6 +163,45 @@ router.post('/logout', async (req, res) => {
   } catch (err) {
     res.status(500).json({ status: 'error', message: err.message });
   }
+});
+
+/**
+ * POST /api/sessions/:sessionName/sync-inbox
+ */
+router.post('/:sessionName/sync-inbox', async (req, res) => {
+  try {
+    const sessionName = req.params.sessionName;
+    const io = req.app.get('io');
+    const result = await syncConversations({
+      tenantId: req.tenantId,
+      sessionName,
+      io
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
+/**
+ * GET /api/sessions/:sessionName/status
+ */
+router.get('/:sessionName/status', async (req, res) => {
+  const sessionName = req.params.sessionName;
+  const live = defaultWhatsAppProvider.getSession(req.tenantId, sessionName);
+  const { rows } = await query(`
+    SELECT * FROM whatsapp_sessions WHERE tenant_id = $1 AND session_name = $2
+  `, [req.tenantId, sessionName]);
+
+  const dbStatus = rows[0]?.status || 'DISCONNECTED';
+  res.json({
+    status: 'success',
+    sessionName,
+    sessionKey: sessionName,
+    liveStatus: live ? live.status : dbStatus,
+    hasQr: Boolean(live?.qrcode),
+    qrcode: live?.qrcode || null
+  });
 });
 
 export default router;
