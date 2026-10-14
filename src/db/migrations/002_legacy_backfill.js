@@ -67,28 +67,60 @@ export async function up(client) {
   }
   const contactIds = new Map();
   if (has.has("legacy_contacts")) {
-    const { rows } = await client.query("SELECT * FROM legacy_contacts");
+    const { rows } = await client.query(
+      "SELECT * FROM legacy_contacts ORDER BY user_id,phone,created_at,id",
+    );
+    const groups = new Map();
     for (const c of rows) {
       const tenant = userTenant.get(c.user_id);
       if (!tenant) throw new Error("Legacy contact has unresolved owner");
+      const key = `${tenant}\u0000${c.phone}`;
+      groups.set(key, [...(groups.get(key) || []), { ...c, tenant }]);
+    }
+    for (const group of groups.values()) {
+      const primary = group[0];
+      const sourceIds = group.map((c) => c.id);
+      const alternateNames = [...new Set(
+        group
+          .slice(1)
+          .map((c) => String(c.name || "").trim())
+          .filter((name) => name && name !== primary.name),
+      )];
+      const traits =
+        primary.custom_traits &&
+        typeof primary.custom_traits === "object" &&
+        !Array.isArray(primary.custom_traits)
+          ? primary.custom_traits
+          : {};
+      const customTraits = {
+        ...traits,
+        _legacy_migration: {
+          ...(traits._legacy_migration || {}),
+          contact_ids: sourceIds,
+          alternate_names: alternateNames,
+        },
+      };
       const result = await client.query(
         `INSERT INTO contacts(id,tenant_id,name,phone,email,avatar,tags,custom_traits,lifetime_value,assigned_agent,created_at)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(tenant_id,phone) DO UPDATE SET name=EXCLUDED.name RETURNING id`,
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+        ON CONFLICT(tenant_id,phone) DO UPDATE SET
+          custom_traits=contacts.custom_traits || EXCLUDED.custom_traits
+        RETURNING id`,
         [
-          c.id,
-          tenant,
-          c.name,
-          c.phone,
-          c.email || "",
-          c.avatar || "",
-          JSON.stringify(c.tags || []),
-          JSON.stringify(c.custom_traits || {}),
-          c.lifetime_value || 0,
-          c.assigned_agent || "",
-          c.created_at,
+          primary.id,
+          primary.tenant,
+          primary.name,
+          primary.phone,
+          primary.email || "",
+          primary.avatar || "",
+          JSON.stringify(primary.tags || []),
+          JSON.stringify(customTraits),
+          primary.lifetime_value || 0,
+          primary.assigned_agent || "",
+          primary.created_at,
         ],
       );
-      contactIds.set(c.id, result.rows[0].id);
+      for (const c of group) contactIds.set(c.id, result.rows[0].id);
     }
   }
   const chatIds = new Map();
