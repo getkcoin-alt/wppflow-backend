@@ -1,13 +1,17 @@
 import express from 'express';
-import { authenticateToken } from '../middleware/auth.js';
+import { authenticateToken, requireSuperAdmin } from '../middleware/auth.js';
 import { sendEmail, sendTestEmail, getEmailServiceStatus } from '../services/emailService.js';
 import { ENV } from '../config/env.js';
 
 const router = express.Router();
 
+// Outbound mail is a platform capability: only the platform admin may use it directly.
+// Owner/staff emails are sent by the onboarding and invitation flows, never by these routes.
+router.use(authenticateToken, requireSuperAdmin);
+
 /**
  * GET /api/email/status
- * Public or authenticated status check for email subsystem
+ * Platform-admin status check for the email subsystem
  */
 router.get('/status', (req, res) => {
   res.json({
@@ -20,9 +24,9 @@ router.get('/status', (req, res) => {
  * POST /api/email/send
  * Dispatch an email via Resend
  */
-router.post('/send', authenticateToken, async (req, res) => {
+router.post('/send', async (req, res) => {
   try {
-    const { to, subject, html, text, from, replyTo } = req.body;
+    const { to, subject, html, text, replyTo } = req.body;
 
     if (!to || !subject || (!html && !text)) {
       return res.status(400).json({
@@ -31,7 +35,7 @@ router.post('/send', authenticateToken, async (req, res) => {
       });
     }
 
-    const result = await sendEmail({ to, subject, html, text, from, replyTo });
+    const result = await sendEmail({ to, subject, html, text, replyTo });
 
     if (!result.success) {
       return res.status(500).json({
@@ -55,7 +59,7 @@ router.post('/send', authenticateToken, async (req, res) => {
  * POST /api/email/test
  * Send a verification test email
  */
-router.post('/test', authenticateToken, async (req, res) => {
+router.post('/test', async (req, res) => {
   try {
     const to = req.body.to || req.user.email || ENV.SUPERADMIN_EMAIL;
     const result = await sendTestEmail({ to });

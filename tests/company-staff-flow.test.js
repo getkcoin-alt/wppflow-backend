@@ -187,6 +187,31 @@ test("Super admin -> company owner -> staff -> private WhatsApp sessions", async
     await request(app).patch(`/api/sessions/${name}/owner`).set(ownerAuth).send({ userId: staff.sam.id });
   });
 
+  await t.test("the raw email API is for the platform admin only and cannot spoof the sender", async () => {
+    const sent = [];
+    const realFetch = globalThis.fetch;
+    ENV.RESEND_API_KEY = "re_probe";
+    globalThis.fetch = async (url, init) => {
+      sent.push(JSON.parse(init.body));
+      return new Response('{"id":"x"}', { status: 200 });
+    };
+    try {
+      const payload = { to: "victim@example.com", subject: "Hi", text: "x", from: "Support <support@scriza.in>" };
+      assert.equal((await request(app).get("/api/email/status")).status, 401);
+      for (const who of [ownerAuth, staff.sam.auth])
+        for (const path of ["/api/email/send", "/api/mail/send", "/api/email/test"])
+          assert.equal((await request(app).post(path).set(who).send(payload)).status, 403, path);
+      assert.equal(sent.length, 0, "nothing was sent for non-admins");
+      const ok = await request(app).post("/api/email/send").set(saAuth).send(payload);
+      assert.equal(ok.status, 200, JSON.stringify(ok.body));
+      assert.equal(sent.length, 1);
+      assert.equal(sent[0].from, ENV.RESEND_FROM_EMAIL, "caller-supplied sender is ignored");
+    } finally {
+      globalThis.fetch = realFetch;
+      ENV.RESEND_API_KEY = "";
+    }
+  });
+
   await t.test("staff cannot reach admin or manager-only APIs", async () => {
     assert.equal((await request(app).get("/api/admin/companies").set(ownerAuth)).status, 403);
     assert.equal((await request(app).post("/api/auth/users").set(staff.sam.auth).send({ name: "x", email: "x@y.test" })).status, 403);
