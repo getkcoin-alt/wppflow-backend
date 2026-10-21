@@ -120,4 +120,20 @@ test("Groups, WhatsApp Status and media thumbnails", async (t) => {
     assert.equal(msgs.status, 200);
     assert.equal((await request(app).post("/api/conversations/does-not-exist/read").set(auth).send({})).status, 404);
   });
+
+  await t.test("a WhatsApp phone that hangs cannot slow down marking a chat as read", async () => {
+    const c = await conv("15559990000@c.us");
+    await query("UPDATE conversations SET unread_count=5 WHERE id=$1", [c.id]);
+    let asked = 0;
+    provider.markRead = () => {
+      asked++;
+      return new Promise(() => {}); // never answers
+    };
+    const started = Date.now();
+    const read = await request(app).post(`/api/conversations/${c.id}/read`).set(auth).send({});
+    assert.equal(read.status, 200);
+    assert.equal(read.body.conversation.unreadCount, 0);
+    assert.ok(Date.now() - started < 2000, "responded without waiting for WhatsApp");
+    assert.equal(asked, 1, "WhatsApp was still told, in the background");
+  });
 });

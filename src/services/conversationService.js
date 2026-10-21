@@ -92,36 +92,13 @@ export async function markConversationRead({
   conversationId,
   io = null,
 }) {
-  const conv = await query(
-    "SELECT * FROM conversations WHERE id=$1 AND tenant_id=$2",
-    [conversationId, tenantId],
-  );
-  if (!conv.rows[0]) throw fail(404, "Conversation not found");
-  // Telling WhatsApp "seen" is best effort: if the phone is offline or WhatsApp refuses,
-  // the team inbox must still clear its own unread badge instead of showing an error.
-  try {
-    await defaultWhatsAppProvider.markRead(
-      tenantId,
-      conv.rows[0].session_name,
-      conv.rows[0].provider_chat_id,
-    );
-  } catch (error) {
-    console.warn(`Mark-read not sent to WhatsApp: ${error.message}`);
-  }
+  // The team inbox clears its own unread badge immediately, from our database.
   const { rows } = await query(
-    `
-    UPDATE conversations
-    SET unread_count = 0, updated_at = CURRENT_TIMESTAMP
-    WHERE id = $1 AND tenant_id = $2
-    RETURNING *
-  `,
+    `UPDATE conversations SET unread_count = 0, updated_at = CURRENT_TIMESTAMP
+     WHERE id = $1 AND tenant_id = $2 RETURNING *`,
     [conversationId, tenantId],
   );
-
-  if (rows.length === 0) {
-    throw fail(404, "Conversation not found");
-  }
-
+  if (!rows[0]) throw fail(404, "Conversation not found");
   const updated = formatConversation(rows[0]);
 
   if (io) {
@@ -134,6 +111,25 @@ export async function markConversationRead({
       { snapshot: true },
     );
   }
+
+  // Telling WhatsApp "seen" is best effort and happens in the background, so a slow,
+  // offline or refusing phone can never delay or break opening a chat.
+  let timer;
+  Promise.race([
+    defaultWhatsAppProvider.markRead(
+      tenantId,
+      rows[0].session_name,
+      rows[0].provider_chat_id,
+    ),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("timed out after 8s")), 8000);
+      timer.unref?.();
+    }),
+  ])
+    .catch((error) =>
+      console.warn(`Mark-read not sent to WhatsApp: ${error.message}`),
+    )
+    .finally(() => clearTimeout(timer));
 
   return updated;
 }
