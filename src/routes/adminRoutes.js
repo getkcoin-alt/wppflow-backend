@@ -26,7 +26,7 @@ const COMPANY_SQL = `SELECT t.*,u.name AS owner_name,u.email AS owner_email,u.mu
   FROM tenants t LEFT JOIN LATERAL (SELECT u.* FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=t.id AND m.role='owner' ORDER BY m.id LIMIT 1) u ON true`;
 // Shown to the platform admin only, so they can fix the mail setup.
 const mailHint = (error) =>
-  error ? ` Reason: ${error}. Check RESEND_API_KEY and that MAIL_FROM/RESEND_FROM_EMAIL uses a domain verified in Resend (the default onboarding@resend.dev can only email your own Resend account address).` : "";
+  error ? ` Reason: ${error}. Check RESEND_API_KEY and that MAIL_FROM/RESEND_FROM_EMAIL uses a domain verified in Resend (the default sender is noreply@scriwo.com, so scriwo.com must stay verified in Resend).` : "";
 const limitOf = (value) => {
   const n = Number(value ?? 5);
   if (!Number.isInteger(n) || n < 1 || n > 500)

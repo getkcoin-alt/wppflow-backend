@@ -36,8 +36,8 @@ export const ENV = {
   SUPERADMIN_PASSWORD: process.env.SUPERADMIN_PASSWORD || "",
   ALLOW_PUBLIC_SIGNUP: process.env.ALLOW_PUBLIC_SIGNUP !== "false",
   RESEND_API_KEY: process.env.RESEND_API_KEY || "",
-  RESEND_FROM_EMAIL: process.env.RESEND_FROM_EMAIL || "WppFlow <onboarding@resend.dev>",
-  MAIL_FROM: process.env.MAIL_FROM || process.env.RESEND_FROM_EMAIL || "WppFlow <onboarding@resend.dev>",
+  RESEND_FROM_EMAIL: process.env.RESEND_FROM_EMAIL || "WppFlow <noreply@scriwo.com>",
+  MAIL_FROM: process.env.MAIL_FROM || process.env.RESEND_FROM_EMAIL || "WppFlow <noreply@scriwo.com>",
 };
 
 if (ENV.NODE_ENV === "production") {
