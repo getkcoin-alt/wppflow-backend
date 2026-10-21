@@ -1,6 +1,7 @@
 import express from "express";
 import { checkDatabaseHealth } from "../db/index.js";
 import { defaultWhatsAppProvider } from "../services/whatsapp/WhatsAppProvider.js";
+import { getEmailServiceStatus } from "../services/emailService.js";
 
 const router = express.Router();
 
@@ -20,6 +21,7 @@ router.get("/health", async (req, res) => {
       connected: dbHealth.isConnected,
       type: "PostgreSQL",
     },
+    emailService: getEmailServiceStatus(),
     activeSessions: activeSessionsCount,
     uptime: Math.floor(process.uptime()),
     timestamp: new Date().toISOString(),

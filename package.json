@@ -25,6 +25,7 @@
     "jsonwebtoken": "^9.0.3",
     "pg": "^8.23.0",
     "qrcode": "^1.5.3",
+    "resend": "^6.34.1",
     "socket.io": "^4.7.5"
   },
   "engines": {

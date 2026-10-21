@@ -17,6 +17,7 @@ import { authRateLimiter } from "../middleware/rateLimiter.js";
 import { query, withTransaction } from "../db/index.js";
 import { ENV } from "../config/env.js";
 import { route, fail, text } from "../middleware/http.js";
+import { sendWelcomeEmail, sendInvitationEmail } from "../services/emailService.js";
 const router = express.Router();
 const cookieOptions = {
   httpOnly: true,
@@ -87,6 +88,11 @@ router.post(
     });
     res.status(201);
     await respondSession(res, user, { ...tenant, role });
+    sendWelcomeEmail({
+      to: email,
+      name: name.trim(),
+      workspaceName: (req.body.companyName || `${name}'s Workspace`).trim(),
+    }).catch((e) => console.warn(`Welcome email dispatch skipped: ${e.message}`));
   }),
 );
 router.post(
@@ -250,6 +256,13 @@ router.post(
       activationLink: `${ENV.APP_URL}/?invite=${token}`,
       expiresInHours: 24,
     });
+    sendInvitationEmail({
+      to: email,
+      name,
+      inviteUrl: `${ENV.APP_URL}/?invite=${token}`,
+      workspaceName: req.membership?.tenantName || "Workspace",
+      inviterName: req.user?.name || "Administrator",
+    }).catch((e) => console.warn(`Invitation email dispatch skipped: ${e.message}`));
   }),
 );
 router.post(

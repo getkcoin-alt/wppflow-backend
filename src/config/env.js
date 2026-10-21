@@ -32,6 +32,9 @@ export const ENV = {
       ? process.env.NODE_ENV !== "production"
       : process.env.AUTO_MIGRATE === "true",
   APP_URL: process.env.APP_URL || "http://localhost:5173",
+  SUPERADMIN_EMAIL: (process.env.SUPERADMIN_EMAIL || "karnveer@scriza.in").toLowerCase().trim(),
+  RESEND_API_KEY: process.env.RESEND_API_KEY || "",
+  RESEND_FROM_EMAIL: process.env.RESEND_FROM_EMAIL || "WppFlow <onboarding@resend.dev>",
 };
 
 if (ENV.NODE_ENV === "production") {

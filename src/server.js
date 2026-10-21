@@ -19,6 +19,7 @@ import automationRoutes from "./routes/automationRoutes.js";
 import healthRoutes from "./routes/healthRoutes.js";
 import workspaceRoutes from "./routes/workspaceRoutes.js";
 import mediaRoutes from "./routes/mediaRoutes.js";
+import emailRoutes from "./routes/emailRoutes.js";
 import { errorHandler } from "./middleware/http.js";
 import { restoreSessions, closeSessions } from "./services/sessionService.js";
 import { startDomainJobs, stopDomainJobs } from "./services/domainJobs.js";
@@ -174,6 +175,8 @@ app.use("/api/contacts", contactRoutes);
 app.use("/api/automations", automationRoutes);
 app.use("/api/workspace", workspaceRoutes);
 app.use("/api/attachments", mediaRoutes);
+app.use("/api/email", emailRoutes);
+app.use("/api/mail", emailRoutes);
 
 // Backward compatibility alias for /api/chats
 app.use("/api/chats", conversationRoutes);
@@ -202,7 +205,7 @@ export async function startServer() {
     if (ENV.AUTO_MIGRATE) await runMigrations();
     else {
       const { rows } = await query(
-        "SELECT 1 FROM schema_migrations WHERE version='003_runtime_features'",
+        "SELECT 1 FROM schema_migrations WHERE version='004_configure_superadmin'",
       );
       if (!rows.length)
         throw new Error(
