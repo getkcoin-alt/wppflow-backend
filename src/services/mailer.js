@@ -52,18 +52,12 @@ export async function sendMail({ to, subject, text, html }) {
     };
   }
 }
-export const sendOwnerCredentials = ({ to, name, company, password }) =>
+export const sendOwnerSetup = ({ to, name, company, link }) =>
   sendMail({
     to,
-    subject: `Your ${company} WppFlow workspace is ready`,
-    text: `Hello ${name},\n\nYour company workspace "${company}" has been created on WppFlow.\n\nLogin: ${ENV.APP_URL}\nEmail: ${to}\nTemporary password: ${password}\n\nYou will be asked to choose a new password on first login.`,
-    html: `<p>Hello ${esc(name)},</p><p>Your company workspace <b>${esc(company)}</b> has been created on WppFlow.</p><p>Login: <a href="${esc(ENV.APP_URL)}">${esc(ENV.APP_URL)}</a><br>Email: ${esc(to)}<br>Temporary password: <code>${esc(password)}</code></p><p>You will be asked to choose a new password on first login.</p>`,
-  });
-export const sendOwnerAccess = ({ to, name, company }) =>
-  sendMail({
-    to,
-    subject: `You now own ${company} on WppFlow`,
-    text: `Hello ${name},\n\nYou have been made the owner of "${company}" on WppFlow. Log in with your existing password: ${ENV.APP_URL}`,
+    subject: `Set up your ${company} workspace on WppFlow`,
+    text: `Hello ${name},\n\nYou are the owner of "${company}" on WppFlow. Click the link below to choose your password and sign in. The link works once and expires in 72 hours.\n\n${link}\n\nYour login email: ${to}`,
+    html: `<p>Hello ${esc(name)},</p><p>You are the owner of <b>${esc(company)}</b> on WppFlow.</p><p><a href="${esc(link)}" style="background:#10b981;color:#fff;padding:10px 20px;border-radius:8px;text-decoration:none;display:inline-block">Set your password</a></p><p>The link works once and expires in 72 hours. Your login email is ${esc(to)}.</p><p style="color:#64748b;font-size:12px">If the button does not work, copy this address into your browser: ${esc(link)}</p>`,
   });
 export const sendStaffInvite = ({ to, name, company, link }) =>
   sendMail({

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { ENV } from "../src/config/env.js";
 import {
-  sendOwnerCredentials,
+  sendOwnerSetup,
   sendStaffInvite,
   mailEnabled,
   setMailTransport,
@@ -24,19 +24,21 @@ test("Mail is delivered through the Resend HTTP API", async (t) => {
   ENV.RESEND_API_KEY = "";
   assert.equal(mailEnabled(), false);
   assert.deepEqual(
-    await sendOwnerCredentials({ to: "o@acme.test", name: "O", company: "Acme", password: "pw" }),
+    await sendOwnerSetup({ to: "o@acme.test", name: "O", company: "Acme", link: "https://app/?invite=abc" }),
     { sent: false, reason: "not_configured" },
   );
   assert.equal(calls.length, 0);
 
   ENV.RESEND_API_KEY = "re_test_key";
-  const ok = await sendOwnerCredentials({ to: "o@acme.test", name: "O<b>", company: "Acme", password: "Temp-Pass-1" });
+  const ok = await sendOwnerSetup({ to: "o@acme.test", name: "O<b>", company: "Acme", link: "https://app/?invite=tok123" });
   assert.equal(ok.sent, true);
   assert.equal(calls[0].url, "https://api.resend.com/emails");
   assert.equal(calls[0].init.headers.Authorization, "Bearer re_test_key");
   const body = JSON.parse(calls[0].init.body);
   assert.deepEqual(body.to, ["o@acme.test"]);
-  assert.match(body.text, /Temporary password: Temp-Pass-1/);
+  assert.match(body.text, /https:\/\/app\/\?invite=tok123/);
+  assert.ok(!/password:/i.test(body.text), "no password is ever emailed");
+  assert.match(body.html, /href="https:\/\/app\/\?invite=tok123"/);
   assert.ok(body.html.includes("O&lt;b&gt;") && !body.html.includes("O<b>"), "names are HTML-escaped");
 
   status = 403;

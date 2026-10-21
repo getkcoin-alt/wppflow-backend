@@ -5,6 +5,8 @@ import { app, io } from "../src/server.js";
 import { query } from "../src/db/index.js";
 import { ensureSuperAdmin } from "../src/services/adminService.js";
 import { ENV } from "../src/config/env.js";
+import { authRateLimiter } from "../src/middleware/rateLimiter.js";
+const freshLimit = () => ["::ffff:127.0.0.1", "127.0.0.1", "::1"].forEach((ip) => authRateLimiter.resetKey(ip));
 import { setMailTransport } from "../src/services/mailer.js";
 import { closeSessions } from "../src/services/sessionService.js";
 import { defaultWhatsAppProvider as provider } from "../src/services/whatsapp/WhatsAppProvider.js";
@@ -40,7 +42,7 @@ test("Super admin -> company owner -> staff -> private WhatsApp sessions", async
   assert.equal(sa.body.user.role, "superadmin");
   const saAuth = { Authorization: `Bearer ${sa.body.token}` };
 
-  let company, ownerPassword;
+  let company, setupToken;
   await t.test("only a super admin can add a company", async () => {
     const anon = await request(app).post("/api/admin/companies").send({});
     assert.equal(anon.status, 401);
@@ -55,30 +57,39 @@ test("Super admin -> company owner -> staff -> private WhatsApp sessions", async
       });
     assert.equal(res.status, 201, JSON.stringify(res.body));
     assert.equal(res.body.emailSent, true);
-    assert.ok(!JSON.stringify(res.body).includes("password"));
+    assert.ok(!JSON.stringify(res.body).includes("invite="), "the setup link is only ever emailed");
     company = res.body.company;
     assert.equal(company.sessionsLimit, 4);
     const mail = mails.at(-1);
     assert.equal(mail.to, "olivia@acme.test");
-    ownerPassword = /Temporary password: (\S+)/.exec(mail.text)[1];
-    assert.ok(ownerPassword.length >= 12);
+    assert.ok(!/password:/i.test(mail.text), "no password in the email");
+    setupToken = /invite=([a-f0-9]+)/.exec(mail.text)[1];
+    assert.match(mail.html, /Set your password/);
   });
 
   let owner, ownerAuth;
-  await t.test("owner logs in with emailed password and must change it", async () => {
-    const res = await login("olivia@acme.test", ownerPassword);
+  await t.test("owner sets their own password from the emailed link", async () => {
+    const placeholder = await login("olivia@acme.test", "anything-at-all-123");
+    assert.equal(placeholder.status, 401);
+    const info = await request(app).get("/api/auth/invite-info").query({ token: setupToken });
+    assert.equal(info.status, 200);
+    assert.deepEqual(
+      { email: info.body.email, company: info.body.company, setPassword: info.body.setPassword, existingAccount: info.body.existingAccount },
+      { email: "olivia@acme.test", company: "Acme Retail", setPassword: true, existingAccount: false },
+    );
+    assert.equal((await request(app).get("/api/auth/invite-info").query({ token: "nope" })).status, 400);
+    const weak = await request(app).post("/api/auth/accept-invite").send({ token: setupToken, password: "short" });
+    assert.equal(weak.status, 400);
+    const set = await request(app).post("/api/auth/accept-invite").send({ token: setupToken, password: "Owner-chosen-pass-1" });
+    assert.equal(set.status, 200, JSON.stringify(set.body));
+    const reuse = await request(app).post("/api/auth/accept-invite").send({ token: setupToken, password: "Another-pass-12345" });
+    assert.equal(reuse.status, 400, "the link works only once");
+    const res = await login("olivia@acme.test", "Owner-chosen-pass-1");
     assert.equal(res.status, 200);
-    assert.equal(res.body.user.mustChangePassword, true);
+    assert.equal(res.body.user.mustChangePassword, false);
     assert.equal(res.body.user.membershipRole, "owner");
-    const changed = await request(app)
-      .post("/api/auth/change-password")
-      .set({ Authorization: `Bearer ${res.body.token}` })
-      .send({ currentPassword: ownerPassword, newPassword: "Brand-new-pass-1" });
-    assert.equal(changed.status, 200);
-    assert.equal(changed.body.user.mustChangePassword, false);
-    owner = changed.body;
+    owner = res.body;
     ownerAuth = { Authorization: `Bearer ${owner.token}` };
-    assert.equal((await login("olivia@acme.test", ownerPassword)).status, 401);
   });
 
   const staff = {};
@@ -186,9 +197,30 @@ test("Super admin -> company owner -> staff -> private WhatsApp sessions", async
     assert.equal((await request(app).get("/api/workspace/capabilities").set(staff.sam.auth)).status, 200);
   });
 
-  await t.test("suspending a company blocks its users; resend only before activation", async () => {
+  freshLimit();
+  await t.test("an existing account made owner of another company can set a password from the link", async () => {
+    const res = await request(app).post("/api/admin/companies").set(saAuth).send({ companyName: "Second Co", ownerName: "Tina Staff", ownerEmail: "tina@acme.test", sessionsLimit: 2 });
+    assert.equal(res.status, 201);
+    const mail = mails.at(-1);
+    assert.equal(mail.to, "tina@acme.test");
+    assert.ok(!/existing password/i.test(mail.text));
+    const token = /invite=([a-f0-9]+)/.exec(mail.text)[1];
+    const set = await request(app).post("/api/auth/accept-invite").send({ token, password: "Tina-new-password-1" });
+    assert.equal(set.status, 200);
+    assert.equal((await login("tina@acme.test", "Staff-password-1")).status, 401);
+    assert.equal((await login("tina@acme.test", "Tina-new-password-1")).status, 200);
+  });
+
+  freshLimit();
+  await t.test("suspending a company blocks its users; owner can get a fresh setup link", async () => {
     const resend = await request(app).post(`/api/admin/companies/${company.id}/resend-credentials`).set(saAuth).send({});
-    assert.equal(resend.status, 409);
+    assert.equal(resend.status, 200);
+    assert.equal(mails.at(-1).to, "olivia@acme.test");
+    const newToken = /invite=([a-f0-9]+)/.exec(mails.at(-1).text)[1];
+    const forgotten = await request(app).post("/api/auth/accept-invite").send({ token: newToken, password: "Reset-by-link-pass-1" });
+    assert.equal(forgotten.status, 200, "owner can recover access with a fresh link");
+    assert.equal((await login("olivia@acme.test", "Reset-by-link-pass-1")).status, 200);
+    assert.equal((await login("olivia@acme.test", "Owner-chosen-pass-1")).status, 401);
     const sus = await request(app).patch(`/api/admin/companies/${company.id}`).set(saAuth).send({ status: "suspended" });
     assert.equal(sus.status, 200);
     assert.equal((await request(app).get("/api/sessions").set(staff.sam.auth)).status, 403);
@@ -203,7 +235,7 @@ test("Super admin -> company owner -> staff -> private WhatsApp sessions", async
     assert.equal(res.status, 201);
     assert.equal(res.body.emailSent, false);
     assert.match(res.body.message, /not verified/);
-    assert.match(res.body.message, /Resend credentials/);
+    assert.match(res.body.message, /Resend setup link/);
     setMailTransport({ sendMail: async (m) => mails.push(m) });
     const again = await request(app).post(`/api/admin/companies/${res.body.company.id}/resend-credentials`).set(saAuth).send({});
     assert.equal(again.status, 200);

@@ -2,7 +2,7 @@ import express from "express";
 import { authenticateToken, requireSuperAdmin } from "../middleware/auth.js";
 import { query } from "../db/index.js";
 import { route, fail, text } from "../middleware/http.js";
-import { createCompany, resendOwnerCredentials } from "../services/adminService.js";
+import { createCompany, resendOwnerSetupLink } from "../services/adminService.js";
 const router = express.Router();
 router.use(authenticateToken, requireSuperAdmin);
 const companyView = (r) => ({
@@ -61,21 +61,21 @@ router.post(
       emailSent: result.emailSent,
       emailError: result.emailError,
       message: result.emailSent
-        ? `Company created. ${result.newOwnerAccount ? "Login credentials were" : "Access notice was"} emailed to ${ownerEmail}.`
-        : `Company created but the email could not be delivered.${mailHint(result.emailError)} Then use "Resend credentials".`,
+        ? `Company created. A link to set the password was emailed to ${ownerEmail}.`
+        : `Company created but the email could not be delivered.${mailHint(result.emailError)} Then use "Resend setup link".`,
     });
   }),
 );
 router.post(
   "/companies/:id/resend-credentials",
   route(async (req, res) => {
-    const result = await resendOwnerCredentials(req.params.id);
+    const result = await resendOwnerSetupLink(req.params.id);
     res.json({
       status: "success",
       ...result,
       message: result.emailSent
-        ? `New temporary credentials emailed to ${result.ownerEmail}.`
-        : `Email delivery failed; credentials were reset but not delivered.${mailHint(result.emailError)}`,
+        ? `A new set-password link was emailed to ${result.ownerEmail}. Earlier links no longer work.`
+        : `Email delivery failed; no link was sent.${mailHint(result.emailError)}`,
     });
   }),
 );

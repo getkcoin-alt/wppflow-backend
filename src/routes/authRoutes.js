@@ -301,6 +301,32 @@ router.post(
     }).catch((e) => console.warn(`Invitation email dispatch skipped: ${e.message}`));
   }),
 );
+router.get(
+  "/invite-info",
+  authRateLimiter,
+  route(async (req, res) => {
+    const token = text(String(req.query.token || ""), "Invitation", 128);
+    const { rows } = await query(
+      `SELECT i.email,i.name,i.set_password,t.name AS company,
+        EXISTS(SELECT 1 FROM users u WHERE u.email=i.email) AS has_account
+       FROM invitations i JOIN tenants t ON t.id=i.tenant_id
+       WHERE i.token_hash=$1 AND i.accepted_at IS NULL AND i.expires_at>now()`,
+      [crypto.createHash("sha256").update(token).digest("hex")],
+    );
+    if (!rows[0]) throw fail(400, "This link is invalid, expired or already used");
+    const r = rows[0];
+    res.json({
+      status: "success",
+      email: r.email,
+      name: r.name,
+      company: r.company,
+      // true: the link itself lets them choose a password (company owners).
+      // false with an existing account: they must prove their current password.
+      setPassword: r.set_password || !r.has_account,
+      existingAccount: r.has_account && !r.set_password,
+    });
+  }),
+);
 router.post(
   "/accept-invite",
   authRateLimiter,
@@ -319,7 +345,18 @@ router.post(
         [inv.email],
       );
       let userId = existing.rows[0]?.id;
-      if (userId) {
+      if (userId && inv.set_password) {
+        // Owner link sent by the platform admin: proof of inbox control is enough.
+        if (existing.rows[0].status !== "active")
+          throw fail(403, "This account is not active");
+        if (password.length < 10)
+          throw fail(400, "Use at least 10 password characters");
+        await c.query(
+          "UPDATE users SET password_hash=$1,must_change_password=false,updated_at=now() WHERE id=$2",
+          [await hashPassword(password), userId],
+        );
+        await c.query("UPDATE refresh_tokens SET revoked=true WHERE user_id=$1", [userId]);
+      } else if (userId) {
         if (
           existing.rows[0].status !== "active" ||
           !(await comparePassword(password, existing.rows[0].password_hash))
@@ -347,7 +384,7 @@ router.post(
     });
     res.json({
       status: "success",
-      message: "Account activated. Log in to continue.",
+      message: "Password saved. Log in to continue.",
     });
   }),
 );
