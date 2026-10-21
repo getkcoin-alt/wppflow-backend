@@ -2,6 +2,7 @@ import crypto from "crypto";
 import { query, withTransaction } from "../db/index.js";
 import { defaultWhatsAppProvider } from "./whatsapp/WhatsAppProvider.js";
 import { fail } from "../middleware/http.js";
+import { emitForConversation, emitForSession } from "./realtime.js";
 
 export function formatConversation(c) {
   if (!c) return null;
@@ -48,6 +49,7 @@ export function formatConversation(c) {
 export async function getConversations({
   tenantId,
   sessionName = null,
+  ownerUserId = null,
   limit = 30,
   cursor = null,
   filter = "all",
@@ -63,6 +65,11 @@ export async function getConversations({
     WHERE tenant_id = $1
   `;
   const params = [tenantId];
+
+  if (ownerUserId) {
+    params.push(ownerUserId);
+    sql += ` AND session_name IN (SELECT session_name FROM whatsapp_sessions WHERE tenant_id=$1 AND owner_user_id=$${params.length})`;
+  }
 
   if (sessionName) {
     params.push(sessionName);
@@ -151,7 +158,7 @@ export async function markConversationRead({
   const updated = formatConversation(rows[0]);
 
   if (io) {
-    io.to(`tenant:${tenantId}`).emit("conversation:read", {
+    emitForConversation(io, tenantId, updated.id, "conversation:read", {
       conversationId: updated.id,
       chatId: updated.id,
     });
@@ -212,7 +219,7 @@ export async function syncConversations({ tenantId, sessionName, io = null }) {
   }
 
   if (io) {
-    io.to(`tenant:${tenantId}`).emit("conversations:synced", {
+    emitForSession(io, tenantId, sessionName, "conversations:synced", {
       sessionName,
       sessionKey: sessionName,
       count: upsertedCount,

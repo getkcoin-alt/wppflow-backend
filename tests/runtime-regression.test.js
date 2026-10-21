@@ -68,6 +68,10 @@ test("Real API, database and dispatcher regression suite", async (t) => {
     "INSERT INTO conversations(id,tenant_id,session_name,provider_chat_id,phone,contact_name) VALUES($1,$2,'primary','15550000001@c.us','15550000001','Customer')",
     [id, tenantId],
   );
+  await query(
+    "INSERT INTO whatsapp_sessions(id,tenant_id,session_name,owner_user_id) VALUES($1,$2,'primary',$3)",
+    [crypto.randomUUID(), tenantId, agentId],
+  );
   const api = (method, path, token = owner) =>
     request(app)
       [method](path)
@@ -606,15 +610,17 @@ test("Real API, database and dispatcher regression suite", async (t) => {
       );
       assert.equal(
         (await api("get", "/api/sessions/locked/qr", agent)).status,
-        403,
+        404,
       );
       assert.equal(
         (await api("get", "/api/sessions/locked/qr")).body.qrcode,
         "test-qr",
       );
       assert.equal(
-        (await api("get", "/api/sessions", agent)).body.sessions[0].qrcode,
-        null,
+        (await api("get", "/api/sessions", agent)).body.sessions.some(
+          (x) => x.sessionName === "locked",
+        ),
+        false,
       );
       assert.equal((await api("delete", "/api/sessions/locked")).status, 409);
       assert.equal(
@@ -639,7 +645,7 @@ test("Real API, database and dispatcher regression suite", async (t) => {
     "Campaigns require opt-in and stop dispatching queued work; consent checked again before send",
     async () => {
       await query(
-        "INSERT INTO whatsapp_sessions(id,tenant_id,session_name) VALUES($1,$2,'primary')",
+        "INSERT INTO whatsapp_sessions(id,tenant_id,session_name) VALUES($1,$2,'primary') ON CONFLICT DO NOTHING",
         [crypto.randomUUID(), tenantId],
       );
       for (const [phone, optIn] of [

@@ -3,9 +3,10 @@ import * as m001 from "./migrations/001_multitenant_core.js";
 import * as m002 from "./migrations/002_legacy_backfill.js";
 import * as m003 from "./migrations/003_runtime_features.js";
 import * as m004 from "./migrations/004_configure_superadmin.js";
+import * as m005 from "./migrations/005_company_staff_sessions.js";
 
 const MIGRATION_ADVISORY_LOCK_ID = 88992211;
-const MIGRATIONS = [m001, m002, m003, m004];
+const MIGRATIONS = [m001, m002, m003, m004, m005];
 
 export async function runMigrations() {
   const pool = getPool();

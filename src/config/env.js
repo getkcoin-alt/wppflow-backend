@@ -33,8 +33,11 @@ export const ENV = {
       : process.env.AUTO_MIGRATE === "true",
   APP_URL: process.env.APP_URL || "http://localhost:5173",
   SUPERADMIN_EMAIL: (process.env.SUPERADMIN_EMAIL || "karnveer@scriza.in").toLowerCase().trim(),
+  SUPERADMIN_PASSWORD: process.env.SUPERADMIN_PASSWORD || "",
+  ALLOW_PUBLIC_SIGNUP: process.env.ALLOW_PUBLIC_SIGNUP !== "false",
   RESEND_API_KEY: process.env.RESEND_API_KEY || "",
   RESEND_FROM_EMAIL: process.env.RESEND_FROM_EMAIL || "WppFlow <onboarding@resend.dev>",
+  MAIL_FROM: process.env.MAIL_FROM || process.env.RESEND_FROM_EMAIL || "WppFlow <onboarding@resend.dev>",
 };
 
 if (ENV.NODE_ENV === "production") {

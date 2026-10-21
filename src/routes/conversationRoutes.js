@@ -11,6 +11,12 @@ import { route, fail } from "../middleware/http.js";
 import { defaultWhatsAppProvider as provider } from "../services/whatsapp/WhatsAppProvider.js";
 import { formatConversation } from "../services/conversationService.js";
 import { handleIncomingMessage } from "../services/messageService.js";
+import {
+  isManager,
+  assertSessionAccess,
+  assertConversationAccess,
+} from "../services/access.js";
+import { emitForConversation } from "../services/realtime.js";
 import { sendMessageRateLimiter } from "../middleware/rateLimiter.js";
 import {
   getConversations,
@@ -39,11 +45,7 @@ router.post(
     );
     if (!contact.rows[0]) throw fail(404, "Contact not found");
     const name = sessionName || channel;
-    const session = await query(
-      "SELECT id FROM whatsapp_sessions WHERE tenant_id=$1 AND session_name=$2",
-      [req.tenantId, name],
-    );
-    if (!session.rowCount) throw fail(404, "Session not found");
+    await assertSessionAccess(req, name);
     const c = contact.rows[0],
       jid = c.phone.includes("@")
         ? c.phone
@@ -74,6 +76,7 @@ router.post(
 router.patch(
   "/:id",
   route(async (req, res) => {
+    await assertConversationAccess(req, req.params.id);
     if (req.body.assignedTo) {
       const member = await query(
         `SELECT u.name FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=$1 AND m.status='active' AND u.status='active' AND u.name=$2`,
@@ -94,19 +97,23 @@ router.patch(
     );
     if (!rows[0]) throw fail(404, "Conversation not found");
     const conversation = formatConversation(rows[0]);
-    req.app
-      .get("io")
-      ?.to(`tenant:${req.tenantId}`)
-      .emit("conversation:updated", {
+    emitForConversation(
+      req.app.get("io"),
+      req.tenantId,
+      req.params.id,
+      "conversation:updated",
+      {
         conversationId: req.params.id,
         ...conversation,
-      });
+      },
+    );
     res.json({ status: "success", conversation });
   }),
 );
 router.post(
   "/:id/notes",
-  route(async (req, res) =>
+  route(async (req, res) => {
+    await assertConversationAccess(req, req.params.id);
     res
       .status(201)
       .json({
@@ -120,8 +127,8 @@ router.post(
           type: "internal_note",
           io: req.app.get("io"),
         })),
-      }),
-  ),
+      });
+  }),
 );
 
 /**
@@ -138,6 +145,7 @@ router.get("/", async (req, res) => {
       filter,
       search,
       sessionName,
+      ownerUserId: isManager(req) ? null : req.user.id,
     });
     res.json({ status: "success", ...result });
   } catch (err) {
@@ -151,6 +159,7 @@ router.get("/", async (req, res) => {
  */
 router.get("/:id/messages", async (req, res) => {
   try {
+    await assertConversationAccess(req, req.params.id);
     const { limit, cursor } = req.query;
     if (req.query.sync === "true") {
       const { rows } = await query(
@@ -189,6 +198,7 @@ router.get("/:id/messages", async (req, res) => {
  */
 router.post("/:id/messages", sendMessageRateLimiter, async (req, res) => {
   try {
+    await assertConversationAccess(req, req.params.id);
     if (req.body.isNote || (req.body.type && req.body.type !== "text"))
       throw fail(400, "Use the dedicated notes or attachments endpoint");
     const { text, idempotencyKey } = req.body;
@@ -223,6 +233,7 @@ router.post("/:id/messages", sendMessageRateLimiter, async (req, res) => {
  */
 router.post("/:id/read", async (req, res) => {
   try {
+    await assertConversationAccess(req, req.params.id);
     const io = req.app.get("io");
     const result = await markConversationRead({
       tenantId: req.tenantId,
@@ -242,6 +253,9 @@ router.post("/:id/read", async (req, res) => {
 router.post("/sync", async (req, res) => {
   try {
     const { sessionName } = req.body;
+    if (!sessionName && !isManager(req))
+      throw fail(400, "sessionName is required");
+    if (sessionName) await assertSessionAccess(req, sessionName);
     const io = req.app.get("io");
     const result = await syncConversations({
       tenantId: req.tenantId,

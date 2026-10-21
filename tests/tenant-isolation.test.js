@@ -71,11 +71,11 @@ test("Tenant Isolation Suite", async (t) => {
         .set("Authorization", `Bearer ${tokenB}`)
         .set("x-tenant-id", tB.tenant.id);
 
-      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.status, 404);
       assert.strictEqual(
-        res.body.messages.length,
-        0,
-        "Tenant B should receive 0 messages for unowned conversation",
+        res.body.messages,
+        undefined,
+        "Tenant B must not receive messages for an unowned conversation",
       );
     },
   );

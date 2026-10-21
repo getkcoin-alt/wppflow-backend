@@ -10,7 +10,7 @@ export async function authenticateToken(req, res, next) {
     if (!token) throw fail(401, "Authentication required");
     if (token.startsWith("wpp_")) {
       const { rows } = await query(
-        "UPDATE api_keys SET last_used_at=now() WHERE key_hash=$1 AND revoked_at IS NULL RETURNING id,tenant_id,scopes",
+        "UPDATE api_keys SET last_used_at=now() WHERE key_hash=$1 AND revoked_at IS NULL AND tenant_id IN (SELECT id FROM tenants WHERE status='active') RETURNING id,tenant_id,scopes",
         [crypto.createHash("sha256").update(token).digest("hex")],
       );
       if (!rows[0]) throw fail(401, "Invalid API credential");
@@ -47,7 +47,7 @@ export async function requireTenantContext(req, res, next) {
     const requested = req.headers["x-tenant-id"] || req.tenantId;
     const { rows } = await query(
       `SELECT t.*,m.role,m.status AS membership_status FROM memberships m JOIN tenants t ON t.id=m.tenant_id
-      WHERE m.user_id=$1 AND m.status='active' ${requested ? "AND t.id=$2" : ""} ORDER BY m.created_at,t.id LIMIT 1`,
+      WHERE m.user_id=$1 AND m.status='active' AND t.status='active' ${requested ? "AND t.id=$2" : ""} ORDER BY m.created_at,t.id LIMIT 1`,
       requested ? [req.user.id, requested] : [req.user.id],
     );
     if (!rows[0]) throw fail(403, "No authorized workspace membership");
@@ -66,6 +66,10 @@ export const requireRole =
       return next();
     next(fail(403, "You do not have permission for this action"));
   };
+export const requireSuperAdmin = (req, res, next) =>
+  req.user?.isSuperAdmin && !req.apiKey
+    ? next()
+    : next(fail(403, "Platform administrator access required"));
 export const requireScope = (scope) => (req, res, next) => {
   if (!req.apiKey || req.apiKey.scopes.includes(scope)) return next();
   next(fail(403, "API credential lacks the required scope"));

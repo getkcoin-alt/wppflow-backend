@@ -1,3 +1,4 @@
+import { emitForConversation } from "../realtime.js";
 import { Queue, Worker } from "bullmq";
 import IORedis from "ioredis";
 import { ENV } from "../../config/env.js";
@@ -151,7 +152,7 @@ export async function dispatchMessage(payload, io) {
       "SELECT status,ack FROM messages WHERE id=$1 AND tenant_id=$2",
       [messageId, tenantId],
     );
-    io?.to(`tenant:${tenantId}`).emit("message:updated", {
+    emitForConversation(io, tenantId, conversationId, "message:updated", {
       conversationId,
       chatId: conversationId,
       messageId,
@@ -168,7 +169,7 @@ export async function dispatchMessage(payload, io) {
       "UPDATE outbox_events SET status=$1,last_error=$2,retry_at=now()+interval '10 seconds' WHERE aggregate_id=$3 AND tenant_id=$4",
       [offline ? "pending" : "uncertain", error.message, messageId, tenantId],
     );
-    io?.to(`tenant:${tenantId}`).emit("message:updated", {
+    emitForConversation(io, tenantId, conversationId, "message:updated", {
       conversationId,
       messageId,
       status: offline ? "sending" : "uncertain",

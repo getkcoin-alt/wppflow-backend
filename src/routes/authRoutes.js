@@ -7,6 +7,7 @@ import {
   generateAccessToken,
   generateRefreshToken,
   rotateRefreshToken,
+  revokeAllRefreshTokens,
 } from "../services/authService.js";
 import {
   authenticateToken,
@@ -18,6 +19,7 @@ import { query, withTransaction } from "../db/index.js";
 import { ENV } from "../config/env.js";
 import { route, fail, text } from "../middleware/http.js";
 import { sendWelcomeEmail, sendInvitationEmail } from "../services/emailService.js";
+import { sendStaffInvite } from "../services/mailer.js";
 const router = express.Router();
 const cookieOptions = {
   httpOnly: true,
@@ -32,13 +34,28 @@ const emailOf = (value) => {
     throw fail(400, "Invalid email");
   return email;
 };
-async function context(userId, tenantId) {
+const platformTenant = {
+  id: null,
+  name: "WppFlow Platform",
+  plan: "Platform",
+  sessions_limit: 0,
+  role: "superadmin",
+};
+async function context(user, tenantId) {
+  const userId = typeof user === "object" ? user.id : user;
+  const isSuper =
+    typeof user === "object"
+      ? Boolean(user.is_superadmin || user.isSuperAdmin)
+      : false;
   const { rows } = await query(
-    `SELECT t.*,m.role FROM memberships m JOIN tenants t ON t.id=m.tenant_id WHERE m.user_id=$1 AND m.status='active'
+    `SELECT t.*,m.role FROM memberships m JOIN tenants t ON t.id=m.tenant_id WHERE m.user_id=$1 AND m.status='active' AND t.status='active'
     ${tenantId ? "AND t.id=$2" : ""} ORDER BY m.created_at,t.id LIMIT 1`,
     tenantId ? [userId, tenantId] : [userId],
   );
-  if (!rows[0]) throw fail(403, "Workspace access is unavailable");
+  if (!rows[0]) {
+    if (isSuper && !tenantId) return platformTenant;
+    throw fail(403, "Workspace access is unavailable");
+  }
   return rows[0];
 }
 const userView = (user, tenant) => ({
@@ -53,6 +70,7 @@ const userView = (user, tenant) => ({
       ? "admin"
       : "user",
   membershipRole: tenant.role,
+  mustChangePassword: Boolean(user.must_change_password),
   company_name: tenant.name,
   plan: tenant.plan,
   sessions_limit: tenant.sessions_limit,
@@ -75,6 +93,11 @@ router.post(
   "/signup",
   authRateLimiter,
   route(async (req, res) => {
+    if (!ENV.ALLOW_PUBLIC_SIGNUP)
+      throw fail(
+        403,
+        "Self-service signup is disabled; ask your platform administrator to create your company",
+      );
     const name = text(req.body.name, "Name", 255),
       email = emailOf(req.body.email),
       password = text(req.body.password, "Password", 128);
@@ -109,11 +132,12 @@ router.post(
       !(await comparePassword(password, user.password_hash))
     )
       throw fail(401, "Invalid email or password");
-    const tenant = await context(user.id);
-    await query(
-      "INSERT INTO audit_events(tenant_id,actor_id,event_type) VALUES($1,$2,'auth.login')",
-      [tenant.id, user.id],
-    );
+    const tenant = await context(user);
+    if (tenant.id)
+      await query(
+        "INSERT INTO audit_events(tenant_id,actor_id,event_type) VALUES($1,$2,'auth.login')",
+        [tenant.id, user.id],
+      );
     await respondSession(res, user, tenant);
   }),
 );
@@ -133,7 +157,7 @@ router.post(
     const { rows } = await query("SELECT * FROM users WHERE id=$1", [
       result.userId,
     ]);
-    const tenant = await context(result.userId, result.tenantId);
+    const tenant = await context(rows[0], result.tenantId);
     res.cookie("refreshToken", result.refreshToken, cookieOptions);
     await respondSession(res, rows[0], tenant, false);
   }),
@@ -151,11 +175,13 @@ router.post(
 router.get(
   "/me",
   authenticateToken,
-  requireTenantContext,
   route(async (req, res) => {
     if (req.apiKey) throw fail(403, "Interactive login required");
-    const tenant = await context(req.user.id, req.tenantId);
-    res.json({ status: "success", user: userView(req.user, tenant), tenant });
+    const tenant = await context(req.user, req.tenantId);
+    const { rows } = await query("SELECT * FROM users WHERE id=$1", [
+      req.user.id,
+    ]);
+    res.json({ status: "success", user: userView(rows[0], tenant), tenant });
   }),
 );
 router.post(
@@ -164,7 +190,7 @@ router.post(
   route(async (req, res) => {
     if (req.apiKey) throw fail(403, "Interactive login required");
     const tenant = await context(
-      req.user.id,
+      req.user,
       text(req.body.tenantId, "Workspace", 64),
     );
     await respondSession(res, req.user, tenant);
@@ -250,16 +276,26 @@ router.post(
       "INSERT INTO audit_events(tenant_id,actor_id,event_type,metadata) VALUES($1,$2,'member.invited',$3)",
       [req.tenantId, req.user.id, JSON.stringify({ email, role })],
     );
+    const activationLink = `${ENV.APP_URL}/?invite=${token}`;
+    const mail = await sendStaffInvite({
+      to: email,
+      name,
+      company: req.tenant?.name || "Your company",
+      link: activationLink,
+    });
     res.status(201).json({
       status: "success",
-      message: "Invitation created. Share this single-use setup link.",
-      activationLink: `${ENV.APP_URL}/?invite=${token}`,
+      message: mail.sent
+        ? `Invitation emailed to ${email}.`
+        : "Invitation created. Email delivery is unavailable; share this single-use setup link.",
+      emailSent: mail.sent,
+      activationLink,
       expiresInHours: 24,
     });
     sendInvitationEmail({
       to: email,
       name,
-      inviteUrl: `${ENV.APP_URL}/?invite=${token}`,
+      inviteUrl: activationLink,
       workspaceName: req.membership?.tenantName || "Workspace",
       inviterName: req.user?.name || "Administrator",
     }).catch((e) => console.warn(`Invitation email dispatch skipped: ${e.message}`));
@@ -313,6 +349,35 @@ router.post(
       status: "success",
       message: "Account activated. Log in to continue.",
     });
+  }),
+);
+router.post(
+  "/change-password",
+  authRateLimiter,
+  authenticateToken,
+  route(async (req, res) => {
+    if (req.apiKey) throw fail(403, "Interactive login required");
+    const current = text(req.body.currentPassword, "Current password", 128),
+      next = text(req.body.newPassword, "New password", 128);
+    if (next.length < 10) throw fail(400, "Use at least 10 password characters");
+    if (next === current)
+      throw fail(400, "Choose a password different from the current one");
+    const { rows } = await query("SELECT * FROM users WHERE id=$1", [
+      req.user.id,
+    ]);
+    if (!(await comparePassword(current, rows[0].password_hash)))
+      throw fail(401, "Current password is incorrect");
+    await query(
+      "UPDATE users SET password_hash=$1,must_change_password=false,updated_at=now() WHERE id=$2",
+      [await hashPassword(next), req.user.id],
+    );
+    await revokeAllRefreshTokens(req.user.id);
+    const tenant = await context(rows[0], req.tenantId);
+    await respondSession(
+      res,
+      { ...rows[0], must_change_password: false },
+      tenant,
+    );
   }),
 );
 router.patch(

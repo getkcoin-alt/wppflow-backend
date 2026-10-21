@@ -1,3 +1,4 @@
+import { emitForConversation } from "./realtime.js";
 import crypto from "node:crypto";
 import { query, withTransaction } from "../db/index.js";
 import { fail, text as validateText } from "../middleware/http.js";
@@ -31,7 +32,7 @@ export function formatMessage(m) {
     : null;
 }
 const emitMessage = (io, tenant, event, message) =>
-  io?.to(`tenant:${tenant}`).emit(event, {
+  emitForConversation(io, tenant, message.conversation_id, event, {
     conversationId: message.conversation_id,
     chatId: message.conversation_id,
     message: formatMessage(message),
@@ -305,10 +306,16 @@ export async function handleIncomingMessage({
       }
     }
     emitMessage(io, tenantId, "message:received", inserted);
-    io?.to(`tenant:${tenantId}`).emit("conversation:updated", {
-      conversationId: inserted.conversation_id,
-      chatId: inserted.conversation_id,
-    });
+    emitForConversation(
+      io,
+      tenantId,
+      inserted.conversation_id,
+      "conversation:updated",
+      {
+        conversationId: inserted.conversation_id,
+        chatId: inserted.conversation_id,
+      },
+    );
   }
   if (msg.fromMe && Number.isInteger(msg.ack) && msg.ack !== 0)
     await handleAckEvent({
@@ -358,7 +365,7 @@ export async function handleAckEvent({ tenantId, ackData, io = null }) {
     return row;
   });
   if (m)
-    io?.to(`tenant:${tenantId}`).emit("message:ack", {
+    emitForConversation(io, tenantId, m.conversation_id, "message:ack", {
       conversationId: m.conversation_id,
       messageId: m.id,
       providerMessageId,

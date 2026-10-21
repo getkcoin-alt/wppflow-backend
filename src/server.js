@@ -11,6 +11,8 @@ import { runMigrations } from "./db/migrate.js";
 import { initMessageQueue, closeQueue } from "./services/queue/messageQueue.js";
 
 import authRoutes from "./routes/authRoutes.js";
+import adminRoutes from "./routes/adminRoutes.js";
+import { ensureSuperAdmin } from "./services/adminService.js";
 import conversationRoutes from "./routes/conversationRoutes.js";
 import sessionRoutes from "./routes/sessionRoutes.js";
 import campaignRoutes from "./routes/campaignRoutes.js";
@@ -91,7 +93,7 @@ io.use(async (socket, next) => {
     }
 
     const { rows: memberships } = await query(
-      "SELECT tenant_id, role FROM memberships WHERE user_id = $1 AND status='active'",
+      "SELECT m.tenant_id, m.role FROM memberships m JOIN tenants t ON t.id=m.tenant_id WHERE m.user_id = $1 AND m.status='active' AND t.status='active'",
       [userId],
     );
 
@@ -149,7 +151,7 @@ io.on("connection", (socket) => {
   const membershipTimer = setInterval(async () => {
     try {
       const { rows } = await query(
-        "SELECT 1 FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.user_id=$1 AND m.tenant_id=$2 AND m.status='active' AND u.status='active'",
+        "SELECT 1 FROM memberships m JOIN users u ON u.id=m.user_id JOIN tenants t ON t.id=m.tenant_id WHERE m.user_id=$1 AND m.tenant_id=$2 AND m.status='active' AND u.status='active' AND t.status='active'",
         [userId, tenantId],
       );
       if (!rows.length) socket.disconnect(true);
@@ -168,6 +170,7 @@ io.on("connection", (socket) => {
 // 3. API Routes
 app.use(healthRoutes);
 app.use("/api/auth", authRoutes);
+app.use("/api/admin", adminRoutes);
 app.use("/api/conversations", conversationRoutes);
 app.use("/api/sessions", sessionRoutes);
 app.use("/api/campaigns", campaignRoutes);
@@ -205,7 +208,7 @@ export async function startServer() {
     if (ENV.AUTO_MIGRATE) await runMigrations();
     else {
       const { rows } = await query(
-        "SELECT 1 FROM schema_migrations WHERE version='004_configure_superadmin'",
+        "SELECT 1 FROM schema_migrations WHERE version='005_company_staff_sessions'",
       );
       if (!rows.length)
         throw new Error(
@@ -216,6 +219,8 @@ export async function startServer() {
     console.error("❌ Migration failed:", err.message);
     throw err;
   }
+
+  await ensureSuperAdmin();
 
   // 3. Initialize Message Queue
   await initMessageQueue(io);

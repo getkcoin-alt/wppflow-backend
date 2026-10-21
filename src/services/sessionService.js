@@ -3,6 +3,7 @@ import { query, withTransaction } from "../db/index.js";
 import { defaultWhatsAppProvider as provider } from "./whatsapp/WhatsAppProvider.js";
 import { handleIncomingMessage, handleAckEvent } from "./messageService.js";
 import { fail } from "../middleware/http.js";
+import { emitForSession } from "./realtime.js";
 const workerId = crypto.randomUUID(),
   owned = new Map();
 let recoveryTimer;
@@ -17,7 +18,12 @@ export function validateSession(value) {
     );
   return value;
 }
-export async function startTenantSession(tenantId, sessionName, io) {
+export async function startTenantSession(
+  tenantId,
+  sessionName,
+  io,
+  ownerUserId = null,
+) {
   validateSession(sessionName);
   const key = `${tenantId}:${sessionName}`;
   if (owned.has(key)) {
@@ -31,10 +37,12 @@ export async function startTenantSession(tenantId, sessionName, io) {
   }
   await withTransaction(async (c) => {
     const tenant = await c.query(
-      "SELECT sessions_limit FROM tenants WHERE id=$1 FOR UPDATE",
+      "SELECT sessions_limit,status FROM tenants WHERE id=$1 FOR UPDATE",
       [tenantId],
     );
     if (!tenant.rows[0]) throw fail(404, "Workspace not found");
+    if (tenant.rows[0].status !== "active")
+      throw fail(403, "This company workspace is suspended");
     const exists = await c.query(
       "SELECT id,worker_id,lease_until FROM whatsapp_sessions WHERE tenant_id=$1 AND session_name=$2 FOR UPDATE",
       [tenantId, sessionName],
@@ -55,9 +63,9 @@ export async function startTenantSession(tenantId, sessionName, io) {
     )
       throw fail(403, "Session quota reached");
     await c.query(
-      `INSERT INTO whatsapp_sessions(id,tenant_id,session_name,status,worker_id,lease_until) VALUES($1,$2,$3,'STARTING',$4,now()+interval '45 seconds')
-      ON CONFLICT(tenant_id,session_name) DO UPDATE SET status='STARTING',restore_on_start=true,worker_id=$4,lease_until=now()+interval '45 seconds',updated_at=now()`,
-      [crypto.randomUUID(), tenantId, sessionName, workerId],
+      `INSERT INTO whatsapp_sessions(id,tenant_id,session_name,status,worker_id,lease_until,owner_user_id) VALUES($1,$2,$3,'STARTING',$4,now()+interval '45 seconds',$5)
+      ON CONFLICT(tenant_id,session_name) DO UPDATE SET status='STARTING',restore_on_start=true,worker_id=$4,lease_until=now()+interval '45 seconds',owner_user_id=COALESCE(whatsapp_sessions.owner_user_id,$5),updated_at=now()`,
+      [crypto.randomUUID(), tenantId, sessionName, workerId, ownerUserId],
     );
   });
   if (owned.has(key)) return;
@@ -84,7 +92,7 @@ export async function startTenantSession(tenantId, sessionName, io) {
           "UPDATE whatsapp_sessions SET qr_code=$1 WHERE tenant_id=$2 AND session_name=$3 AND worker_id=$4",
           [qrcode, tenantId, sessionName, workerId],
         );
-        io?.to(`tenant:${tenantId}:managers`).emit("session:qr", {
+        emitForSession(io, tenantId, sessionName, "session:qr", {
           session: sessionName,
           sessionName,
           qrcode,
@@ -104,7 +112,7 @@ export async function startTenantSession(tenantId, sessionName, io) {
             [tenantId, sessionName, status !== "EXPIRED", workerId],
           );
         }
-        io?.to(`tenant:${tenantId}`).emit("session:status", {
+        emitForSession(io, tenantId, sessionName, "session:status", {
           session: sessionName,
           sessionName,
           status,
@@ -128,7 +136,7 @@ export async function startTenantSession(tenantId, sessionName, io) {
         "UPDATE whatsapp_sessions SET status='FAILED',worker_id=NULL,lease_until=NULL,qr_code=NULL WHERE tenant_id=$1 AND session_name=$2 AND worker_id=$3",
         [tenantId, sessionName, workerId],
       );
-      io?.to(`tenant:${tenantId}`).emit("session:status", {
+      emitForSession(io, tenantId, sessionName, "session:status", {
         session: sessionName,
         status: "FAILED",
       });
@@ -163,7 +171,7 @@ export async function closeTenantSession(
     "UPDATE whatsapp_sessions SET status='DISCONNECTED',restore_on_start=$3,worker_id=NULL,lease_until=NULL,qr_code=NULL,updated_at=now() WHERE tenant_id=$1 AND session_name=$2 AND (worker_id=$4 OR worker_id IS NULL)",
     [tenantId, sessionName, restore, workerId],
   );
-  io?.to(`tenant:${tenantId}`).emit("session:status", {
+  emitForSession(io, tenantId, sessionName, "session:status", {
     session: sessionName,
     status: "DISCONNECTED",
   });
