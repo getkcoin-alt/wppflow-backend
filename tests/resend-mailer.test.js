@@ -41,5 +41,7 @@ test("Mail is delivered through the Resend HTTP API", async (t) => {
 
   status = 403;
   const failed = await sendStaffInvite({ to: "s@acme.test", name: "S", company: "Acme", link: "https://x/?invite=1" });
-  assert.deepEqual(failed, { sent: false, reason: "delivery_failed" });
+  assert.equal(failed.sent, false);
+  assert.equal(failed.reason, "delivery_failed");
+  assert.match(failed.detail, /Resend 403: domain not verified/);
 });

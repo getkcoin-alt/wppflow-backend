@@ -27,8 +27,16 @@ async function deliver(message) {
     }),
     signal: AbortSignal.timeout(15000),
   });
-  if (!res.ok)
-    throw new Error(`Resend responded ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  if (!res.ok) {
+    const raw = (await res.text()).slice(0, 500);
+    let detail = raw;
+    try {
+      detail = JSON.parse(raw).message || raw;
+    } catch {}
+    const error = new Error(`Resend responded ${res.status}: ${raw}`);
+    error.detail = `Resend ${res.status}: ${detail}`;
+    throw error;
+  }
 }
 export async function sendMail({ to, subject, text, html }) {
   if (!mailEnabled()) return { sent: false, reason: "not_configured" };
@@ -37,7 +45,11 @@ export async function sendMail({ to, subject, text, html }) {
     return { sent: true };
   } catch (error) {
     console.error("Email delivery failed:", error.message);
-    return { sent: false, reason: "delivery_failed" };
+    return {
+      sent: false,
+      reason: "delivery_failed",
+      detail: error.detail || error.message,
+    };
   }
 }
 export const sendOwnerCredentials = ({ to, name, company, password }) =>

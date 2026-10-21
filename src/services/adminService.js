@@ -72,7 +72,12 @@ export async function createCompany({
   const mail = password
     ? await sendOwnerCredentials({ to: ownerEmail, name: ownerName, company: companyName, password })
     : await sendOwnerAccess({ to: ownerEmail, name: ownerName, company: companyName });
-  return { tenant, emailSent: mail.sent, newOwnerAccount: Boolean(password) };
+  return {
+    tenant,
+    emailSent: mail.sent,
+    emailError: mail.detail,
+    newOwnerAccount: Boolean(password),
+  };
 }
 
 export async function resendOwnerCredentials(tenantId) {
@@ -97,5 +102,9 @@ export async function resendOwnerCredentials(tenantId) {
     company: owner.company,
     password,
   });
-  return { emailSent: mail.sent, ownerEmail: owner.email };
+  return {
+    emailSent: mail.sent,
+    emailError: mail.detail,
+    ownerEmail: owner.email,
+  };
 }

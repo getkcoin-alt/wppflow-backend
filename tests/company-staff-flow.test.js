@@ -197,6 +197,20 @@ test("Super admin -> company owner -> staff -> private WhatsApp sessions", async
     assert.equal((await request(app).get("/api/sessions").set(staff.sam.auth)).status, 200);
   });
 
+  await t.test("a rejected email still creates the company and tells the admin why", async () => {
+    setMailTransport({ sendMail: async () => { throw new Error("The scriza.in domain is not verified"); } });
+    const res = await request(app).post("/api/admin/companies").set(saAuth).send({ companyName: "Bounce Ltd", ownerName: "B", ownerEmail: "b@bounce.test" });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.emailSent, false);
+    assert.match(res.body.message, /not verified/);
+    assert.match(res.body.message, /Resend credentials/);
+    setMailTransport({ sendMail: async (m) => mails.push(m) });
+    const again = await request(app).post(`/api/admin/companies/${res.body.company.id}/resend-credentials`).set(saAuth).send({});
+    assert.equal(again.status, 200);
+    assert.equal(again.body.emailSent, true);
+    assert.equal(mails.at(-1).to, "b@bounce.test");
+  });
+
   await t.test("creation is refused (nothing created) when email is not configured", async () => {
     setMailTransport(undefined);
     const savedKey = ENV.RESEND_API_KEY;

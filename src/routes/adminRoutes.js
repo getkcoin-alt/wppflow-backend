@@ -24,6 +24,9 @@ const COMPANY_SQL = `SELECT t.*,u.name AS owner_name,u.email AS owner_email,u.mu
   (SELECT count(*)::int FROM whatsapp_sessions WHERE tenant_id=t.id) AS sessions_count,
   (SELECT count(*)::int FROM whatsapp_sessions WHERE tenant_id=t.id AND status='CONNECTED') AS connected_sessions
   FROM tenants t LEFT JOIN LATERAL (SELECT u.* FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=t.id AND m.role='owner' ORDER BY m.id LIMIT 1) u ON true`;
+// Shown to the platform admin only, so they can fix the mail setup.
+const mailHint = (error) =>
+  error ? ` Reason: ${error}. Check RESEND_API_KEY and that MAIL_FROM/RESEND_FROM_EMAIL uses a domain verified in Resend (the default onboarding@resend.dev can only email your own Resend account address).` : "";
 const limitOf = (value) => {
   const n = Number(value ?? 5);
   if (!Number.isInteger(n) || n < 1 || n > 500)
@@ -56,9 +59,10 @@ router.post(
       status: "success",
       company: companyView(rows[0]),
       emailSent: result.emailSent,
+      emailError: result.emailError,
       message: result.emailSent
         ? `Company created. ${result.newOwnerAccount ? "Login credentials were" : "Access notice was"} emailed to ${ownerEmail}.`
-        : "Company created but the email could not be delivered. Use resend-credentials once email delivery works.",
+        : `Company created but the email could not be delivered.${mailHint(result.emailError)} Then use "Resend credentials".`,
     });
   }),
 );
@@ -71,7 +75,7 @@ router.post(
       ...result,
       message: result.emailSent
         ? `New temporary credentials emailed to ${result.ownerEmail}.`
-        : "Email delivery failed; credentials were reset but not delivered. Try again.",
+        : `Email delivery failed; credentials were reset but not delivered.${mailHint(result.emailError)}`,
     });
   }),
 );
