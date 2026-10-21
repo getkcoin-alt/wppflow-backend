@@ -49,6 +49,7 @@ async function sessionView(tenantId, name, showQr = false) {
     hasQr: Boolean(qrcode),
     qrcode,
     lastActive: s.updated_at,
+    error: s.last_error || null,
     ownerUserId: s.owner_user_id,
     ownerName: s.owner_name || null,
     ownerEmail: s.owner_email || null,

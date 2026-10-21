@@ -5,9 +5,10 @@ import * as m003 from "./migrations/003_runtime_features.js";
 import * as m004 from "./migrations/004_configure_superadmin.js";
 import * as m005 from "./migrations/005_company_staff_sessions.js";
 import * as m006 from "./migrations/006_owner_setup_links.js";
+import * as m007 from "./migrations/007_session_last_error.js";
 
 const MIGRATION_ADVISORY_LOCK_ID = 88992211;
-const MIGRATIONS = [m001, m002, m003, m004, m005, m006];
+const MIGRATIONS = [m001, m002, m003, m004, m005, m006, m007];
 
 export async function runMigrations() {
   const pool = getPool();

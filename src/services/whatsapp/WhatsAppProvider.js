@@ -108,6 +108,7 @@ export class WhatsAppProvider {
           notify(callbacks.onStatus, SESSION_STATUS.DISCONNECTED);
         }
       },
+      autoClose: ENV.QR_TIMEOUT_MS,
       headless: true,
       useChrome: true,
       devtools: false,
