@@ -3,10 +3,11 @@ import { formatConversation } from "./conversationFormat.js";
 
 // Session-scoped events reach the workspace managers and the staff member who
 // owns that WhatsApp session, never the rest of the tenant.
-function emitScoped(io, tenantId, ownerUserId, event, payload) {
+function emitScoped(io, tenantId, userIds, event, payload) {
   if (!io) return;
   let target = io.to(`tenant:${tenantId}:managers`);
-  if (ownerUserId) target = target.to(`user:${ownerUserId}`);
+  for (const id of new Set([].concat(userIds).filter(Boolean)))
+    target = target.to(`user:${id}`);
   target.emit(event, payload);
 }
 
@@ -57,7 +58,7 @@ export function emitForConversation(
       emitScoped(
         io,
         tenantId,
-        row?.owner_user_id,
+        [row?.owner_user_id, row?.assigned_user_id],
         event,
         snapshot && row ? { ...payload, conversation: formatConversation(row) } : payload,
       );

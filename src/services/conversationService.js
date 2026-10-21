@@ -20,7 +20,7 @@ export async function getConversations({
   let sql = `
     SELECT id, tenant_id, session_name, provider_chat_id, contact_id, phone,
            contact_name, avatar, unread_count, is_group, group_members_count,
-           assigned_to, is_closed, is_pinned, is_archived, last_active_epoch,
+           assigned_to, assigned_user_id, is_closed, is_pinned, is_archived, last_active_epoch,
            last_message, tags, created_at, updated_at
     FROM conversations
     WHERE tenant_id = $1 AND provider_chat_id !~ '@(broadcast|newsletter)$'
@@ -29,7 +29,7 @@ export async function getConversations({
 
   if (ownerUserId) {
     params.push(ownerUserId);
-    sql += ` AND session_name IN (SELECT session_name FROM whatsapp_sessions WHERE tenant_id=$1 AND owner_user_id=$${params.length})`;
+    sql += ` AND (session_name IN (SELECT session_name FROM whatsapp_sessions WHERE tenant_id=$1 AND owner_user_id=$${params.length}) OR assigned_user_id=$${params.length})`;
   }
 
   if (sessionName) {
@@ -217,7 +217,7 @@ export async function getConversationChanges({
   let scope = "";
   if (ownerUserId) {
     params.push(ownerUserId);
-    scope = ` AND session_name IN (SELECT session_name FROM whatsapp_sessions WHERE tenant_id=$1 AND owner_user_id=$3)`;
+    scope = ` AND (session_name IN (SELECT session_name FROM whatsapp_sessions WHERE tenant_id=$1 AND owner_user_id=$3) OR assigned_user_id=$3)`;
   }
   // Taken before the read: a change committed while we query is seen again next time.
   const serverTime = (await query("SELECT now() AS t")).rows[0].t.toISOString();
@@ -225,7 +225,7 @@ export async function getConversationChanges({
   const { rows } = await query(
     `SELECT id, tenant_id, session_name, provider_chat_id, contact_id, phone,
             contact_name, avatar, unread_count, is_group, group_members_count,
-            assigned_to, is_closed, is_pinned, is_archived, last_active_epoch,
+            assigned_to, assigned_user_id, is_closed, is_pinned, is_archived, last_active_epoch,
             last_message, tags, created_at, updated_at
      FROM conversations WHERE tenant_id=$1 AND updated_at > $2 AND provider_chat_id !~ '@(broadcast|newsletter)$'${scope}
      ORDER BY updated_at ASC LIMIT $${params.length}`,

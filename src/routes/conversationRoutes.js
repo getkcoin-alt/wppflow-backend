@@ -17,6 +17,7 @@ import {
   assertConversationAccess,
 } from "../services/access.js";
 import { emitForConversation } from "../services/realtime.js";
+import { notifyAssignment, notifyInternalNote } from "../services/notificationService.js";
 import { sendMessageRateLimiter } from "../middleware/rateLimiter.js";
 import {
   getConversations,
@@ -77,26 +78,53 @@ router.post(
 router.patch(
   "/:id",
   route(async (req, res) => {
-    await assertConversationAccess(req, req.params.id);
-    if (req.body.assignedTo) {
-      const member = await query(
-        `SELECT u.name FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=$1 AND m.status='active' AND u.status='active' AND u.name=$2`,
-        [req.tenantId, req.body.assignedTo],
-      );
-      if (!member.rowCount)
-        throw fail(400, "Assignee is not an active teammate");
+    const before = await assertConversationAccess(req, req.params.id);
+    // Assignment names a teammate (by id when the client knows it, else by name). Assigning
+    // a chat also lets that teammate open it, so it must be a real, active member.
+    let assignedName = null,
+      assignedUserId = null,
+      assignmentChanges = false;
+    if (req.body.assignedUserId !== undefined || req.body.assignedTo !== undefined) {
+      assignmentChanges = true;
+      const wantsId = req.body.assignedUserId;
+      const wantsName = req.body.assignedTo;
+      if (wantsId || wantsName) {
+        const member = await query(
+          `SELECT u.id,u.name FROM memberships m JOIN users u ON u.id=m.user_id
+           WHERE m.tenant_id=$1 AND m.status='active' AND u.status='active'
+             AND ${wantsId ? "u.id=$2" : "u.name=$2"} ORDER BY u.id LIMIT 1`,
+          [req.tenantId, wantsId ? Number(wantsId) || 0 : wantsName],
+        );
+        if (!member.rowCount)
+          throw fail(400, "Assignee is not an active teammate");
+        assignedName = member.rows[0].name;
+        assignedUserId = member.rows[0].id;
+      } else {
+        assignedName = ""; // unassign
+      }
     }
     const { rows } = await query(
-      `UPDATE conversations SET assigned_to=COALESCE($1,assigned_to),is_closed=COALESCE($2,is_closed),tags=COALESCE($3,tags),updated_at=now() WHERE id=$4 AND tenant_id=$5 RETURNING *`,
+      `UPDATE conversations SET assigned_to=COALESCE($1,assigned_to),assigned_user_id=CASE WHEN $6::boolean THEN $7::int ELSE assigned_user_id END,
+       is_closed=COALESCE($2,is_closed),tags=COALESCE($3,tags),updated_at=now() WHERE id=$4 AND tenant_id=$5 RETURNING *`,
       [
-        req.body.assignedTo ?? null,
+        assignedName,
         req.body.isClosed ?? null,
         req.body.tags ? JSON.stringify(req.body.tags) : null,
         req.params.id,
         req.tenantId,
+        assignmentChanges,
+        assignedUserId,
       ],
     );
     if (!rows[0]) throw fail(404, "Conversation not found");
+    if (assignmentChanges && assignedUserId && assignedUserId !== before.assigned_user_id)
+      notifyAssignment({
+        io: req.app.get("io"),
+        tenantId: req.tenantId,
+        conversationId: req.params.id,
+        actor: req.user,
+        assigneeId: assignedUserId,
+      }).catch((e) => console.error("Assignment notification failed:", e.message));
     const conversation = formatConversation(rows[0]);
     emitForConversation(
       req.app.get("io"),
@@ -116,20 +144,25 @@ router.post(
   "/:id/notes",
   route(async (req, res) => {
     await assertConversationAccess(req, req.params.id);
-    res
-      .status(201)
-      .json({
-        status: "success",
-        ...(await sendTextMessage({
-          tenantId: req.tenantId,
-          conversationId: req.params.id,
-          text: req.body.text,
-          idempotencyKey: req.body.idempotencyKey,
-          agentName: req.user.name,
-          type: "internal_note",
-          io: req.app.get("io"),
-        })),
-      });
+    const result = await sendTextMessage({
+      tenantId: req.tenantId,
+      conversationId: req.params.id,
+      text: req.body.text,
+      idempotencyKey: req.body.idempotencyKey,
+      agentName: req.user.name,
+      type: "internal_note",
+      io: req.app.get("io"),
+    });
+    if (!result.duplicate)
+      notifyInternalNote({
+        io: req.app.get("io"),
+        tenantId: req.tenantId,
+        conversationId: req.params.id,
+        messageId: result.message?.id,
+        actor: req.user,
+        text: req.body.text,
+      }).catch((e) => console.error("Note notification failed:", e.message));
+    res.status(201).json({ status: "success", ...result });
   }),
 );
 
@@ -169,6 +202,23 @@ router.get(
       limit: req.query.limit,
     });
     res.json({ status: "success", ...result });
+  }),
+);
+
+/**
+ * GET /api/conversations/:id  (open a chat from a notification or link)
+ */
+router.get(
+  "/:id",
+  route(async (req, res) => {
+    await assertConversationAccess(req, req.params.id);
+    const { rows } = await query(
+      "SELECT * FROM conversations WHERE id=$1 AND tenant_id=$2",
+      [req.params.id, req.tenantId],
+    );
+    if (!rows[0]) throw fail(404, "Conversation not found");
+    const conversation = formatConversation(rows[0]);
+    res.json({ status: "success", conversation, chat: conversation });
   }),
 );
 

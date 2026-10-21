@@ -8,9 +8,10 @@ import * as m006 from "./migrations/006_owner_setup_links.js";
 import * as m007 from "./migrations/007_session_last_error.js";
 import * as m008 from "./migrations/008_conversation_updated_index.js";
 import * as m009 from "./migrations/009_clean_group_and_status_data.js";
+import * as m010 from "./migrations/010_notifications_and_assignee.js";
 
 const MIGRATION_ADVISORY_LOCK_ID = 88992211;
-const MIGRATIONS = [m001, m002, m003, m004, m005, m006, m007, m008, m009];
+const MIGRATIONS = [m001, m002, m003, m004, m005, m006, m007, m008, m009, m010];
 
 export async function runMigrations() {
   const pool = getPool();

@@ -20,6 +20,7 @@ export function formatConversation(c) {
     isGroup: Boolean(c.is_group),
     groupMembersCount: Number(c.group_members_count || 0),
     assignedTo: c.assigned_to || "",
+    assignedUserId: c.assigned_user_id ?? null,
     isClosed: Boolean(c.is_closed),
     isPinned: Boolean(c.is_pinned),
     isArchived: Boolean(c.is_archived),

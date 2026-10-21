@@ -20,12 +20,19 @@ export async function assertSessionAccess(req, sessionName) {
 
 export async function assertConversationAccess(req, conversationId) {
   const { rows } = await query(
-    `SELECT c.session_name,s.owner_user_id FROM conversations c
+    `SELECT c.session_name,c.assigned_user_id,s.owner_user_id FROM conversations c
      LEFT JOIN whatsapp_sessions s ON s.tenant_id=c.tenant_id AND s.session_name=c.session_name
      WHERE c.id=$1 AND c.tenant_id=$2`,
     [conversationId, req.tenantId],
   );
-  if (!rows[0] || (!isManager(req) && rows[0].owner_user_id !== req.user.id))
+  // Managers see everything; staff see their own WhatsApp session's chats plus any chat
+  // a teammate has assigned to them.
+  if (
+    !rows[0] ||
+    (!isManager(req) &&
+      rows[0].owner_user_id !== req.user.id &&
+      rows[0].assigned_user_id !== req.user.id)
+  )
     throw fail(404, "Conversation not found");
   return rows[0];
 }

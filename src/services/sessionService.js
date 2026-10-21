@@ -5,6 +5,7 @@ import { handleIncomingMessage, handleAckEvent } from "./messageService.js";
 import { fail } from "../middleware/http.js";
 import { emitForSession } from "./realtime.js";
 import { scheduleSync } from "./syncService.js";
+import { notifySessionLost } from "./notificationService.js";
 const workerId = crypto.randomUUID(),
   owned = new Map();
 let recoveryTimer;
@@ -109,8 +110,20 @@ export async function startTenantSession(
           [status, phone, tenantId, sessionName, workerId],
         );
         if (["DISCONNECTED", "EXPIRED"].includes(status)) {
+          // A drop we did not ask for (phone offline, logged out, browser died): not a
+          // deliberate "disconnect" click, which removes the session from `owned` first.
+          const unexpected = owned.has(key);
           clearInterval(owned.get(key));
           owned.delete(key);
+          if (unexpected)
+            query(
+              "SELECT 1 FROM whatsapp_sessions WHERE tenant_id=$1 AND session_name=$2 AND phone IS NOT NULL",
+              [tenantId, sessionName],
+            )
+              .then(({ rowCount }) =>
+                rowCount && notifySessionLost({ io, tenantId, sessionName, status }),
+              )
+              .catch((e) => console.error("Session notification failed:", e.message));
           await query(
             "UPDATE whatsapp_sessions SET worker_id=NULL,lease_until=NULL,restore_on_start=($3 AND phone IS NOT NULL) WHERE tenant_id=$1 AND session_name=$2 AND worker_id=$4",
             [tenantId, sessionName, status !== "EXPIRED", workerId],

@@ -21,6 +21,7 @@ import automationRoutes from "./routes/automationRoutes.js";
 import healthRoutes from "./routes/healthRoutes.js";
 import workspaceRoutes from "./routes/workspaceRoutes.js";
 import mediaRoutes from "./routes/mediaRoutes.js";
+import notificationRoutes from "./routes/notificationRoutes.js";
 import emailRoutes from "./routes/emailRoutes.js";
 import { errorHandler } from "./middleware/http.js";
 import { restoreSessions, closeSessions } from "./services/sessionService.js";
@@ -179,6 +180,7 @@ app.use("/api/contacts", contactRoutes);
 app.use("/api/automations", automationRoutes);
 app.use("/api/workspace", workspaceRoutes);
 app.use("/api/attachments", mediaRoutes);
+app.use("/api/notifications", notificationRoutes);
 app.use("/api/email", emailRoutes);
 app.use("/api/mail", emailRoutes);
 
@@ -209,7 +211,7 @@ export async function startServer() {
     if (ENV.AUTO_MIGRATE) await runMigrations();
     else {
       const { rows } = await query(
-        "SELECT 1 FROM schema_migrations WHERE version='009_clean_group_and_status_data'",
+        "SELECT 1 FROM schema_migrations WHERE version='010_notifications_and_assignee'",
       );
       if (!rows.length)
         throw new Error(
