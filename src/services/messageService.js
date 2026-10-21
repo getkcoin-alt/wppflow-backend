@@ -32,11 +32,18 @@ export function formatMessage(m) {
     : null;
 }
 const emitMessage = (io, tenant, event, message) =>
-  emitForConversation(io, tenant, message.conversation_id, event, {
-    conversationId: message.conversation_id,
-    chatId: message.conversation_id,
-    message: formatMessage(message),
-  });
+  emitForConversation(
+    io,
+    tenant,
+    message.conversation_id,
+    event,
+    {
+      conversationId: message.conversation_id,
+      chatId: message.conversation_id,
+      message: formatMessage(message),
+    },
+    { snapshot: true },
+  );
 export async function sendTextMessage({
   tenantId,
   conversationId,
@@ -315,6 +322,7 @@ export async function handleIncomingMessage({
         conversationId: inserted.conversation_id,
         chatId: inserted.conversation_id,
       },
+      { snapshot: true },
     );
   }
   if (msg.fromMe && Number.isInteger(msg.ack) && msg.ack !== 0)

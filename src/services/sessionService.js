@@ -4,6 +4,7 @@ import { defaultWhatsAppProvider as provider } from "./whatsapp/WhatsAppProvider
 import { handleIncomingMessage, handleAckEvent } from "./messageService.js";
 import { fail } from "../middleware/http.js";
 import { emitForSession } from "./realtime.js";
+import { scheduleSync } from "./syncService.js";
 const workerId = crypto.randomUUID(),
   owned = new Map();
 let recoveryTimer;
@@ -121,6 +122,9 @@ export async function startTenantSession(
           status,
           phone,
         });
+        // A freshly paired (or re-connected) phone fills the inbox without any button.
+        if (status === "CONNECTED" && phone)
+          scheduleSync({ tenantId, sessionName, io });
       },
       onMessage: (msg) =>
         handleIncomingMessage({ tenantId, sessionName, msg, io }).catch((e) =>

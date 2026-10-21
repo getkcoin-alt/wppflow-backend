@@ -28,26 +28,36 @@ export const contactView = (c) => ({
 });
 export async function syncContacts(tenantId, sessionName) {
   const contacts = await provider.getContacts(tenantId, sessionName);
-  let count = 0;
+  const byPhone = new Map();
   for (const c of contacts) {
     const phone = String(c.id?._serialized || c.id || "").replace(
       /@c\.us$/,
       "",
     );
     if (!phone || phone.endsWith("@g.us")) continue;
+    byPhone.set(phone, {
+      phone,
+      name: c.name || c.pushname || c.verifiedName || phone,
+      avatar: c.profilePicThumbObj?.eurl || "",
+    });
+  }
+  // One statement per 500 contacts instead of one per contact.
+  const all = [...byPhone.values()];
+  for (let i = 0; i < all.length; i += 500) {
+    const chunk = all.slice(i, i + 500);
     await query(
-      `INSERT INTO contacts(id,tenant_id,name,phone,avatar) VALUES($1,$2,$3,$4,$5) ON CONFLICT(tenant_id,phone) DO UPDATE SET name=EXCLUDED.name,avatar=COALESCE(NULLIF(EXCLUDED.avatar,''),contacts.avatar),updated_at=now()`,
+      `INSERT INTO contacts(id,tenant_id,name,phone,avatar)
+       SELECT gen_random_uuid()::text,$1,x.name,x.phone,x.avatar FROM unnest($2::text[],$3::text[],$4::text[]) AS x(name,phone,avatar)
+       ON CONFLICT(tenant_id,phone) DO UPDATE SET name=EXCLUDED.name,avatar=COALESCE(NULLIF(EXCLUDED.avatar,''),contacts.avatar),updated_at=now()`,
       [
-        crypto.randomUUID(),
         tenantId,
-        c.name || c.pushname || c.verifiedName || phone,
-        phone,
-        c.profilePicThumbObj?.eurl || "",
+        chunk.map((c) => c.name),
+        chunk.map((c) => c.phone),
+        chunk.map((c) => c.avatar),
       ],
     );
-    count++;
   }
-  return count;
+  return all.length;
 }
 router.get(
   "/",

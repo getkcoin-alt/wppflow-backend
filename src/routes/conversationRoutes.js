@@ -20,6 +20,7 @@ import { emitForConversation } from "../services/realtime.js";
 import { sendMessageRateLimiter } from "../middleware/rateLimiter.js";
 import {
   getConversations,
+  getConversationChanges,
   markConversationRead,
   syncConversations,
 } from "../services/conversationService.js";
@@ -106,6 +107,7 @@ router.patch(
         conversationId: req.params.id,
         ...conversation,
       },
+      { snapshot: true },
     );
     res.json({ status: "success", conversation });
   }),
@@ -152,6 +154,23 @@ router.get("/", async (req, res) => {
     res.status(err.status||500).json({ status: "error", message: err.status?err.message:"This operation is currently unavailable" });
   }
 });
+
+/**
+ * GET /api/conversations/changes?since=ISO
+ * Conversations changed after a point in time (reconnect / wake-up catch-up)
+ */
+router.get(
+  "/changes",
+  route(async (req, res) => {
+    const result = await getConversationChanges({
+      tenantId: req.tenantId,
+      ownerUserId: isManager(req) ? null : req.user.id,
+      since: req.query.since,
+      limit: req.query.limit,
+    });
+    res.json({ status: "success", ...result });
+  }),
+);
 
 /**
  * GET /api/conversations/:id/messages

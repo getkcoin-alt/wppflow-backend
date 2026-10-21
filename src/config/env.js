@@ -33,6 +33,8 @@ export const ENV = {
       : process.env.AUTO_MIGRATE === "true",
   // How long an unscanned QR code stays valid before the pairing browser closes.
   QR_TIMEOUT_MS: parseInt(process.env.QR_TIMEOUT_MS || "180000", 10),
+  // 0 disables the periodic check that repairs messages missed by the live feed.
+  SYNC_RECONCILE_MS: parseInt(process.env.SYNC_RECONCILE_MS || "300000", 10),
   APP_URL: process.env.APP_URL || "http://localhost:5173",
   SUPERADMIN_EMAIL: (process.env.SUPERADMIN_EMAIL || "karnveer@scriza.in").toLowerCase().trim(),
   SUPERADMIN_PASSWORD: process.env.SUPERADMIN_PASSWORD || "",

@@ -16,7 +16,7 @@ import { syncConversations } from "../services/conversationService.js";
 import { syncContacts } from "./contactRoutes.js";
 import { route, fail } from "../middleware/http.js";
 import { isManager, assertSessionAccess } from "../services/access.js";
-import { emitForSession } from "../services/realtime.js";
+import { emitForSession, forgetSessionOwner } from "../services/realtime.js";
 const router = express.Router();
 router.use(authenticateToken, requireTenantContext, requireScope("sessions"));
 const manager = isManager;
@@ -172,6 +172,7 @@ router.patch(
       "UPDATE whatsapp_sessions SET owner_user_id=$3,updated_at=now() WHERE tenant_id=$1 AND session_name=$2",
       [req.tenantId, req.params.sessionName, userId],
     );
+    forgetSessionOwner(req.tenantId, req.params.sessionName);
     res.json({
       status: "success",
       ...(await sessionView(req.tenantId, req.params.sessionName, true)),

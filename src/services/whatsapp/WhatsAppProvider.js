@@ -372,10 +372,10 @@ export class WhatsAppProvider {
     }
     return { providerMessageId: id, ack: result.ack ?? 0 };
   }
-  async getHistory(tenantId, sessionName, chatId) {
+  async getHistory(tenantId, sessionName, chatId, count = 100) {
     const client = this.getSession(tenantId, sessionName)?.client;
     if (!client) throw new Error("WhatsApp session is offline");
-    return (await client.getMessages(chatId, { count: 100 })).map((raw) =>
+    return (await client.getMessages(chatId, { count })).map((raw) =>
       this.normalizeMessage(raw),
     );
   }

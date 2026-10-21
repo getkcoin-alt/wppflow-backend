@@ -25,6 +25,7 @@ import emailRoutes from "./routes/emailRoutes.js";
 import { errorHandler } from "./middleware/http.js";
 import { restoreSessions, closeSessions } from "./services/sessionService.js";
 import { startDomainJobs, stopDomainJobs } from "./services/domainJobs.js";
+import { startReconcileLoop, stopReconcileLoop } from "./services/syncService.js";
 
 const app = express();
 const server = http.createServer(app);
@@ -208,7 +209,7 @@ export async function startServer() {
     if (ENV.AUTO_MIGRATE) await runMigrations();
     else {
       const { rows } = await query(
-        "SELECT 1 FROM schema_migrations WHERE version='007_session_last_error'",
+        "SELECT 1 FROM schema_migrations WHERE version='008_conversation_updated_index'",
       );
       if (!rows.length)
         throw new Error(
@@ -226,6 +227,7 @@ export async function startServer() {
   await initMessageQueue(io);
   await restoreSessions(io);
   startDomainJobs(io);
+  startReconcileLoop(io);
 
   // 4. Listen on configured port
   return new Promise((resolve) => {
@@ -237,6 +239,7 @@ export async function startServer() {
 }
 
 export async function stopServer() {
+  stopReconcileLoop();
   await stopDomainJobs();
   await closeQueue();
   await closeSessions(io);
