@@ -37,7 +37,7 @@ main() {
   cd "${APP_DIR}" || { echo "❌ ${APP_DIR} not found"; return 1; }
   local previous target
   previous="$(git rev-parse HEAD)"
-  git fetch origin main || { echo "❌ git fetch failed"; return 1; }
+  timeout 120 git fetch origin main || { echo "❌ git fetch failed"; return 1; }
   target="$(git rev-parse origin/main)"
   if [ "${previous}" = "${target}" ] && [ -z "${FORCE_DEPLOY:-}" ]; then
     echo "✅ Already running ${target:0:7}; nothing to deploy (set FORCE_DEPLOY=1 to redeploy)."
@@ -48,12 +48,12 @@ main() {
   git reset --hard "${target}" || return 1
 
   echo "📦 Installing production dependencies (exact lockfile versions)..."
-  npm ci --omit=dev --ignore-scripts || { echo "❌ npm ci failed"; rollback "${previous}" "dependency install failed"; return 1; }
+  timeout 900 npm ci --omit=dev --ignore-scripts || { echo "❌ npm ci failed (or exceeded 15 minutes)"; rollback "${previous}" "dependency install failed"; return 1; }
 
   backup_database "${target}"
 
   echo "🗄️ Applying database migrations..."
-  node src/db/migrate.js up || { echo "❌ Migration failed (it ran in a transaction and was rolled back)"; rollback "${previous}" "migration failed"; return 1; }
+  timeout 600 node src/db/migrate.js up || { echo "❌ Migration failed (it ran in a transaction and was rolled back)"; rollback "${previous}" "migration failed"; return 1; }
 
   echo "🔄 Restarting ${PM2_NAME}..."
   pm2 restart "${PM2_NAME}" --update-env || { rollback "${previous}" "pm2 restart failed"; return 1; }
@@ -92,7 +92,7 @@ backup_database() {
   fi
   mkdir -p "${BACKUP_DIR}" && chmod 700 "${BACKUP_DIR}"
   local file="${BACKUP_DIR}/pre-${1:0:7}-$(date -u +%Y%m%dT%H%M%SZ).sql.gz"
-  if pg_dump "${url}" | gzip >"${file}"; then
+  if timeout 600 pg_dump "${url}" | gzip >"${file}"; then
     chmod 600 "${file}"
     echo "💾 Database backup: ${file}"
     ls -1t "${BACKUP_DIR}"/pre-*.sql.gz 2>/dev/null | tail -n +$((BACKUP_KEEP + 1)) | xargs -r rm -f
@@ -108,7 +108,7 @@ rollback() {
   local previous="$1" reason="$2"
   echo "↩️ Rolling back to ${previous:0:7} (${reason})"
   git reset --hard "${previous}" || return 1
-  npm ci --omit=dev --ignore-scripts || true
+  timeout 900 npm ci --omit=dev --ignore-scripts || true
   pm2 restart "${PM2_NAME}" --update-env || true
   if wait_healthy; then
     echo "✅ Rollback complete: ${previous:0:7} is serving again."

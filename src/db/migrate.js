@@ -13,17 +13,33 @@ import * as m010 from "./migrations/010_notifications_and_assignee.js";
 const MIGRATION_ADVISORY_LOCK_ID = 88992211;
 const MIGRATIONS = [m001, m002, m003, m004, m005, m006, m007, m008, m009, m010];
 
-export async function runMigrations() {
+// A migration that cannot get its table lock (someone holds a long transaction) must fail
+// fast. Waiting forever would hang the deploy and queue every other query on that table
+// behind it, freezing the app. A failed migration rolls back and the deploy restores the
+// previous release.
+export async function runMigrations({
+  migrations = MIGRATIONS,
+  lockTimeoutMs = 20000,
+} = {}) {
   const pool = getPool();
   if (!pool) {
     throw new Error("Database pool unavailable for migrations.");
   }
 
-  // Acquire PostgreSQL advisory lock to prevent concurrent migrations
   const client = await pool.connect();
-  await client.query("SELECT pg_advisory_lock($1)", [
-    MIGRATION_ADVISORY_LOCK_ID,
-  ]);
+  try {
+    // Prevent concurrent migration runs, but never wait for another run indefinitely.
+    await client.query(`SET lock_timeout = '${Math.max(1000, lockTimeoutMs * 3)}ms'`);
+    await client.query("SELECT pg_advisory_lock($1)", [
+      MIGRATION_ADVISORY_LOCK_ID,
+    ]);
+    await client.query("RESET lock_timeout");
+  } catch (error) {
+    client.release();
+    throw new Error(
+      `Another migration run is holding the lock (${error.message}). Check for a stuck deploy.`,
+    );
+  }
   try {
     // Ensure migrations tracking table exists
     await client.query(`
@@ -38,11 +54,13 @@ export async function runMigrations() {
     );
     const appliedSet = new Set(appliedRows.map((r) => r.version));
 
-    for (const migration of MIGRATIONS) {
+    for (const migration of migrations) {
       if (!appliedSet.has(migration.version)) {
         console.log(`⏳ Applying migration: ${migration.version}...`);
         await client.query("BEGIN");
         try {
+          await client.query(`SET LOCAL lock_timeout = '${lockTimeoutMs}ms'`);
+          await client.query("SET LOCAL statement_timeout = '300s'");
           await migration.up(client);
           await client.query(
             "INSERT INTO schema_migrations (version) VALUES ($1)",
@@ -57,7 +75,7 @@ export async function runMigrations() {
       }
     }
 
-    return { status: "success", totalApplied: MIGRATIONS.length };
+    return { status: "success", totalApplied: migrations.length };
   } finally {
     await client.query("SELECT pg_advisory_unlock($1)", [
       MIGRATION_ADVISORY_LOCK_ID,

@@ -35,7 +35,16 @@ test('Email Service & Superadmin Configuration Suite', async (t) => {
   await t.test('Apply migrations including 004_configure_superadmin', async () => {
     // Reset migration 004 record to ensure it executes and cleanses users
     await query(`DELETE FROM schema_migrations WHERE version = '004_configure_superadmin'`);
-    const result = await runMigrations();
+    // Migration progress goes to stdout, which can interleave with the test runner's own
+    // result stream and make it fail with "Unable to deserialize cloned data".
+    const log = console.log;
+    console.log = () => {};
+    let result;
+    try {
+      result = await runMigrations();
+    } finally {
+      console.log = log;
+    }
     assert.strictEqual(result.status, 'success');
 
     const { rows: migrations } = await query('SELECT version FROM schema_migrations');

@@ -48,6 +48,10 @@ publishes the frontend as soon as `main` moves.
 
 ## If a push to `main` does not deploy
 
+`/health` reports what is actually running: `build.commit` (compare with `main`), `build.startedAt` and
+`schemaVersion` (the latest applied migration). If `build.commit` is old, the deploy did not happen; if the commit is
+new but `schemaVersion` is old, a migration failed and the release was rolled back.
+
 Symptoms: `/health` still shows a long `uptime` (it resets on every restart) and new routes return "Endpoint not found".
 
 1. `tail -n 60 /var/log/wppflow-backend-deploy.log` — a run that started leaves a banner and ends with `Finished with exit code …`.
@@ -58,3 +62,7 @@ Symptoms: `/health` still shows a long `uptime` (it resets on every restart) and
    (add `FORCE_DEPLOY=1` in front to redeploy the commit that is already checked out).
 4. `Another deployment is still running` in the log means a previous run holds `/var/lock/wppflow-backend-deploy.lock`;
    check `ps aux | grep deploy.sh` before removing anything.
+
+Every step of `deploy.sh` has a time limit (git fetch 2 min, install 15 min, backup 10 min, migrations 10 min) and
+migrations give up after 20 seconds if a table is locked, so a stuck step ends in an automatic rollback and releases the
+deploy lock instead of blocking later deploys.
