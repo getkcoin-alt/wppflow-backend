@@ -209,7 +209,7 @@ export async function startServer() {
     if (ENV.AUTO_MIGRATE) await runMigrations();
     else {
       const { rows } = await query(
-        "SELECT 1 FROM schema_migrations WHERE version='008_conversation_updated_index'",
+        "SELECT 1 FROM schema_migrations WHERE version='009_clean_group_and_status_data'",
       );
       if (!rows.length)
         throw new Error(

@@ -23,7 +23,7 @@ export async function getConversations({
            assigned_to, is_closed, is_pinned, is_archived, last_active_epoch,
            last_message, tags, created_at, updated_at
     FROM conversations
-    WHERE tenant_id = $1
+    WHERE tenant_id = $1 AND provider_chat_id !~ '@(broadcast|newsletter)$'
   `;
   const params = [tenantId];
 
@@ -96,12 +96,18 @@ export async function markConversationRead({
     "SELECT * FROM conversations WHERE id=$1 AND tenant_id=$2",
     [conversationId, tenantId],
   );
-  if (!conv.rows[0]) throw new Error("Conversation not found");
-  await defaultWhatsAppProvider.markRead(
-    tenantId,
-    conv.rows[0].session_name,
-    conv.rows[0].provider_chat_id,
-  );
+  if (!conv.rows[0]) throw fail(404, "Conversation not found");
+  // Telling WhatsApp "seen" is best effort: if the phone is offline or WhatsApp refuses,
+  // the team inbox must still clear its own unread badge instead of showing an error.
+  try {
+    await defaultWhatsAppProvider.markRead(
+      tenantId,
+      conv.rows[0].session_name,
+      conv.rows[0].provider_chat_id,
+    );
+  } catch (error) {
+    console.warn(`Mark-read not sent to WhatsApp: ${error.message}`);
+  }
   const { rows } = await query(
     `
     UPDATE conversations
@@ -113,7 +119,7 @@ export async function markConversationRead({
   );
 
   if (rows.length === 0) {
-    throw new Error("Conversation not found in current workspace.");
+    throw fail(404, "Conversation not found");
   }
 
   const updated = formatConversation(rows[0]);
@@ -157,6 +163,7 @@ export async function syncConversations({
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,(SELECT id FROM contacts WHERE tenant_id=$2::varchar AND phone=$13 LIMIT 1))
       ON CONFLICT (tenant_id, session_name, provider_chat_id) DO UPDATE SET
         contact_name = EXCLUDED.contact_name,
+        is_group = EXCLUDED.is_group,
         contact_id = COALESCE(conversations.contact_id,EXCLUDED.contact_id),
         avatar = COALESCE(NULLIF(EXCLUDED.avatar, ''), conversations.avatar),
         unread_count = EXCLUDED.unread_count,
@@ -224,7 +231,7 @@ export async function getConversationChanges({
             contact_name, avatar, unread_count, is_group, group_members_count,
             assigned_to, is_closed, is_pinned, is_archived, last_active_epoch,
             last_message, tags, created_at, updated_at
-     FROM conversations WHERE tenant_id=$1 AND updated_at > $2${scope}
+     FROM conversations WHERE tenant_id=$1 AND updated_at > $2 AND provider_chat_id !~ '@(broadcast|newsletter)$'${scope}
      ORDER BY updated_at ASC LIMIT $${params.length}`,
     params,
   );

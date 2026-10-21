@@ -186,18 +186,23 @@ router.get("/:id/messages", async (req, res) => {
         [req.params.id, req.tenantId],
       );
       if (!rows[0]) throw fail(404, "Conversation not found");
-      const messages = await provider.getHistory(
-        req.tenantId,
-        rows[0].session_name,
-        rows[0].provider_chat_id,
-      );
-      for (const msg of messages)
-        await handleIncomingMessage({
-          tenantId: req.tenantId,
-          sessionName: rows[0].session_name,
-          msg,
-          history: true,
-        });
+      // Older history is a bonus: if WhatsApp is unreachable, show what we already have.
+      try {
+        const messages = await provider.getHistory(
+          req.tenantId,
+          rows[0].session_name,
+          rows[0].provider_chat_id,
+        );
+        for (const msg of messages)
+          await handleIncomingMessage({
+            tenantId: req.tenantId,
+            sessionName: rows[0].session_name,
+            msg,
+            history: true,
+          });
+      } catch (error) {
+        console.warn(`History sync skipped: ${error.message}`);
+      }
     }
     const result = await getConversationMessages({
       tenantId: req.tenantId,

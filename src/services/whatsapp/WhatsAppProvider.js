@@ -4,6 +4,30 @@ import fs from "fs";
 import { ENV } from "../../config/env.js";
 import { ACK_STATUS, SESSION_STATUS } from "../../config/constants.js";
 
+const MEDIA_TYPES = new Set([
+  "image",
+  "video",
+  "audio",
+  "ptt",
+  "document",
+  "sticker",
+  "gif",
+]);
+const MEDIA_LABELS = {
+  image: "📷 Photo",
+  video: "🎥 Video",
+  gif: "🎥 GIF",
+  audio: "🎵 Voice message",
+  ptt: "🎵 Voice message",
+  document: "📄 Document",
+  sticker: "Sticker",
+  location: "📍 Location",
+  vcard: "👤 Contact",
+  multi_vcard: "👤 Contacts",
+  call_log: "📞 Voice call",
+  revoked: "🚫 This message was deleted",
+};
+
 export class WhatsAppProvider {
   constructor() {
     this.sessions = new Map(); // key: `${tenantId}:${sessionName}`, value: SessionRecord
@@ -228,7 +252,11 @@ export class WhatsAppProvider {
       const chats = await session.client.page.evaluate(async () => {
         if (!window.WPP?.chat?.list) return [];
         const rawList = await window.WPP.chat.list();
-        return rawList.map((c) => {
+        return rawList.filter((c) => {
+          // WhatsApp Status updates and channels are not conversations.
+          const id = String(c.id?._serialized || c.id || "");
+          return !/@(broadcast|newsletter)$/.test(id);
+        }).map((c) => {
           const rawId = String(c.id?._serialized || c.id || "");
           const isGroup = Boolean(c.isGroup || rawId.includes("@g.us"));
           const contact = c.contact || {};
@@ -305,13 +333,35 @@ export class WhatsAppProvider {
             raw.chat?.id?._serialized ||
             "",
         );
-    const text = raw.body || raw.caption || "";
+    const rawType = String(raw.type || "chat");
     const type =
-      raw.type === "chat"
+      rawType === "chat"
         ? "text"
-        : raw.type === "ptt"
+        : rawType === "ptt"
           ? "audio"
-          : raw.type || "text";
+          : rawType;
+    // For photos, videos, stickers, documents... WhatsApp puts a base64 thumbnail in `body`.
+    // That is never message text: show the caption, or a label like WhatsApp's own preview.
+    const looksLikeBlob = (s) =>
+      typeof s === "string" && s.length > 120 && !/\s/.test(s);
+    const label = MEDIA_LABELS[rawType] || "";
+    const body = raw.body && !looksLikeBlob(raw.body) ? raw.body : "";
+    const text =
+      rawType === "chat"
+        ? raw.body || ""
+        : MEDIA_TYPES.has(rawType)
+          ? raw.caption || label
+          : body || raw.caption || label;
+    const isGroup = Boolean(raw.isGroupMsg) || remoteId.endsWith("@g.us");
+    // The group's own subject, never the name of whoever happened to post in it.
+    const groupName = isGroup
+      ? String(
+          raw.chat?.formattedTitle ||
+            raw.chat?.name ||
+            raw.chat?.contact?.name ||
+            "",
+        ).trim()
+      : "";
     const timestampEpoch =
       Number(raw.timestamp || raw.t) || Math.floor(Date.now() / 1000);
 
@@ -320,8 +370,16 @@ export class WhatsAppProvider {
       fromMe,
       ack: Number.isInteger(raw.ack) ? raw.ack : 0,
       remoteId,
-      senderName:
-        raw.sender?.name || raw.notifyName || (fromMe ? "You" : "Customer"),
+      isGroup,
+      groupName,
+      rawType,
+      senderName: fromMe
+        ? "You"
+        : raw.sender?.name ||
+          raw.sender?.pushname ||
+          raw.sender?.formattedName ||
+          raw.notifyName ||
+          "Customer",
       text,
       type,
       timestampEpoch,

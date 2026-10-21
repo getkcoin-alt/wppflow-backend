@@ -31,6 +31,14 @@ export function formatMessage(m) {
       }
     : null;
 }
+const IGNORED_TYPES = new Set([
+  "e2e_notification",
+  "notification_template",
+  "protocol",
+  "gp2",
+  "broadcast_notification",
+  "ciphertext",
+]);
 const emitMessage = (io, tenant, event, message) =>
   emitForConversation(
     io,
@@ -186,6 +194,10 @@ export async function handleIncomingMessage({
   history = false,
 }) {
   if (!msg.providerMessageId || !msg.remoteId) return null;
+  // Status updates, channels and WhatsApp's own system notices are not team conversations.
+  if (/@(broadcast|newsletter)$/.test(msg.remoteId)) return null;
+  if (IGNORED_TYPES.has(msg.rawType)) return null;
+  const isGroup = Boolean(msg.isGroup) || msg.remoteId.endsWith("@g.us");
   const inserted = await withTransaction(async (c) => {
     const old = await c.query(
       "SELECT id FROM messages WHERE tenant_id=$1 AND provider_message_id=$2",
@@ -195,22 +207,34 @@ export async function handleIncomingMessage({
     const phone = msg.remoteId.replace(/@c\.us$/, ""),
       epoch = Number(msg.timestampEpoch) || Math.floor(Date.now() / 1000),
       stamp = new Date(epoch * 1000).toISOString();
-    const contact = await c.query(
-      `INSERT INTO contacts(id,tenant_id,name,phone) VALUES($1,$2,$3,$4) ON CONFLICT(tenant_id,phone) DO UPDATE SET updated_at=contacts.updated_at RETURNING id`,
-      [crypto.randomUUID(), tenantId, msg.senderName || phone, phone],
-    );
+    // A group is not a person: no contact record, and its title is the group's subject.
+    // Your own outgoing messages say "You", which is not the other person's name either.
+    const personName = msg.fromMe ? phone : msg.senderName || phone;
+    const contactId = isGroup
+      ? null
+      : (
+          await c.query(
+            `INSERT INTO contacts(id,tenant_id,name,phone) VALUES($1,$2,$3,$4) ON CONFLICT(tenant_id,phone) DO UPDATE SET updated_at=contacts.updated_at RETURNING id`,
+            [crypto.randomUUID(), tenantId, personName, phone],
+          )
+        ).rows[0].id;
     const conv = await c.query(
       `INSERT INTO conversations(id,tenant_id,session_name,provider_chat_id,contact_id,phone,contact_name,is_group)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(tenant_id,session_name,provider_chat_id) DO UPDATE SET contact_id=COALESCE(conversations.contact_id,EXCLUDED.contact_id) RETURNING id`,
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(tenant_id,session_name,provider_chat_id) DO UPDATE SET
+        contact_id=COALESCE(conversations.contact_id,EXCLUDED.contact_id),
+        is_group=conversations.is_group OR EXCLUDED.is_group,
+        contact_name=CASE WHEN $9::boolean THEN EXCLUDED.contact_name ELSE conversations.contact_name END
+      RETURNING id`,
       [
         crypto.randomUUID(),
         tenantId,
         sessionName,
         msg.remoteId,
-        contact.rows[0].id,
+        contactId,
         phone,
-        msg.senderName || phone,
-        msg.remoteId.endsWith("@g.us"),
+        isGroup ? msg.groupName || "WhatsApp Group" : personName,
+        isGroup,
+        isGroup && Boolean(msg.groupName),
       ],
     );
     const id = conv.rows[0].id;
