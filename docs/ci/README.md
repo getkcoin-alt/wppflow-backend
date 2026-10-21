@@ -45,3 +45,16 @@ added there once, by hand (see `.env.example`).
 
 Merge and let the backend deploy finish (check the log for `Deployed`) **before** merging the frontend, because Vercel
 publishes the frontend as soon as `main` moves.
+
+## If a push to `main` does not deploy
+
+Symptoms: `/health` still shows a long `uptime` (it resets on every restart) and new routes return "Endpoint not found".
+
+1. `tail -n 60 /var/log/wppflow-backend-deploy.log` — a run that started leaves a banner and ends with `Finished with exit code …`.
+   No banner means the webhook never reached the deployer: GitHub → repository Settings → Webhooks → Recent Deliveries
+   → Redeliver.
+2. `cd /opt/wppflow-backend && git log --oneline -1` — compare with `main`.
+3. Run the same deploy by hand: `/opt/wppflow-backend/scripts/deploy.sh manual "manual redeploy"`
+   (add `FORCE_DEPLOY=1` in front to redeploy the commit that is already checked out).
+4. `Another deployment is still running` in the log means a previous run holds `/var/lock/wppflow-backend-deploy.lock`;
+   check `ps aux | grep deploy.sh` before removing anything.
