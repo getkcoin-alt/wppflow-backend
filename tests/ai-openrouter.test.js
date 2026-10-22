@@ -8,6 +8,7 @@ import { setAiClient } from "../src/services/aiService.js";
 import {
   askOpenRouter,
   rankFreeModels,
+  spreadAcrossMakers,
   resetOpenRouter,
   setOpenRouterFetch,
   tidy,
@@ -249,6 +250,43 @@ test("OpenRouter's free models: choosing, falling back, and respecting its limit
     assert.equal(trace[0].sentAsOneMessage, true);
     assert.equal(typeof trace[2].ms, "number");
     assert.ok(!JSON.stringify(trace).includes(KEY), "the key is never in a trace");
+  });
+
+  await t.test("a model that is closed to this account is skipped, not mistaken for a bad key", async () => {
+    const closed = rejected(403, "vendor/closed:free is only available on agentic harnesses. Try plugging it into a coding agent.");
+    const fake = use({ models: { "google/gemma-4-31b-it:free": rejected(503, "busy"), "openai/gpt-oss-120b:free": closed } });
+    const out = await ask();
+    assert.equal(out.model, "meta-llama/llama-3.3-70b-instruct:free");
+    assert.deepEqual(fake.tried(), ["google/gemma-4-31b-it:free", "openai/gpt-oss-120b:free", "meta-llama/llama-3.3-70b-instruct:free"]);
+    fake.calls.length = 0;
+    await ask();
+    assert.ok(!fake.tried().includes("openai/gpt-oss-120b:free"), "and it is not asked again for hours");
+  });
+
+  await t.test("a 403 that is about the key itself stops everything", async () => {
+    const fake = use({ models: { "google/gemma-4-31b-it:free": rejected(403, "Key limit exceeded") } });
+    await assert.rejects(ask(), (e) => e.status === 503 && /isn't set up correctly/.test(e.message));
+    assert.equal(fake.tried().length, 1);
+  });
+
+  await t.test("the first tries are spread across makers, because siblings share one upstream limit", () => {
+    assert.deepEqual(
+      spreadAcrossMakers(["google/gemma-4-31b-it:free", "google/gemma-4-26b-a4b-it:free", "openai/gpt-oss-120b:free", "nvidia/nemotron:free", "openai/gpt-oss-20b:free"]),
+      ["google/gemma-4-31b-it:free", "openai/gpt-oss-120b:free", "nvidia/nemotron:free", "google/gemma-4-26b-a4b-it:free", "openai/gpt-oss-20b:free"],
+    );
+  });
+
+  await t.test("when one maker is rate-limited upstream the next try is a different maker", async () => {
+    const limited = providerError(429, "temporarily rate-limited upstream", "Google AI Studio");
+    const catalogue = [
+      model("google/gemma-4-31b-it:free"),
+      model("google/gemma-4-26b-a4b-it:free"),
+      model("openai/gpt-oss-120b:free"),
+    ];
+    const fake = use({ catalogue, models: { "google/gemma-4-31b-it:free": limited, "google/gemma-4-26b-a4b-it:free": limited } });
+    const out = await ask();
+    assert.deepEqual(fake.tried(), ["google/gemma-4-31b-it:free", "openai/gpt-oss-120b:free"]);
+    assert.equal(out.model, "openai/gpt-oss-120b:free");
   });
 
   await t.test("a key that appears in an error is never repeated", async () => {

@@ -53,12 +53,24 @@ const PREFERRED = [
   /gpt-oss-120b/i,
   /deepseek.*v3/i,
   /llama-?3\.3-70b/i,
-  /inkling(?!.*small)/i,
   /minimax/i,
   /nemotron.*(ultra|super)/i,
   /mistral.*(large|medium|small)/i,
   /deepseek/i,
 ];
+// Models from the same maker usually share one upstream limit, so when one is rate-limited its siblings
+// are too. Spread the first tries across makers, and keep the rest in order behind them.
+export function spreadAcrossMakers(ids) {
+  const seen = new Set();
+  const first = [];
+  const rest = [];
+  for (const id of ids) {
+    const maker = id.split("/")[0];
+    (seen.has(maker) ? rest : first).push(id);
+    seen.add(maker);
+  }
+  return [...first, ...rest];
+}
 const NOT_FOR_TEXT = /embed|moderat|guard|safeguard|tts|whisper|transcri|rerank|image|diffusion|audio|lyria/i;
 const REASONING = /\br1\b|thinking|reason/i;
 const sizeOf = (id) => Number(/(\d+(?:\.\d+)?)b\b/i.exec(id)?.[1]) || 0;
@@ -253,7 +265,7 @@ export async function askOpenRouter({ system, user, maxTokens = 1500 }, { trace 
 
   const all = await freeModels();
   for (const model of all) if (resting(model)) trace?.push({ model, skipped: "set aside after an earlier failure" });
-  const ranked = all.filter((m) => !resting(m));
+  const ranked = spreadAcrossMakers(all.filter((m) => !resting(m)));
   const queue = [...ranked.slice(0, MAX_ATTEMPTS - 1), FREE_ROUTER];
   const blocked = [];
   let last;
@@ -280,8 +292,14 @@ export async function askOpenRouter({ system, user, maxTokens = 1500 }, { trace 
           folded = true;
           continue;
         }
-        if (status === 401 || status === 403)
+        // A rejected key is the account's problem. A 403 about one model ("only available on agentic harnesses",
+        // flagged input) is that model's: leave it alone and try the next.
+        if (status === 401 || (status === 403 && /\b(api )?key\b/i.test(topLevel)))
           throw fail(503, "The AI assistant isn't set up correctly. Ask your administrator to check it.");
+        if (status === 403) {
+          cool(model, minutes(6 * 60), "restricted");
+          break;
+        }
         if (status === 402) {
           pausedUntil = Date.now() + minutes(10);
           pausedFor = "Riwo's AI account needs attention. Ask your administrator to check it.";
@@ -332,7 +350,7 @@ export async function askOpenRouter({ system, user, maxTokens = 1500 }, { trace 
 export async function diagnoseOpenRouter() {
   // A test is how an administrator checks a fix, so it starts clean instead of waiting out an earlier pause.
   pausedUntil = 0;
-  cooling.clear();
+  for (const [model, c] of cooling) if (c.why !== "restricted") cooling.delete(model); // a model not open to this account stays so
   const report = { provider: "openrouter", ok: false, account: null, freeModels: 0, attempts: [] };
   try {
     const res = await fetcher(`${BASE}/key`, {
