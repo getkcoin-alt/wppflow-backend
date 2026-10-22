@@ -9,7 +9,12 @@ import {
 } from "../middleware/auth.js";
 import { route, fail, text } from "../middleware/http.js";
 import { queueHealth } from "../services/queue/messageQueue.js";
-import { mediaEnabled } from "../services/mediaService.js";
+import {
+  mediaEnabled,
+  checkStorage,
+  checkUploadTarget,
+  finishUploadCheck,
+} from "../services/mediaService.js";
 import {
   resolveWebhook,
   encryptSecret,
@@ -27,6 +32,32 @@ router.get(
       media: mediaEnabled(),
       store: false,
       queue: queueHealth().connected,
+    }),
+  ),
+);
+// Settings checks for company owners and administrators: they prove media storage really works.
+router.get(
+  "/media-check",
+  requireRole("owner", "admin"),
+  route(async (req, res) =>
+    res.json({ status: "success", ...(await checkStorage()) }),
+  ),
+);
+router.post(
+  "/media-check/upload",
+  requireRole("owner", "admin"),
+  route(async (req, res) => {
+    if (!mediaEnabled()) throw fail(503, "Media storage is not configured");
+    res.json({ status: "success", ...(await checkUploadTarget(req.tenantId)) });
+  }),
+);
+router.post(
+  "/media-check/finish",
+  requireRole("owner", "admin"),
+  route(async (req, res) =>
+    res.json({
+      status: "success",
+      ...(await finishUploadCheck(req.tenantId, text(req.body.key, "Key", 200))),
     }),
   ),
 );
