@@ -2,7 +2,7 @@ import { query } from "../db/index.js";
 import { ENV } from "../config/env.js";
 import { defaultWhatsAppProvider as provider } from "./whatsapp/WhatsAppProvider.js";
 import { syncConversations } from "./conversationService.js";
-import { handleIncomingMessage } from "./messageService.js";
+import { handleIncomingMessage, adoptMisfiledMessages } from "./messageService.js";
 import { syncContacts } from "../routes/contactRoutes.js";
 import { emitForSession } from "./realtime.js";
 
@@ -58,6 +58,17 @@ export async function syncSession({ tenantId, sessionName, io = null, mode = "au
       progress("messages", done, pending.length);
       try {
         const history = await provider.getHistory(tenantId, sessionName, chat.id, messageLimit);
+        const target = await query(
+          "SELECT id FROM conversations WHERE tenant_id=$1 AND session_name=$2 AND provider_chat_id=$3",
+          [tenantId, sessionName, chat.id],
+        );
+        if (target.rows[0])
+          await adoptMisfiledMessages({
+            tenantId,
+            sessionName,
+            conversationId: target.rows[0].id,
+            providerMessageIds: history.map((m) => m.providerMessageId),
+          });
         // Oldest first so the conversation preview ends on the newest message.
         for (const msg of history.sort((a, b) => a.timestampEpoch - b.timestampEpoch))
           await handleIncomingMessage({ tenantId, sessionName, msg, history: true });

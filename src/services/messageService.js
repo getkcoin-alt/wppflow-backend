@@ -186,6 +186,35 @@ export async function sendTextMessage({
     emitMessage(io, tenantId, "message:created", result.message);
   return { ...result, message: formatMessage(result.message) };
 }
+// Earlier syncs trusted WhatsApp's sender/recipient ids and could file a message under a different
+// conversation of the same number (a phone-number chat instead of the "lid" chat, say). When the chat
+// they truly belong to is opened, move them there instead of treating them as already saved.
+export async function adoptMisfiledMessages({
+  tenantId,
+  sessionName,
+  conversationId,
+  providerMessageIds,
+}) {
+  const ids = [...new Set(providerMessageIds.filter(Boolean))];
+  if (!ids.length) return 0;
+  return withTransaction(async (c) => {
+    const moved = await c.query(
+      `UPDATE messages m SET conversation_id=$3
+         FROM conversations c
+        WHERE m.tenant_id=$1 AND m.provider_message_id=ANY($4) AND m.conversation_id<>$3
+          AND c.id=m.conversation_id AND c.tenant_id=$1 AND c.session_name=$2
+        RETURNING m.id`,
+      [tenantId, sessionName, conversationId, ids],
+    );
+    if (moved.rowCount)
+      await c.query(
+        "UPDATE attachments SET conversation_id=$1 WHERE tenant_id=$2 AND message_id=ANY($3)",
+        [conversationId, tenantId, moved.rows.map((r) => r.id)],
+      );
+    return moved.rowCount;
+  });
+}
+
 export async function handleIncomingMessage({
   tenantId,
   sessionName,

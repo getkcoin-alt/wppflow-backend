@@ -27,6 +27,7 @@ import {
 } from "../services/conversationService.js";
 import {
   getConversationMessages,
+  adoptMisfiledMessages,
   sendTextMessage,
 } from "../services/messageService.js";
 
@@ -230,28 +231,45 @@ router.get("/:id/messages", async (req, res) => {
   try {
     await assertConversationAccess(req, req.params.id);
     const { limit, cursor } = req.query;
+    let historySync;
     if (req.query.sync === "true") {
       const { rows } = await query(
         "SELECT * FROM conversations WHERE id=$1 AND tenant_id=$2",
         [req.params.id, req.tenantId],
       );
       if (!rows[0]) throw fail(404, "Conversation not found");
-      // Older history is a bonus: if WhatsApp is unreachable, show what we already have.
+      // Older history is a bonus: if WhatsApp is unreachable, show what we already have,
+      // and say why so the screen can explain an empty chat.
       try {
         const messages = await provider.getHistory(
           req.tenantId,
           rows[0].session_name,
           rows[0].provider_chat_id,
         );
+        let stored = await adoptMisfiledMessages({
+          tenantId: req.tenantId,
+          sessionName: rows[0].session_name,
+          conversationId: rows[0].id,
+          providerMessageIds: messages.map((m) => m.providerMessageId),
+        });
         for (const msg of messages)
-          await handleIncomingMessage({
-            tenantId: req.tenantId,
-            sessionName: rows[0].session_name,
-            msg,
-            history: true,
-          });
+          if (
+            await handleIncomingMessage({
+              tenantId: req.tenantId,
+              sessionName: rows[0].session_name,
+              msg,
+              history: true,
+            })
+          )
+            stored++;
+        historySync = { fetched: messages.length, stored };
       } catch (error) {
         console.warn(`History sync skipped: ${error.message}`);
+        historySync = {
+          fetched: 0,
+          stored: 0,
+          error: String(error.message || "unavailable").slice(0, 160),
+        };
       }
     }
     const result = await getConversationMessages({
@@ -260,7 +278,11 @@ router.get("/:id/messages", async (req, res) => {
       limit,
       cursor,
     });
-    res.json({ status: "success", ...result });
+    res.json({
+      status: "success",
+      ...result,
+      ...(historySync ? { historySync } : {}),
+    });
   } catch (err) {
     res.status(err.status||500).json({ status: "error", message: err.status?err.message:"This operation is currently unavailable" });
   }

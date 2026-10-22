@@ -472,9 +472,17 @@ export class WhatsAppProvider {
   async getHistory(tenantId, sessionName, chatId, count = 100) {
     const client = this.getSession(tenantId, sessionName)?.client;
     if (!client) throw new Error("WhatsApp session is offline");
-    return (await client.getMessages(chatId, { count })).map((raw) =>
-      this.normalizeMessage(raw),
-    );
+    // Everything returned here belongs to the chat that was asked for, whatever shape WhatsApp gives
+    // the sender and recipient ids (phone numbers or privacy "lid" ids). Trusting those fields could
+    // file the messages under a different conversation and leave this one empty.
+    return (await client.getMessages(chatId, { count })).map((raw) => {
+      const msg = this.normalizeMessage(raw);
+      return {
+        ...msg,
+        remoteId: chatId,
+        isGroup: msg.isGroup || chatId.endsWith("@g.us"),
+      };
+    });
   }
   async markRead(tenantId, sessionName, chatId) {
     const client = this.getSession(tenantId, sessionName)?.client;
