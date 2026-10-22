@@ -61,6 +61,8 @@ export const ENV = {
   ALLOW_PUBLIC_SIGNUP: process.env.ALLOW_PUBLIC_SIGNUP !== "false",
   RESEND_API_KEY: process.env.RESEND_API_KEY || "",
   RESEND_FROM_EMAIL: process.env.RESEND_FROM_EMAIL || "Scriwo <noreply@scriwo.com>",
+  // Where website enquiries are sent. Defaults to the platform admin.
+  LEADS_EMAIL: (process.env.LEADS_EMAIL || process.env.SUPERADMIN_EMAIL || "karnveer@scriza.in").toLowerCase().trim(),
   MAIL_FROM: process.env.MAIL_FROM || process.env.RESEND_FROM_EMAIL || "Scriwo <noreply@scriwo.com>",
 };
 

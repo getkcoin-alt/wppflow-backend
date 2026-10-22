@@ -23,6 +23,7 @@ import workspaceRoutes from "./routes/workspaceRoutes.js";
 import mediaRoutes from "./routes/mediaRoutes.js";
 import notificationRoutes from "./routes/notificationRoutes.js";
 import emailRoutes from "./routes/emailRoutes.js";
+import publicRoutes from "./routes/publicRoutes.js";
 import { errorHandler } from "./middleware/http.js";
 import { restoreSessions, closeSessions } from "./services/sessionService.js";
 import { sweepOrphanBrowsers } from "./services/whatsapp/browserProcess.js";
@@ -184,6 +185,7 @@ app.use("/api/attachments", mediaRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/email", emailRoutes);
 app.use("/api/mail", emailRoutes);
+app.use("/api/public", publicRoutes);
 
 // Backward compatibility alias for /api/chats
 app.use("/api/chats", conversationRoutes);
@@ -212,7 +214,7 @@ export async function startServer() {
     if (ENV.AUTO_MIGRATE) await runMigrations();
     else {
       const { rows } = await query(
-        "SELECT 1 FROM schema_migrations WHERE version='011_team_categories_and_mail_status'",
+        "SELECT 1 FROM schema_migrations WHERE version='012_website_leads'",
       );
       if (!rows.length)
         throw new Error(

@@ -103,3 +103,29 @@ export const sendStaffInvite = ({ to, name, company, link }) =>
       note: "The link works once and expires in 24 hours.",
     }),
   });
+const LEAD_FIELDS = [
+  ["Name", "name"],
+  ["Email", "email"],
+  ["Phone", "phone"],
+  ["Company", "company"],
+  ["Country", "country"],
+  ["Team size", "teamSize"],
+  ["Interested in", "interest"],
+  ["Plan", "plan"],
+  ["Page", "sourcePage"],
+];
+export const sendLeadNotification = ({ to, lead }) => {
+  const rows = LEAD_FIELDS.filter(([, k]) => lead[k]);
+  return sendMail({
+    to,
+    subject: `New website enquiry: ${lead.company || lead.name} (${lead.interest})`,
+    text: `${rows.map(([l, k]) => `${l}: ${lead[k]}`).join("\n")}\n\n${lead.message}`,
+    html: layout({
+      heading: "New website enquiry",
+      intro: `${rows.map(([l, k]) => `<b>${l}:</b> ${esc(lead[k])}`).join("<br>")}${lead.message ? `<br><br>${esc(lead.message).replace(/\n/g, "<br>")}` : ""}`,
+      cta: `Reply to ${esc(lead.name)}`,
+      link: `mailto:${lead.email}`,
+      note: "Sent from the contact form on scriwo.com. Every enquiry is also saved in the database.",
+    }),
+  });
+};
