@@ -23,6 +23,7 @@ import workspaceRoutes from "./routes/workspaceRoutes.js";
 import mediaRoutes from "./routes/mediaRoutes.js";
 import notificationRoutes from "./routes/notificationRoutes.js";
 import emailRoutes from "./routes/emailRoutes.js";
+import publicRoutes from "./routes/publicRoutes.js";
 import { errorHandler } from "./middleware/http.js";
 import { restoreSessions, closeSessions } from "./services/sessionService.js";
 import { sweepOrphanBrowsers } from "./services/whatsapp/browserProcess.js";
@@ -31,6 +32,10 @@ import { startReconcileLoop, stopReconcileLoop } from "./services/syncService.js
 
 const app = express();
 const server = http.createServer(app);
+
+// The public website's contact form. It carries no cookies or tokens, and the website calls it
+// through its own domain, so it sits before the origin check: preview and future domains keep working.
+app.use("/api/public", express.json({ limit: "16kb" }), publicRoutes);
 
 // 1. Security & CORS Configuration
 app.use(
@@ -212,7 +217,7 @@ export async function startServer() {
     if (ENV.AUTO_MIGRATE) await runMigrations();
     else {
       const { rows } = await query(
-        "SELECT 1 FROM schema_migrations WHERE version='011_team_categories_and_mail_status'",
+        "SELECT 1 FROM schema_migrations WHERE version='012_website_leads'",
       );
       if (!rows.length)
         throw new Error(
