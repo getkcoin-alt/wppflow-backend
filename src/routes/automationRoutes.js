@@ -5,9 +5,11 @@ import {
   requireTenantContext,
   requireRole,
 } from "../middleware/auth.js";
-import { route, text, fail } from "../middleware/http.js";
+import { route, fail } from "../middleware/http.js";
 import { query } from "../db/index.js";
 import { automationView } from "../services/automationService.js";
+import { cleanRule } from "../services/automationRules.js";
+import { AUTOMATION_TEMPLATES } from "../services/automationTemplates.js";
 import { requireFeature } from "../services/plans.js";
 const router = express.Router();
 router.use(
@@ -26,26 +28,40 @@ router.get(
     res.json({ status: "success", automations: rows.map(automationView) });
   }),
 );
+// The ready-made rules, so the screen doesn't carry its own copy.
+router.get("/templates", (req, res) => res.json({ status: "success", templates: AUTOMATION_TEMPLATES }));
+
+const teammateOf = (tenantId) => async (name) =>
+  (
+    await query(
+      "SELECT 1 FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=$1 AND m.status='active' AND u.status='active' AND u.name=$2",
+      [tenantId, name],
+    )
+  ).rowCount > 0;
+
 router.post(
   "/",
   route(async (req, res) => {
-    const action = req.body.actionType;
-    if (!["reply_text", "assign_agent"].includes(action))
-      throw fail(400, "Choose reply_text or assign_agent");
+    const rule = await cleanRule(req.body, { teammate: teammateOf(req.tenantId) });
+    // A new rule never goes live by itself: the person reads it first.
     const { rows } = await query(
-      `INSERT INTO automations(id,tenant_id,name,trigger_type,trigger_condition,action_type,action_summary,is_enabled) VALUES($1,$2,$3,'keyword',$4,$5,$6,false) RETURNING *`,
-      [
-        crypto.randomUUID(),
-        req.tenantId,
-        text(req.body.name, "Name", 255),
-        text(req.body.triggerCondition, "Keyword", 100),
-        action,
-        text(req.body.actionSummary, "Action", 10000),
-      ],
+      `INSERT INTO automations(id,tenant_id,name,trigger_type,trigger_condition,action_type,action_summary,config,template_id,is_enabled) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,false) RETURNING *`,
+      [crypto.randomUUID(), req.tenantId, rule.name, rule.triggerType, rule.triggerCondition, rule.actionType, rule.actionSummary, JSON.stringify(rule.config), rule.templateId],
     );
-    res
-      .status(201)
-      .json({ status: "success", automation: automationView(rows[0]) });
+    res.status(201).json({ status: "success", automation: automationView(rows[0]) });
+  }),
+);
+// Changing a saved rule keeps whether it is live and how often it has run.
+router.put(
+  "/:id",
+  route(async (req, res) => {
+    const rule = await cleanRule(req.body, { teammate: teammateOf(req.tenantId) });
+    const { rows } = await query(
+      `UPDATE automations SET name=$3,trigger_type=$4,trigger_condition=$5,action_type=$6,action_summary=$7,config=$8,updated_at=now() WHERE id=$1 AND tenant_id=$2 RETURNING *`,
+      [req.params.id, req.tenantId, rule.name, rule.triggerType, rule.triggerCondition, rule.actionType, rule.actionSummary, JSON.stringify(rule.config)],
+    );
+    if (!rows[0]) throw fail(404, "Automation not found");
+    res.json({ status: "success", automation: automationView(rows[0]) });
   }),
 );
 router.patch(

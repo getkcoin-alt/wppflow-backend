@@ -5,7 +5,9 @@ import {
   requireTenantContext,
   requireScope,
   requireWriteAccess,
+  requireRole,
 } from "../middleware/auth.js";
+import { audienceFor, recordPermission } from "../services/campaignService.js";
 import { query, withTransaction } from "../db/index.js";
 import { defaultWhatsAppProvider as provider } from "../services/whatsapp/WhatsAppProvider.js";
 import { route, text, fail } from "../middleware/http.js";
@@ -99,6 +101,18 @@ router.get(
     res.json({ status: "success", contact: contactView(rows[0]) });
   }),
 );
+// The owner confirms that the people in a group agreed to hear from the business. It only covers contacts nobody
+// has decided on: someone who said STOP, or was marked as not wanting messages, is left alone.
+router.post(
+  "/permission",
+  requireRole("owner", "admin"),
+  route(async (req, res) => {
+    if (req.body.confirm !== true) throw fail(400, "Confirm that these contacts agreed to receive your messages");
+    const tag = req.body.tag ? text(String(req.body.tag), "Tag", 255) : "All Contacts";
+    const recorded = await recordPermission(req.tenantId, tag, req.user.id);
+    res.json({ status: "success", recorded, audience: await audienceFor(req.tenantId, tag) });
+  }),
+);
 router.post(
   "/import",
   route(async (req, res) => {
@@ -110,7 +124,8 @@ router.post(
         const name = text(row.name, "Name", 255),
           phone = text(row.phone, "Phone", 128);
         await c.query(
-          `INSERT INTO contacts(id,tenant_id,name,phone,email,tags) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(tenant_id,phone) DO UPDATE SET name=EXCLUDED.name,email=EXCLUDED.email,tags=EXCLUDED.tags,updated_at=now()`,
+          // A file without tags must not wipe the tags a contact already has.
+          `INSERT INTO contacts(id,tenant_id,name,phone,email,tags) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(tenant_id,phone) DO UPDATE SET name=EXCLUDED.name,email=EXCLUDED.email,tags=CASE WHEN jsonb_array_length(EXCLUDED.tags)>0 THEN EXCLUDED.tags ELSE contacts.tags END,updated_at=now()`,
           [
             crypto.randomUUID(),
             req.tenantId,
@@ -124,6 +139,19 @@ router.post(
             ),
           ],
         );
+        // An "optin" column records permission. "yes" never overrides what a customer already decided (a
+        // STOP stays a STOP); "no" always withdraws it.
+        const said = String(row.optin ?? "").trim().toLowerCase();
+        if (["yes", "y", "true", "1"].includes(said))
+          await c.query(
+            "INSERT INTO consents(tenant_id,phone,opt_in_status,source) VALUES($1,$2,true,'csv_import') ON CONFLICT(tenant_id,phone) DO NOTHING",
+            [req.tenantId, phone],
+          );
+        else if (["no", "n", "false", "0"].includes(said))
+          await c.query(
+            "INSERT INTO consents(tenant_id,phone,opt_in_status,source) VALUES($1,$2,false,'csv_import') ON CONFLICT(tenant_id,phone) DO UPDATE SET opt_in_status=false,source='csv_import',consented_at=now()",
+            [req.tenantId, phone],
+          );
       }
     });
     res.json({ status: "success", imported: rows.length });

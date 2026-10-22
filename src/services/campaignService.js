@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { query, withTransaction } from "../db/index.js";
 import { sendTextMessage } from "./messageService.js";
 import { fail } from "../middleware/http.js";
+import { personalise } from "./templating.js";
 export const campaignView = (c) => ({
   ...c,
   targetSegment: c.target_segment,
@@ -18,6 +19,67 @@ export const campaignView = (c) => ({
   createdAt: c.created_at,
   scheduledFor: c.scheduled_for,
 });
+const ALL = "All Contacts";
+// Who a broadcast to this audience would reach, and who it would leave out and why. `tag` is a contact tag, or
+// "All Contacts". Someone who said STOP, or who is on the do-not-contact list, is never reached.
+export async function audienceFor(tenantId, tag = ALL) {
+  const segment = tag || ALL;
+  const state = `CASE WHEN s.id IS NOT NULL OR x.opt_in_status IS FALSE THEN 'opted_out' WHEN x.id IS NULL THEN 'not_asked' ELSE 'will_receive' END`;
+  const base = `FROM contacts c
+    LEFT JOIN consents x ON x.tenant_id=c.tenant_id AND x.phone=c.phone
+    LEFT JOIN suppressions s ON s.tenant_id=c.tenant_id AND s.phone=c.phone`;
+  const { rows } = await query(
+    `SELECT ${state} AS state,count(*)::int AS n ${base} WHERE c.tenant_id=$1 AND ($2::text=$3 OR c.tags ? $2::text) GROUP BY 1`,
+    [tenantId, segment, ALL],
+  );
+  const by = Object.fromEntries(rows.map((r) => [r.state, r.n]));
+  const tags = await query(
+    `SELECT t.tag,count(*)::int AS count,count(*) FILTER (WHERE ${state}='will_receive')::int AS will_receive
+     ${base}, jsonb_array_elements_text(CASE WHEN jsonb_typeof(c.tags)='array' THEN c.tags ELSE '[]'::jsonb END) AS t(tag)
+     WHERE c.tenant_id=$1 GROUP BY t.tag ORDER BY count DESC,t.tag LIMIT 60`,
+    [tenantId],
+  );
+  const stop = await query("SELECT bool_or(is_enabled) AS enabled FROM automations WHERE tenant_id=$1 AND action_type='opt_out'", [tenantId]);
+  return {
+    tag: segment,
+    willReceive: by.will_receive || 0,
+    notAsked: by.not_asked || 0,
+    optedOut: by.opted_out || 0,
+    total: (by.will_receive || 0) + (by.not_asked || 0) + (by.opted_out || 0),
+    tags: tags.rows.map((r) => ({ tag: r.tag, count: r.count, willReceive: r.will_receive })),
+    unsubscribeRule: { exists: stop.rows[0].enabled !== null, enabled: stop.rows[0].enabled === true },
+  };
+}
+
+// Records permission for contacts nobody has decided on yet. Someone who opted out stays opted out.
+export async function recordPermission(tenantId, tag = ALL, actorId = null) {
+  const { rowCount } = await query(
+    `INSERT INTO consents(tenant_id,phone,opt_in_status,source)
+     SELECT c.tenant_id,c.phone,true,'workspace_bulk' FROM contacts c
+     WHERE c.tenant_id=$1 AND ($2::text=$3 OR c.tags ? $2::text)
+       AND NOT EXISTS(SELECT 1 FROM consents x WHERE x.tenant_id=c.tenant_id AND x.phone=c.phone)
+       AND NOT EXISTS(SELECT 1 FROM suppressions s WHERE s.tenant_id=c.tenant_id AND s.phone=c.phone)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, tag || ALL, ALL],
+  );
+  await query("INSERT INTO audit_events(tenant_id,actor_id,event_type,metadata) VALUES($1,$2,'consent.bulk_recorded',$3)", [
+    tenantId,
+    actorId,
+    JSON.stringify({ audience: tag || ALL, recorded: rowCount }),
+  ]);
+  return rowCount;
+}
+
+export async function duplicateCampaign(tenantId, id) {
+  const { rows } = await query(
+    `INSERT INTO campaigns(id,tenant_id,name,target_segment,template_text,session_name,anti_ban_delay_seconds,scheduled_for)
+     SELECT $3,tenant_id,left(name,240) || ' (copy)',target_segment,template_text,session_name,anti_ban_delay_seconds,'' FROM campaigns WHERE id=$1 AND tenant_id=$2 RETURNING *`,
+    [id, tenantId, crypto.randomUUID()],
+  );
+  if (!rows[0]) throw fail(404, "Campaign not found");
+  return campaignView(rows[0]);
+}
+
 export async function startCampaign(tenantId, id) {
   return withTransaction(async (c) => {
     const { rows } = await c.query(
@@ -117,6 +179,7 @@ export async function pumpCampaigns(io) {
     "SELECT * FROM campaigns WHERE status='running' AND (scheduled_for='' OR scheduled_for::timestamptz<=now()) ORDER BY created_at LIMIT 25",
   );
   for (const campaign of campaigns) {
+    const company = (await query("SELECT name FROM tenants WHERE id=$1", [campaign.tenant_id])).rows[0]?.name || "";
     const r = await claimRecipient(campaign);
     if (r) {
       try {
@@ -124,7 +187,7 @@ export async function pumpCampaigns(io) {
         const result = await sendTextMessage({
           tenantId: r.tenant_id,
           conversationId: r.conversationId,
-          text: campaign.template_text.replaceAll("{{name}}", r.name),
+          text: personalise(campaign.template_text, { name: r.name, company }),
           idempotencyKey: `campaign:${campaign.id}:${r.id}`,
           agentName: "Campaign",
           io,
