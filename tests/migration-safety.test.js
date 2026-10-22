@@ -13,7 +13,7 @@ test("A stuck table lock can never hang a deploy, and /health says what is runni
     assert.equal(res.status, 200);
     assert.match(res.body.build.commit, /^[0-9a-f]{7}$|^unknown$/);
     assert.ok(res.body.build.startedAt);
-    assert.equal(res.body.schemaVersion, "010_notifications_and_assignee");
+    assert.equal(res.body.schemaVersion, "011_team_categories_and_mail_status");
   });
 
   const probe = {
