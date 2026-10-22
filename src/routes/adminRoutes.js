@@ -113,4 +113,46 @@ router.patch(
     res.json({ status: "success", company: companyView(rows[0]) });
   }),
 );
+// Enquiries from the public website's contact form, newest first.
+router.get(
+  "/leads",
+  route(async (req, res) => {
+    const { rows } = await query(
+      "SELECT * FROM website_leads ORDER BY created_at DESC LIMIT 500",
+    );
+    res.json({
+      status: "success",
+      leads: rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        email: r.email,
+        phone: r.phone,
+        company: r.company,
+        country: r.country,
+        teamSize: r.team_size,
+        interest: r.interest,
+        plan: r.plan,
+        message: r.message,
+        sourcePage: r.source_page,
+        status: r.status,
+        emailStatus: r.email_status,
+        createdAt: r.created_at,
+      })),
+    });
+  }),
+);
+router.patch(
+  "/leads/:id",
+  route(async (req, res) => {
+    if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) throw fail(404, "Enquiry not found");
+    if (!["new", "contacted", "won", "lost"].includes(req.body.status))
+      throw fail(400, "Status must be new, contacted, won or lost");
+    const { rowCount } = await query(
+      "UPDATE website_leads SET status=$2 WHERE id=$1",
+      [req.params.id, req.body.status],
+    );
+    if (!rowCount) throw fail(404, "Enquiry not found");
+    res.json({ status: "success" });
+  }),
+);
 export default router;

@@ -1,13 +1,14 @@
 import "dotenv/config";
 
-// The app first lived at a *.vercel.app address. Production now uses its own domain, so a server that
-// still has the old address configured (or none) sends people to https://scriwo.com. Any other address
-// set in APP_URL is respected as is.
+// The app first lived at a *.vercel.app address, then at scriwo.com. It now lives at app.scriwo.com
+// (www.scriwo.com is the public website, which forwards old ?invite= links to the app). A server
+// with the old Vercel address configured, or none, sends people to https://app.scriwo.com. Any other
+// address set in APP_URL is respected as is.
 const LEGACY_APP_ADDRESS = /^https?:\/\/[a-z0-9-]+\.vercel\.app$/i;
 export function resolveAppUrl(configured, nodeEnv) {
   const url = String(configured || "").trim().replace(/\/+$/, "");
   if (nodeEnv === "production")
-    return !url || LEGACY_APP_ADDRESS.test(url) ? "https://scriwo.com" : url;
+    return !url || LEGACY_APP_ADDRESS.test(url) ? "https://app.scriwo.com" : url;
   return url || "http://localhost:5173";
 }
 
@@ -40,6 +41,7 @@ export const ENV = {
           ]),
       "https://scriwo.com",
       "https://www.scriwo.com",
+      "https://app.scriwo.com",
     ]),
   ].filter(Boolean),
   ENABLE_DEBUG_ROUTES: process.env.ENABLE_DEBUG_ROUTES === "true",
@@ -61,6 +63,8 @@ export const ENV = {
   ALLOW_PUBLIC_SIGNUP: process.env.ALLOW_PUBLIC_SIGNUP !== "false",
   RESEND_API_KEY: process.env.RESEND_API_KEY || "",
   RESEND_FROM_EMAIL: process.env.RESEND_FROM_EMAIL || "Scriwo <noreply@scriwo.com>",
+  // Where website enquiries are sent. Defaults to the platform admin.
+  LEADS_EMAIL: (process.env.LEADS_EMAIL || process.env.SUPERADMIN_EMAIL || "karnveer@scriza.in").toLowerCase().trim(),
   MAIL_FROM: process.env.MAIL_FROM || process.env.RESEND_FROM_EMAIL || "Scriwo <noreply@scriwo.com>",
 };
 
