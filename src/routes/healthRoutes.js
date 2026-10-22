@@ -3,7 +3,7 @@ import { checkDatabaseHealth, query } from "../db/index.js";
 import { BUILD } from "../config/build.js";
 import { ENV } from "../config/env.js";
 import { mediaEnabled } from "../services/mediaService.js";
-import { aiConfigured } from "../services/aiService.js";
+import { aiConfigured, aiProvider } from "../services/aiService.js";
 import { defaultWhatsAppProvider } from "../services/whatsapp/WhatsAppProvider.js";
 import { getEmailServiceStatus } from "../services/emailService.js";
 
@@ -35,7 +35,7 @@ router.get("/health", async (req, res) => {
     build: BUILD,
     appUrl: ENV.APP_URL,
     media: { configured: mediaEnabled() },
-    ai: { configured: aiConfigured() },
+    ai: { configured: aiConfigured(), provider: aiProvider() },
     schemaVersion,
     emailService: getEmailServiceStatus(),
     activeSessions: activeSessionsCount,

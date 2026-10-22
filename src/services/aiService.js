@@ -2,12 +2,24 @@ import Anthropic from "@anthropic-ai/sdk";
 import { query } from "../db/index.js";
 import { fail } from "../middleware/http.js";
 import { planAllows, notIncluded } from "./plans.js";
+import { askOpenRouter } from "./openRouter.js";
 
 // Riwo, the assistant inside the inbox. It only ever writes text for a person to read and edit: nothing
 // it produces is sent to a customer, and it has no tools. Customer messages are passed to the model as
 // data inside tags, and the system prompt tells it never to follow instructions found there.
-export const aiConfigured = () => Boolean(process.env.ANTHROPIC_API_KEY);
-export const aiModel = () => process.env.AI_MODEL || "claude-opus-5-5";
+//
+// It runs on OpenRouter's free models when OPENROUTER_API_KEY is set, or on Claude when ANTHROPIC_API_KEY
+// is. If both are set OpenRouter is used, unless AI_PROVIDER names the other.
+export function aiProvider() {
+  const forced = String(process.env.AI_PROVIDER || "").toLowerCase();
+  if (forced === "anthropic" && process.env.ANTHROPIC_API_KEY) return "anthropic";
+  if (forced === "openrouter" && process.env.OPENROUTER_API_KEY) return "openrouter";
+  if (process.env.OPENROUTER_API_KEY) return "openrouter";
+  if (process.env.ANTHROPIC_API_KEY) return "anthropic";
+  return null;
+}
+export const aiConfigured = () => aiProvider() !== null;
+export const aiModel = () => process.env.AI_MODEL || "claude-opus-5-5"; // Claude only
 const defaultDailyLimit = () =>
   Number(process.env.AI_DAILY_LIMIT) > 0 ? Number(process.env.AI_DAILY_LIMIT) : 300;
 
@@ -26,7 +38,18 @@ const anthropic = () =>
 let fallbackRejected = false;
 const FALLBACK_BETA = "server-side-fallback-2026-07-01";
 
-async function ask({ system, user, maxTokens }) {
+async function ask(request) {
+  if (aiProvider() === "openrouter") {
+    try {
+      return await askOpenRouter(request);
+    } catch (error) {
+      throw explain(error);
+    }
+  }
+  return askClaude(request);
+}
+
+async function askClaude({ system, user, maxTokens }) {
   const params = {
     model: aiModel(),
     max_tokens: maxTokens,
@@ -39,19 +62,22 @@ async function ask({ system, user, maxTokens }) {
   const withFallback = () =>
     c.beta.messages.create({ ...params, betas: [FALLBACK_BETA], fallbacks: "default" });
   try {
-    if (fallbackRejected || process.env.AI_FALLBACK === "off") return await plain();
-    try {
-      return await withFallback();
-    } catch (error) {
-      if (!(error instanceof Anthropic.BadRequestError) || !/fallback|beta/i.test(error.message || ""))
-        throw error;
-      fallbackRejected = true;
-      console.warn(
-        "AI fallback option was refused by the API; continuing without it:",
-        String(error.message).replace(/sk-ant-[\w-]+/g, "sk-ant-…"),
-      );
-      return await plain();
-    }
+    let response;
+    if (fallbackRejected || process.env.AI_FALLBACK === "off") response = await plain();
+    else
+      try {
+        response = await withFallback();
+      } catch (error) {
+        if (!(error instanceof Anthropic.BadRequestError) || !/fallback|beta/i.test(error.message || ""))
+          throw error;
+        fallbackRejected = true;
+        console.warn(
+          "AI fallback option was refused by the API; continuing without it:",
+          String(error.message).replace(/sk-ant-[\w-]+/g, "sk-ant-…"),
+        );
+        response = await plain();
+      }
+    return { text: textOf(response), usage: response.usage, model: response.model };
   } catch (error) {
     throw explain(error);
   }
@@ -74,7 +100,7 @@ function explain(error) {
   return fail(502, "Riwo couldn't finish that. Please try again.");
 }
 
-function textOf(response) {
+function textOf(response) { // a Claude response
   if (response.stop_reason === "refusal")
     throw fail(422, "Riwo can't help with this one. Write the reply yourself.");
   const text = (response.content || [])
@@ -111,6 +137,9 @@ export async function aiStatus(tenant) {
   return {
     available: reason === null,
     reason,
+    provider: aiProvider(),
+    // Free models run on providers that may keep what they are sent, so the app says so.
+    free: aiProvider() === "openrouter",
     enabled: tenant.ai_enabled !== false,
     ...(await usageOf(tenant)),
   };
@@ -151,10 +180,9 @@ async function run(tenant, request) {
   assertAvailable(tenant);
   await reserve(tenant);
   try {
-    const response = await ask(request);
-    const text = textOf(response);
-    await record(tenant, response.usage);
-    return text;
+    const answer = await ask(request);
+    await record(tenant, answer.usage);
+    return answer;
   } catch (error) {
     await release(tenant);
     throw error;
@@ -263,7 +291,8 @@ export async function suggestReply({ tenant, conversationId, tone = "friendly" }
   ]
     .filter(Boolean)
     .join("\n\n");
-  return { text: await run(tenant, { system: systemFor(tenant.name), user, maxTokens: 4096 }), tone: TONES[tone] ? tone : "friendly" };
+  const { text, model } = await run(tenant, { system: systemFor(tenant.name), user, maxTokens: 4096 });
+  return { text, model, tone: TONES[tone] ? tone : "friendly" };
 }
 
 const SUMMARY_LABELS = ["Wants", "Key details", "Status", "Next step"];
@@ -293,20 +322,22 @@ Keep the whole summary under 100 words.`,
   ]
     .filter(Boolean)
     .join("\n\n");
-  const text = await run(tenant, { system: systemFor(tenant.name), user, maxTokens: 4096 });
-  return { text, sections: parseSummary(text) };
+  const { text, model } = await run(tenant, { system: systemFor(tenant.name), user, maxTokens: 4096 });
+  return { text, model, sections: parseSummary(text) };
 }
 
 export async function improveText({ tenant, text, style = "polish" }) {
   const draft = cleanText(text, "Your message");
   const instruction = STYLES[style] || STYLES.polish;
   const user = `<draft>\n${draft}\n</draft>\n\nRewrite the draft above. ${instruction} Keep the draft's language and script. Do not add facts that are not in it.`;
-  return { text: await run(tenant, { system: systemFor(tenant.name), user, maxTokens: 4096 }), style: STYLES[style] ? style : "polish" };
+  const out = await run(tenant, { system: systemFor(tenant.name), user, maxTokens: 4096 });
+  return { text: out.text, model: out.model, style: STYLES[style] ? style : "polish" };
 }
 
 export async function translateText({ tenant, text, target }) {
   const original = cleanText(text, "The text");
   const language = cleanLanguage(target);
   const user = `<draft>\n${original}\n</draft>\n\nTranslate the text above into ${language}. Keep names, numbers, links and line breaks exactly as they are. Output only the translation.`;
-  return { text: await run(tenant, { system: systemFor(tenant.name), user, maxTokens: 4096 }), target: language };
+  const out = await run(tenant, { system: systemFor(tenant.name), user, maxTokens: 4096 });
+  return { text: out.text, model: out.model, target: language };
 }

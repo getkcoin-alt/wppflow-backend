@@ -12,7 +12,6 @@ import { query } from "../db/index.js";
 import { assertConversationAccess } from "../services/access.js";
 import {
   aiStatus,
-  aiModel,
   suggestReply,
   summarize,
   improveText,
@@ -36,8 +35,7 @@ const perPerson = rateLimit({
 router.get(
   "/status",
   route(async (req, res) => {
-    const status = await aiStatus(req.tenant);
-    res.json({ status: "success", ...status, ...(status.available ? { model: aiModel() } : {}) });
+    res.json({ status: "success", ...(await aiStatus(req.tenant)) });
   }),
 );
 
