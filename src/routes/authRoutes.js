@@ -36,7 +36,7 @@ const emailOf = (value) => {
 };
 const platformTenant = {
   id: null,
-  name: "WppFlow Platform",
+  name: "Scriwo Platform",
   plan: "Platform",
   sessions_limit: 0,
   role: "superadmin",

@@ -193,7 +193,7 @@ app.use(errorHandler);
 
 // 4. Server Lifecycle & Initialization
 export async function startServer() {
-  console.log("🚀 Starting WppFlow Enterprise Backend Engine...");
+  console.log("🚀 Starting Scriwo backend...");
   console.log(`📁 Environment: ${ENV.NODE_ENV} | Port: ${ENV.PORT}`);
 
   // 1. Verify PostgreSQL Database
@@ -234,7 +234,7 @@ export async function startServer() {
   // 4. Listen on configured port
   return new Promise((resolve) => {
     server.listen(ENV.PORT, () => {
-      console.log(`✨ WppFlow Core Backend running on port ${ENV.PORT}`);
+      console.log(`✨ Scriwo backend running on port ${ENV.PORT}`);
       resolve(server);
     });
   });

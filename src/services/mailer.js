@@ -52,17 +52,54 @@ export async function sendMail({ to, subject, text, html }) {
     };
   }
 }
+// One quiet, branded layout for every transactional email (table-based so it renders in any client).
+const layout = ({ heading, intro, cta, link, note }) => `<!doctype html>
+<html><body style="margin:0;padding:0;background:#f5f5f7;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f7;padding:32px 16px;">
+<tr><td align="center">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:#ffffff;border-radius:24px;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#1d1d1f;">
+<tr><td style="background:#0a0b0c;padding:28px 36px;">
+<table role="presentation" cellpadding="0" cellspacing="0"><tr>
+<td style="width:36px;height:36px;border-radius:10px;background:#16191b;border:1px solid #2a2f33;text-align:center;color:#d6b97b;font-size:19px;font-weight:700;line-height:36px;">W</td>
+<td style="padding-left:14px;color:#ffffff;font-size:13px;letter-spacing:0.34em;font-weight:500;">SCRIWO</td>
+</tr></table>
+</td></tr>
+<tr><td style="height:3px;background:linear-gradient(90deg,#f3e3bc,#d2b06a,#a8843f);line-height:3px;font-size:0;">&nbsp;</td></tr>
+<tr><td style="padding:36px;">
+<h1 style="margin:0 0 14px;font-size:26px;line-height:1.2;font-weight:600;letter-spacing:-0.02em;">${heading}</h1>
+<p style="margin:0 0 28px;font-size:16px;line-height:1.55;color:#515154;">${intro}</p>
+<p style="margin:0 0 28px;"><a href="${esc(link)}" style="display:inline-block;background:#0f6b55;color:#ffffff;text-decoration:none;font-weight:600;font-size:16px;padding:14px 28px;border-radius:999px;">${cta}</a></p>
+<p style="margin:0 0 6px;font-size:13px;line-height:1.5;color:#86868b;">${note}</p>
+<p style="margin:0;font-size:12px;line-height:1.5;color:#a1a1a6;word-break:break-all;">If the button does not work, copy this address into your browser: ${esc(link)}</p>
+</td></tr>
+</table>
+<p style="margin:20px 0 0;font-family:-apple-system,Helvetica,Arial,sans-serif;font-size:12px;color:#a1a1a6;">Scriwo &middot; Conversations, thoughtfully handled.</p>
+</td></tr></table>
+</body></html>`;
+
 export const sendOwnerSetup = ({ to, name, company, link }) =>
   sendMail({
     to,
-    subject: `Set up your ${company} workspace on WppFlow`,
-    text: `Hello ${name},\n\nYou are the owner of "${company}" on WppFlow. Click the link below to choose your password and sign in. The link works once and expires in 72 hours.\n\n${link}\n\nYour login email: ${to}`,
-    html: `<p>Hello ${esc(name)},</p><p>You are the owner of <b>${esc(company)}</b> on WppFlow.</p><p><a href="${esc(link)}" style="background:#10b981;color:#fff;padding:10px 20px;border-radius:8px;text-decoration:none;display:inline-block">Set your password</a></p><p>The link works once and expires in 72 hours. Your login email is ${esc(to)}.</p><p style="color:#64748b;font-size:12px">If the button does not work, copy this address into your browser: ${esc(link)}</p>`,
+    subject: `Set up ${company} on Scriwo`,
+    text: `Hello ${name},\n\nYou are the owner of "${company}" on Scriwo. Use the link below to choose your password and sign in. The link works once and expires in 72 hours.\n\n${link}\n\nYour login email: ${to}`,
+    html: layout({
+      heading: "Welcome to Scriwo",
+      intro: `Hello ${esc(name)}, you are the owner of <b>${esc(company)}</b>. Choose a password to sign in and start inviting your team.`,
+      cta: "Set your password",
+      link,
+      note: `The link works once and expires in 72 hours. Your login email is ${esc(to)}.`,
+    }),
   });
 export const sendStaffInvite = ({ to, name, company, link }) =>
   sendMail({
     to,
-    subject: `${company} invited you to WppFlow`,
-    text: `Hello ${name},\n\n${company} added you to their WppFlow team. Set your password here (single use, expires in 24 hours):\n${link}`,
-    html: `<p>Hello ${esc(name)},</p><p>${esc(company)} added you to their WppFlow team.</p><p><a href="${esc(link)}">Set your password</a> (single use, expires in 24 hours).</p>`,
+    subject: `${company} invited you to Scriwo`,
+    text: `Hello ${name},\n\n${company} added you to their team on Scriwo. Set your password here (single use, expires in 24 hours):\n${link}`,
+    html: layout({
+      heading: `Join ${esc(company)} on Scriwo`,
+      intro: `Hello ${esc(name)}, <b>${esc(company)}</b> added you to their team. Choose a password, then connect your own WhatsApp number.`,
+      cta: "Set your password",
+      link,
+      note: "The link works once and expires in 24 hours.",
+    }),
   });

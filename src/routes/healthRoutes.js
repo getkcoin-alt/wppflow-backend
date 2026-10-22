@@ -22,7 +22,7 @@ router.get("/health", async (req, res) => {
       .catch(() => null);
   res.status(isHealthy ? 200 : 503).json({
     status: isHealthy ? "ok" : "degraded",
-    engine: "wppflow-enterprise-engine",
+    engine: "scriwo-engine",
     version: "3.0.0",
     apiContract: 3,
     database: {

@@ -115,6 +115,10 @@ export async function deliverWebhook(delivery) {
         headers: {
           "Content-Type": "application/json",
           "Content-Length": Buffer.byteLength(body),
+          "X-Scriwo-Id": delivery.id,
+          "X-Scriwo-Timestamp": timestamp,
+          "X-Scriwo-Signature": signature,
+          // Original header names, kept so integrations built before the rename keep verifying.
           "X-WppFlow-Id": delivery.id,
           "X-WppFlow-Timestamp": timestamp,
           "X-WppFlow-Signature": signature,

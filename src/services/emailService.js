@@ -90,11 +90,11 @@ export async function sendEmail({
 export async function sendWelcomeEmail({
   to,
   name = 'there',
-  workspaceName = 'Scriza',
+  workspaceName = 'your workspace',
   loginUrl = 'https://wppflow-beige.vercel.app',
   temporaryPassword = null
 }) {
-  const subject = `Welcome to WppFlow — ${workspaceName}`;
+  const subject = `Welcome to Scriwo — ${workspaceName}`;
   const passwordSection = temporaryPassword
     ? `
       <div style="background-color: #1a2a32; border-radius: 8px; padding: 16px; margin: 20px 0; border-left: 4px solid #10b981;">
@@ -116,14 +116,14 @@ export async function sendWelcomeEmail({
       <div style="max-width: 560px; margin: 0 auto; background-color: #111b21; border-radius: 16px; border: 1px solid #2a3942; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
         
         <div style="padding: 24px 32px; background: linear-gradient(135deg, #0d1f17 0%, #111b21 100%); border-bottom: 1px solid #2a3942;">
-          <h1 style="margin: 0; color: #ffffff; font-size: 20px; font-weight: 800; letter-spacing: -0.5px;">WppFlow</h1>
-          <p style="margin: 4px 0 0 0; color: #10b981; font-size: 12px; font-weight: 600;">Next-Gen Multi-Tenant WhatsApp CRM</p>
+          <h1 style="margin: 0; color: #ffffff; font-size: 20px; font-weight: 800; letter-spacing: -0.5px;">SCRIWO</h1>
+          <p style="margin: 4px 0 0 0; color: #10b981; font-size: 12px; font-weight: 600;">Conversations, thoughtfully handled.</p>
         </div>
 
         <div style="padding: 32px;">
           <h2 style="color: #ffffff; font-size: 18px; font-weight: 700; margin-top: 0;">Welcome, ${name}! 👋</h2>
           <p style="color: #94a3b8; font-size: 14px; line-height: 1.6;">
-            Your account has been configured for the workspace <strong>${workspaceName}</strong>. You now have access to high-performance multi-session WhatsApp inboxes, campaign broadcasts, and automated customer journeys.
+            Your account has been configured for the workspace <strong>${workspaceName}</strong>. You now have access to a shared WhatsApp inbox, broadcasts and automations.
           </p>
 
           ${passwordSection}
@@ -154,11 +154,11 @@ export async function sendInvitationEmail({
   to,
   name,
   inviterName = 'The Admin Team',
-  workspaceName = 'Scriza',
+  workspaceName = 'your workspace',
   loginUrl = 'https://wppflow-beige.vercel.app',
   temporaryPassword
 }) {
-  const subject = `You have been invited to join ${workspaceName} on WppFlow`;
+  const subject = `You have been invited to join ${workspaceName} on Scriwo`;
   return sendWelcomeEmail({
     to,
     name,
@@ -172,11 +172,11 @@ export async function sendInvitationEmail({
  * Send a verification / test email
  */
 export async function sendTestEmail({ to }) {
-  const subject = 'WppFlow Email Service — Connection Test';
+  const subject = 'Scriwo email — connection test';
   const html = `
     <div style="font-family: sans-serif; background-color: #0c1317; color: #ffffff; padding: 24px; border-radius: 12px;">
       <h2 style="color: #10b981; margin-top: 0;">Resend Mail Service is Live! ✅</h2>
-      <p style="color: #94a3b8; font-size: 14px;">This email confirms that Resend API is properly connected and functioning for your WppFlow instance.</p>
+      <p style="color: #94a3b8; font-size: 14px;">This email confirms that Resend API is properly connected and functioning for your Scriwo instance.</p>
       <p style="color: #64748b; font-size: 12px;">Timestamp: ${new Date().toISOString()}</p>
     </div>
   `;

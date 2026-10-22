@@ -40,6 +40,10 @@ test("Mail is delivered through the Resend HTTP API", async (t) => {
   assert.ok(!/password:/i.test(body.text), "no password is ever emailed");
   assert.match(body.html, /href="https:\/\/app\/\?invite=tok123"/);
   assert.ok(body.html.includes("O&lt;b&gt;") && !body.html.includes("O<b>"), "names are HTML-escaped");
+  assert.match(body.subject, /Scriwo/);
+  assert.match(body.html, /SCRIWO/);
+  assert.ok(!/WppFlow/i.test(body.subject + body.text + body.html), "emails carry the Scriwo name only");
+  assert.match(ENV.MAIL_FROM, /Scriwo <noreply@scriwo\.com>|@scriwo\.com/);
 
   status = 403;
   const failed = await sendStaffInvite({ to: "s@acme.test", name: "S", company: "Acme", link: "https://x/?invite=1" });
