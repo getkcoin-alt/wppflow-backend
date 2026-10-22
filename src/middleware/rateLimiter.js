@@ -39,7 +39,7 @@ export const contactFormLimiter = rateLimit({
   legacyHeaders: false,
   keyGenerator: visitorOf,
   validate: false,
-  message: { status: 'error', message: 'You have sent several messages already. Please wait a few minutes, or write to hello@scriwo.com.' }
+  message: { status: 'error', message: 'You have sent several messages already. Please wait a few minutes and try again.' }
 });
 
 export const contactFormCeiling = rateLimit({
@@ -49,5 +49,5 @@ export const contactFormCeiling = rateLimit({
   legacyHeaders: false,
   keyGenerator: () => 'all',
   validate: false,
-  message: { status: 'error', message: 'We are receiving a lot of messages right now. Please write to hello@scriwo.com.' }
+  message: { status: 'error', message: 'We are receiving a lot of messages right now. Please try again shortly.' }
 });

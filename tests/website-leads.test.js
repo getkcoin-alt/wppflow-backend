@@ -71,6 +71,15 @@ test("Website contact form: enquiries are saved, the team is told, and admins ca
     assert.equal((await query("SELECT count(*)::int AS n FROM website_leads")).rows[0].n, before);
   });
 
+  await t.test("the form works from any website address, such as a preview deploy", async () => {
+    const res = await request(app)
+      .post("/api/public/contact")
+      .set("Origin", "https://scriwo-website-git-preview.vercel.app")
+      .set("X-Forwarded-For", "203.0.113.16")
+      .send({ name: "Preview", email: "p@p.ae" });
+    assert.equal(res.status, 201);
+  });
+
   await t.test("one visitor cannot flood the form", async () => {
     contactFormLimiter.resetKey("203.0.113.14");
     for (let i = 0; i < 5; i++)

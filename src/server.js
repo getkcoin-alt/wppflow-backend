@@ -33,6 +33,10 @@ import { startReconcileLoop, stopReconcileLoop } from "./services/syncService.js
 const app = express();
 const server = http.createServer(app);
 
+// The public website's contact form. It carries no cookies or tokens, and the website calls it
+// through its own domain, so it sits before the origin check: preview and future domains keep working.
+app.use("/api/public", express.json({ limit: "16kb" }), publicRoutes);
+
 // 1. Security & CORS Configuration
 app.use(
   cors({
@@ -185,7 +189,6 @@ app.use("/api/attachments", mediaRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/email", emailRoutes);
 app.use("/api/mail", emailRoutes);
-app.use("/api/public", publicRoutes);
 
 // Backward compatibility alias for /api/chats
 app.use("/api/chats", conversationRoutes);

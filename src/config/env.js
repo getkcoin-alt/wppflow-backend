@@ -40,6 +40,7 @@ export const ENV = {
           ]),
       "https://scriwo.com",
       "https://www.scriwo.com",
+      "https://app.scriwo.com",
     ]),
   ].filter(Boolean),
   ENABLE_DEBUG_ROUTES: process.env.ENABLE_DEBUG_ROUTES === "true",

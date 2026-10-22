@@ -9,7 +9,7 @@ test("The production domains can always talk to the backend", async (t) => {
     await closeSessions(io);
     io.close();
   });
-  for (const origin of ["https://scriwo.com", "https://www.scriwo.com"]) {
+  for (const origin of ["https://scriwo.com", "https://www.scriwo.com", "https://app.scriwo.com"]) {
     await t.test(`${origin}: preflight and requests are allowed, with cookies`, async () => {
       const pre = await request(app)
         .options("/api/auth/login")
