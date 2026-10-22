@@ -1,5 +1,16 @@
 import "dotenv/config";
 
+// The app first lived at a *.vercel.app address. Production now uses its own domain, so a server that
+// still has the old address configured (or none) sends people to https://scriwo.com. Any other address
+// set in APP_URL is respected as is.
+const LEGACY_APP_ADDRESS = /^https?:\/\/[a-z0-9-]+\.vercel\.app$/i;
+export function resolveAppUrl(configured, nodeEnv) {
+  const url = String(configured || "").trim().replace(/\/+$/, "");
+  if (nodeEnv === "production")
+    return !url || LEGACY_APP_ADDRESS.test(url) ? "https://scriwo.com" : url;
+  return url || "http://localhost:5173";
+}
+
 export const ENV = {
   NODE_ENV: process.env.NODE_ENV || "development",
   PORT: parseInt(process.env.PORT || "8080", 10),
@@ -44,10 +55,7 @@ export const ENV = {
   // 0 disables the periodic check that repairs messages missed by the live feed.
   SYNC_RECONCILE_MS: parseInt(process.env.SYNC_RECONCILE_MS || "300000", 10),
   // Base address of the web app, used in the links emailed to people.
-  APP_URL: (
-    process.env.APP_URL ||
-    (process.env.NODE_ENV === "production" ? "https://scriwo.com" : "http://localhost:5173")
-  ).replace(/\/+$/, ""),
+  APP_URL: resolveAppUrl(process.env.APP_URL, process.env.NODE_ENV),
   SUPERADMIN_EMAIL: (process.env.SUPERADMIN_EMAIL || "karnveer@scriza.in").toLowerCase().trim(),
   SUPERADMIN_PASSWORD: process.env.SUPERADMIN_PASSWORD || "",
   ALLOW_PUBLIC_SIGNUP: process.env.ALLOW_PUBLIC_SIGNUP !== "false",
