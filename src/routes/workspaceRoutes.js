@@ -15,6 +15,8 @@ import {
   checkUploadTarget,
   finishUploadCheck,
 } from "../services/mediaService.js";
+import { requireFeature, planView } from "../services/plans.js";
+import { aiStatus } from "../services/aiService.js";
 import {
   resolveWebhook,
   encryptSecret,
@@ -32,6 +34,8 @@ router.get(
       media: mediaEnabled(),
       store: false,
       queue: queueHealth().connected,
+      plan: planView(req.tenant?.plan),
+      ai: await aiStatus(req.tenant),
     }),
   ),
 );
@@ -119,6 +123,7 @@ router.post(
 router.get(
   "/audit",
   requireRole("owner", "admin"),
+  requireFeature("audit"),
   route(async (req, res) => {
     const { rows } = await query(
       "SELECT a.id,a.event_type,a.metadata,a.created_at,u.name AS actor FROM audit_events a LEFT JOIN users u ON u.id=a.actor_id WHERE a.tenant_id=$1 ORDER BY a.id DESC LIMIT 100",
@@ -145,6 +150,7 @@ router.get(
 router.get(
   "/keys",
   requireRole("owner", "admin"),
+  requireFeature("api"),
   route(async (req, res) => {
     const { rows } = await query(
       "SELECT id,name,prefix,scopes,created_at,last_used_at,revoked_at FROM api_keys WHERE tenant_id=$1 ORDER BY created_at DESC",
@@ -156,6 +162,7 @@ router.get(
 router.post(
   "/keys",
   requireRole("owner", "admin"),
+  requireFeature("api"),
   route(async (req, res) => {
     const scopes = req.body.scopes || ["inbox"];
     if (
@@ -201,6 +208,7 @@ router.delete(
 router.get(
   "/webhooks",
   requireRole("owner", "admin"),
+  requireFeature("api"),
   route(async (req, res) => {
     const endpoints = await query(
       "SELECT id,url,enabled,created_at FROM webhook_endpoints WHERE tenant_id=$1",
@@ -220,6 +228,7 @@ router.get(
 router.post(
   "/webhooks",
   requireRole("owner", "admin"),
+  requireFeature("api"),
   route(async (req, res) => {
     const { url } = await resolveWebhook(text(req.body.url, "URL", 2000));
     const secret = crypto.randomBytes(32).toString("hex");
@@ -239,6 +248,7 @@ router.post(
 router.delete(
   "/webhooks/:id",
   requireRole("owner", "admin"),
+  requireFeature("api"),
   route(async (req, res) => {
     await query(
       "UPDATE webhook_endpoints SET enabled=false WHERE id=$1 AND tenant_id=$2",
@@ -250,6 +260,7 @@ router.delete(
 router.post(
   "/webhooks/test",
   requireRole("owner", "admin"),
+  requireFeature("api"),
   route(async (req, res) => {
     await recordWebhook(req.tenantId, "test", {
       synthetic: true,

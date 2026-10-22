@@ -8,11 +8,13 @@ import {
 import { query } from "../db/index.js";
 import { route, fail, text } from "../middleware/http.js";
 import { campaignView, startCampaign } from "../services/campaignService.js";
+import { requireFeature } from "../services/plans.js";
 const router = express.Router();
 router.use(
   authenticateToken,
   requireTenantContext,
   requireRole("owner", "admin"),
+  requireFeature("broadcasts"),
 );
 router.get(
   "/",

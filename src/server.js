@@ -21,6 +21,7 @@ import automationRoutes from "./routes/automationRoutes.js";
 import healthRoutes from "./routes/healthRoutes.js";
 import workspaceRoutes from "./routes/workspaceRoutes.js";
 import mediaRoutes from "./routes/mediaRoutes.js";
+import aiRoutes from "./routes/aiRoutes.js";
 import notificationRoutes from "./routes/notificationRoutes.js";
 import emailRoutes from "./routes/emailRoutes.js";
 import publicRoutes from "./routes/publicRoutes.js";
@@ -186,6 +187,7 @@ app.use("/api/contacts", contactRoutes);
 app.use("/api/automations", automationRoutes);
 app.use("/api/workspace", workspaceRoutes);
 app.use("/api/attachments", mediaRoutes);
+app.use("/api/ai", aiRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/email", emailRoutes);
 app.use("/api/mail", emailRoutes);
@@ -217,7 +219,7 @@ export async function startServer() {
     if (ENV.AUTO_MIGRATE) await runMigrations();
     else {
       const { rows } = await query(
-        "SELECT 1 FROM schema_migrations WHERE version='013_attachment_previews'",
+        "SELECT 1 FROM schema_migrations WHERE version='014_ai_assistant'",
       );
       if (!rows.length)
         throw new Error(

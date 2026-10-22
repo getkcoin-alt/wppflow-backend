@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { query } from "../db/index.js";
 import { sendTextMessage } from "./messageService.js";
+import { planAllows } from "./plans.js";
 export const automationView = (a) => ({
   ...a,
   triggerType: a.trigger_type,
@@ -22,10 +23,14 @@ export async function pumpAutomations(io) {
     );
     const message = messages[0];
     if (message) {
-      const { rows: rules } = await query(
-        "SELECT * FROM automations WHERE tenant_id=$1 AND is_enabled=true AND trigger_type='keyword'",
-        [event.tenant_id],
-      );
+      // A company whose plan doesn't include automations keeps its rules but they don't run.
+      const plan = (await query("SELECT plan FROM tenants WHERE id=$1", [event.tenant_id])).rows[0]?.plan;
+      const { rows: rules } = planAllows(plan, "automations")
+        ? await query(
+            "SELECT * FROM automations WHERE tenant_id=$1 AND is_enabled=true AND trigger_type='keyword'",
+            [event.tenant_id],
+          )
+        : { rows: [] };
       for (const rule of rules) {
         if (
           !rule.trigger_condition ||

@@ -8,11 +8,13 @@ import {
 import { route, text, fail } from "../middleware/http.js";
 import { query } from "../db/index.js";
 import { automationView } from "../services/automationService.js";
+import { requireFeature } from "../services/plans.js";
 const router = express.Router();
 router.use(
   authenticateToken,
   requireTenantContext,
   requireRole("owner", "admin"),
+  requireFeature("automations"),
 );
 router.get(
   "/",
