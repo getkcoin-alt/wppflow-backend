@@ -1,13 +1,14 @@
 import "dotenv/config";
 
-// The app first lived at a *.vercel.app address. Production now uses its own domain, so a server that
-// still has the old address configured (or none) sends people to https://scriwo.com. Any other address
-// set in APP_URL is respected as is.
+// The app first lived at a *.vercel.app address, then at scriwo.com. It now lives at app.scriwo.com
+// (www.scriwo.com is the public website, which forwards old ?invite= links to the app). A server
+// with the old Vercel address configured, or none, sends people to https://app.scriwo.com. Any other
+// address set in APP_URL is respected as is.
 const LEGACY_APP_ADDRESS = /^https?:\/\/[a-z0-9-]+\.vercel\.app$/i;
 export function resolveAppUrl(configured, nodeEnv) {
   const url = String(configured || "").trim().replace(/\/+$/, "");
   if (nodeEnv === "production")
-    return !url || LEGACY_APP_ADDRESS.test(url) ? "https://scriwo.com" : url;
+    return !url || LEGACY_APP_ADDRESS.test(url) ? "https://app.scriwo.com" : url;
   return url || "http://localhost:5173";
 }
 
