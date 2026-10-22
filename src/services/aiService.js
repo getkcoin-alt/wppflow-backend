@@ -2,7 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { query } from "../db/index.js";
 import { fail } from "../middleware/http.js";
 import { planAllows, notIncluded } from "./plans.js";
-import { askOpenRouter } from "./openRouter.js";
+import { askOpenRouter, diagnoseOpenRouter } from "./openRouter.js";
 
 // Riwo, the assistant inside the inbox. It only ever writes text for a person to read and edit: nothing
 // it produces is sent to a customer, and it has no tools. Customer messages are passed to the model as
@@ -340,4 +340,17 @@ export async function translateText({ tenant, text, target }) {
   const user = `<draft>\n${original}\n</draft>\n\nTranslate the text above into ${language}. Keep names, numbers, links and line breaks exactly as they are. Output only the translation.`;
   const out = await run(tenant, { system: systemFor(tenant.name), user, maxTokens: 4096 });
   return { text: out.text, model: out.model, target: language };
+}
+
+// The settings test: asks the assistant for one word and reports what happened, for owners and administrators.
+export async function diagnoseAi() {
+  const provider = aiProvider();
+  if (!provider) return { provider: null, ok: false, error: "No AI key is set on the server." };
+  if (provider === "openrouter") return diagnoseOpenRouter();
+  try {
+    const out = await askClaude({ system: "You are running a connection test.", user: "Reply with the single word OK.", maxTokens: 200 });
+    return { provider, ok: true, model: out.model, sample: out.text.slice(0, 80), attempts: [{ model: out.model, ok: true }] };
+  } catch (error) {
+    return { provider, ok: false, error: error.message, attempts: [] };
+  }
 }

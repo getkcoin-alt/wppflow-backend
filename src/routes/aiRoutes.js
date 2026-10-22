@@ -16,6 +16,7 @@ import {
   summarize,
   improveText,
   translateText,
+  diagnoseAi,
 } from "../services/aiService.js";
 
 const router = express.Router();
@@ -30,6 +31,17 @@ const perPerson = rateLimit({
   keyGenerator: (req) => `${req.tenantId}:${req.user?.id ?? "api"}`,
   validate: false,
   message: { status: "error", message: "You're going a little fast. Wait a moment and try again." },
+});
+
+// A test can try several models, so it gets a tighter limit.
+const testLimit = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `${req.tenantId}:${req.user?.id ?? "api"}:test`,
+  validate: false,
+  message: { status: "error", message: "Please wait a minute before testing again." },
 });
 
 router.get(
@@ -80,6 +92,14 @@ router.post(
       ...(await translateText({ tenant: req.tenant, text: req.body?.text, target: req.body?.target })),
     }),
   ),
+);
+
+// Owners and administrators can run a one-word test that shows why Riwo works or doesn't.
+router.post(
+  "/test",
+  requireRole("owner", "admin"),
+  testLimit,
+  route(async (req, res) => res.json({ status: "success", ...(await diagnoseAi()) })),
 );
 
 // Owners and administrators can switch the assistant off for the whole company.
