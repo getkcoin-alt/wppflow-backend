@@ -770,7 +770,7 @@ test("Real API, database and dispatcher regression suite", async (t) => {
         (e) => e.status === 400,
       );
       assert.throws(() => validateMedia("text/html", 10));
-      assert.throws(() => validateMedia("image/png", 11 * 1024 * 1024));
+      assert.throws(() => validateMedia("image/png", 17 * 1024 * 1024));
       assert.throws(() =>
         validateContent(Buffer.from("<script>alert(1)</script>"), "image/png"),
       );

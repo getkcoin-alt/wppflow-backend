@@ -6,7 +6,8 @@ import { recordWebhook } from "./webhookService.js";
 import {
   mediaEnabled,
   mediaTypes,
-  MAX_MEDIA_BYTES,
+  limitFor,
+  canOpenInline,
   storeIncoming,
   downloadUrl,
 } from "./mediaService.js";
@@ -340,7 +341,7 @@ export async function handleIncomingMessage({
       mediaEnabled() &&
       mediaTypes[msg.mimeType] &&
       Number(msg.byteSize) > 0 &&
-      Number(msg.byteSize) <= MAX_MEDIA_BYTES
+      Number(msg.byteSize) <= limitFor(msg.mimeType)
     ) {
       try {
         const attachment = await storeIncoming(
@@ -435,6 +436,24 @@ export async function handleAckEvent({ tenantId, ackData, io = null }) {
     });
   return m ? { messageId: m.id, ack: m.ack, status: m.status } : null;
 }
+export const MEDIA_MESSAGE_TYPES = new Set([
+  "image",
+  "video",
+  "audio",
+  "document",
+  "sticker",
+  "gif",
+]);
+const MEDIA_TYPE_LIST = [...MEDIA_MESSAGE_TYPES];
+export async function countPendingMedia(tenantId, conversationId) {
+  const { rows } = await query(
+    `SELECT count(*)::int AS n FROM messages m
+      WHERE m.tenant_id=$1 AND m.conversation_id=$2 AND m.type=ANY($3) AND m.provider_message_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM attachments a WHERE a.message_id=m.id AND a.tenant_id=$1 AND a.upload_status='ready')`,
+    [tenantId, conversationId, MEDIA_TYPE_LIST],
+  );
+  return rows[0].n;
+}
 export async function getConversationMessages({
   tenantId,
   conversationId,
@@ -459,25 +478,48 @@ export async function getConversationMessages({
     items = rows.slice(0, count),
     last = items.at(-1),
     messages = items.map(formatMessage).reverse();
+  let mediaPending;
   if (mediaEnabled() && items.length) {
     const attachments = await query(
-      "SELECT message_id,storage_key,original_name,byte_size FROM attachments WHERE tenant_id=$1 AND message_id=ANY($2) AND upload_status='ready'",
+      "SELECT message_id,storage_key,original_name,mime_type,byte_size FROM attachments WHERE tenant_id=$1 AND message_id=ANY($2) AND upload_status='ready'",
       [tenantId, items.map((m) => m.id)],
     );
     await Promise.all(
       attachments.rows.map(async (a) => {
         const message = messages.find((m) => m.id === a.message_id);
         if (message) {
-          message.mediaUrl = await downloadUrl(a.storage_key);
+          message.mediaUrl = await downloadUrl(a.storage_key, {
+            filename: a.original_name,
+          });
+          // Opens in the browser (PDF, photo, video, audio) instead of downloading.
+          if (canOpenInline(a.mime_type))
+            message.openUrl = await downloadUrl(a.storage_key, {
+              inline: true,
+              mime: a.mime_type,
+              filename: a.original_name,
+            });
+          message.mimeType = a.mime_type;
           message.fileName = a.original_name;
           message.fileSize = `${Math.ceil(Number(a.byte_size) / 1024)} KB`;
+          message.mediaState = "ready";
         }
       }),
     );
   }
+  // Files that were never saved (sent before storage was on, or from the phone while offline) say so,
+  // so the chat can offer to load them from WhatsApp.
+  for (const message of messages)
+    if (MEDIA_MESSAGE_TYPES.has(message.type) && !message.mediaState)
+      message.mediaState = !mediaEnabled()
+        ? "storage_off"
+        : message.providerMessageId
+          ? "not_saved"
+          : "unavailable";
+  if (mediaEnabled() && !cursor) mediaPending = await countPendingMedia(tenantId, conversationId);
   return {
     messages,
     hasMore,
     nextCursor: hasMore ? `${last.timestamp_epoch}:${last.id}` : null,
+    ...(mediaPending !== undefined ? { mediaPending } : {}),
   };
 }

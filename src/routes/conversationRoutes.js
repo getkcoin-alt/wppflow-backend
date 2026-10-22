@@ -11,6 +11,7 @@ import { route, fail } from "../middleware/http.js";
 import { defaultWhatsAppProvider as provider } from "../services/whatsapp/WhatsAppProvider.js";
 import { formatConversation } from "../services/conversationService.js";
 import { handleIncomingMessage } from "../services/messageService.js";
+import { fetchMessageMedia, fetchPendingMedia } from "../services/mediaFetchService.js";
 import {
   isManager,
   assertSessionAccess,
@@ -285,6 +286,54 @@ router.get("/:id/messages", async (req, res) => {
     });
   } catch (err) {
     res.status(err.status||500).json({ status: "error", message: err.status?err.message:"This operation is currently unavailable" });
+  }
+});
+
+/**
+ * POST /api/conversations/:id/messages/:messageId/media
+ * Loads one file that was never saved from WhatsApp and keeps it
+ */
+const mediaFailure = (res, err) => {
+  if (!err.status) console.error("Media request failed:", err.stack || err.message);
+  res.status(err.status || 500).json({
+    status: "error",
+    message: err.status ? err.message : "This operation is currently unavailable",
+  });
+};
+router.post("/:id/messages/:messageId/media", async (req, res) => {
+  try {
+    await assertConversationAccess(req, req.params.id);
+    if (!/^[0-9a-f-]{36}$/i.test(req.params.messageId))
+      throw fail(404, "Message not found");
+    const message = await fetchMessageMedia({
+      tenantId: req.tenantId,
+      conversationId: req.params.id,
+      messageId: req.params.messageId,
+    });
+    res.json({ status: "success", message });
+  } catch (err) {
+    mediaFailure(res, err);
+  }
+});
+
+/**
+ * POST /api/conversations/:id/media/fetch-pending
+ * Loads a small batch of the chat's unsaved files; call again with nextBefore until it is null
+ */
+router.post("/:id/media/fetch-pending", async (req, res) => {
+  try {
+    await assertConversationAccess(req, req.params.id);
+    res.json({
+      status: "success",
+      ...(await fetchPendingMedia({
+        tenantId: req.tenantId,
+        conversationId: req.params.id,
+        limit: req.body?.limit,
+        before: req.body?.before || null,
+      })),
+    });
+  } catch (err) {
+    mediaFailure(res, err);
   }
 });
 

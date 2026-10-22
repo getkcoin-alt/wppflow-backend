@@ -520,6 +520,44 @@ export class WhatsAppProvider {
     }
     return { providerMessageId: id, ack: result.ack ?? 0 };
   }
+  // Downloads one message's file from WhatsApp, for messages that were never saved. Works only while
+  // WhatsApp still holds the file; errors carry a code so the caller can explain what happened.
+  async fetchMedia(tenantId, sessionName, providerMessageId, chatId) {
+    const client = this.getSession(tenantId, sessionName)?.client;
+    const coded = (message, code, extra = {}) =>
+      Object.assign(new Error(message), { code, ...extra });
+    if (!client) throw coded("WhatsApp session is offline", "SESSION_OFFLINE");
+    const { limitFor } = await import("../mediaService.js");
+    const hasFile = (m) => m && (m.mediaKey || m.clientUrl || m.deprecatedMms3Url);
+    const idOf = (m) => String(m?.id?._serialized || m?.id?.id || m?.id || "");
+    let raw = await client.getMessageById(providerMessageId).catch(() => null);
+    if (!hasFile(raw)) {
+      // Older messages are not always loaded into WhatsApp Web yet: load the chat's recent history and look again.
+      const recent = await client.getMessages(chatId, { count: 200 }).catch(() => []);
+      raw = recent.find((m) => idOf(m) === providerMessageId) || raw;
+    }
+    if (!hasFile(raw))
+      throw coded("WhatsApp no longer has this message's file", "MEDIA_UNAVAILABLE");
+    const mime = String(raw.mimetype || "").split(";")[0].trim().toLowerCase();
+    const claimed = Number(raw.size) || 0;
+    if (mime && claimed && claimed > limitFor(mime))
+      throw coded("File too large", "MEDIA_TOO_LARGE", { limit: limitFor(mime), size: claimed });
+    let buffer;
+    try {
+      buffer = await client.decryptFile(raw);
+    } catch {
+      try {
+        // WhatsApp Web's own downloader, which copes with links that have since rotated.
+        const data = await client.downloadMedia(raw);
+        buffer = Buffer.from(String(data).split(",").pop(), "base64");
+      } catch {
+        throw coded("The file could not be downloaded", "MEDIA_UNAVAILABLE");
+      }
+    }
+    if (!buffer?.length) throw coded("The file was empty", "MEDIA_UNAVAILABLE");
+    return { buffer, mime, fileName: raw.filename || "", size: buffer.length };
+  }
+
   async getHistory(tenantId, sessionName, chatId, count = 100) {
     const client = this.getSession(tenantId, sessionName)?.client;
     if (!client) throw new Error("WhatsApp session is offline");
