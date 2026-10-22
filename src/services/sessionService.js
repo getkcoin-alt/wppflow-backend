@@ -6,6 +6,13 @@ import { fail } from "../middleware/http.js";
 import { emitForSession } from "./realtime.js";
 import { scheduleSync } from "./syncService.js";
 import { notifySessionLost } from "./notificationService.js";
+// What the person pairing a number sees: plain language, never server file paths.
+export function friendlyStartError(error) {
+  const message = String(error?.message || error || "");
+  if (/already running/i.test(message))
+    return "The previous connection for this number was still shutting down. Please try again.";
+  return message.replace(/(?:\/[\w.@:+-]+){2,}\/?/g, "…").slice(0, 300);
+}
 const workerId = crypto.randomUUID(),
   owned = new Map();
 let recoveryTimer;
@@ -149,6 +156,8 @@ export async function startTenantSession(
         ),
     })
     .catch(async (error) => {
+      // Cancelled on purpose: the canceller cleaned up, and a newer start may own this session now.
+      if (error?.code === "SESSION_CANCELLED") return;
       clearInterval(timer);
       owned.delete(key);
       await provider.closeSession(tenantId, sessionName);
@@ -159,7 +168,7 @@ export async function startTenantSession(
       // Keep the cause so the person pairing sees why, not just "failed".
       await query(
         "UPDATE whatsapp_sessions SET last_error=COALESCE(last_error,$3) WHERE tenant_id=$1 AND session_name=$2 AND status<>'CONNECTED'",
-        [tenantId, sessionName, String(error.message || error).slice(0, 300)],
+        [tenantId, sessionName, friendlyStartError(error)],
       );
       emitForSession(io, tenantId, sessionName, "session:status", {
         session: sessionName,

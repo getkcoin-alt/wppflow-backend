@@ -3,6 +3,7 @@ import path from "path";
 import fs from "fs";
 import { ENV } from "../../config/env.js";
 import { ACK_STATUS, SESSION_STATUS } from "../../config/constants.js";
+import { stopBrowsers, clearProfileLocks } from "./browserProcess.js";
 
 const MEDIA_TYPES = new Set([
   "image",
@@ -100,7 +101,7 @@ export class WhatsAppProvider {
           .then(() => fn(...args))
           .catch((error) => console.error("Provider event:", error.message));
     };
-    const client = await wppconnect.create({
+    const createOptions = {
       session: `tenant_${tenantId}_${sessionName}`,
       catchQR: (base64Qr, asciiQR, attempts, urlCode) => {
         sessionState.status = SESSION_STATUS.QRCODE;
@@ -142,11 +143,35 @@ export class WhatsAppProvider {
         "--no-first-run",
         "--disable-gpu",
       ],
-    });
+    };
+    // A browser left over from an earlier attempt (a pairing cancelled while its QR code was showing,
+    // a restarted worker) would keep this profile locked. Nothing in this process owns the profile at
+    // this point, so whatever is using it is stale.
+    await this.releaseProfile(tenantId, sessionName);
+    const cancelled = () => {
+      const error = new Error("Session startup was cancelled");
+      error.code = "SESSION_CANCELLED";
+      return error;
+    };
+    let client;
+    try {
+      try {
+        client = await wppconnect.create(createOptions);
+      } catch (error) {
+        if (!/already running/i.test(String(error?.message))) throw error;
+        await this.releaseProfile(tenantId, sessionName);
+        client = await wppconnect.create(createOptions);
+      }
+    } catch (error) {
+      // Cancelled or replaced while starting (the pairing was closed, the number removed): whoever did
+      // that already cleaned up, and a newer attempt may own this key now.
+      if (this.sessions.get(key) !== sessionState) throw cancelled();
+      throw error;
+    }
 
     if (this.sessions.get(key) !== sessionState) {
       await client.close();
-      throw new Error("Session startup was cancelled");
+      throw cancelled();
     }
     sessionState.client = client;
     sessionState.phone = await client.getWid().catch(() => null);
@@ -176,6 +201,29 @@ export class WhatsAppProvider {
 
   tokenDir(tenantId, sessionName) {
     return path.join(ENV.TOKEN_DIR, `tenant_${tenantId}_${sessionName}`);
+  }
+
+  // The Chromium profile folder WPPConnect uses for this session: <token folder>/<session id>.
+  profileDir(tenantId, sessionName) {
+    return path.join(
+      this.tokenDir(tenantId, sessionName),
+      `tenant_${tenantId}_${sessionName}`,
+    );
+  }
+
+  // Stops any browser still holding this session's profile and clears its lock files.
+  async releaseProfile(tenantId, sessionName) {
+    const dir = this.profileDir(tenantId, sessionName);
+    try {
+      const stopped = await stopBrowsers(dir);
+      if (stopped)
+        console.warn(
+          `Stopped ${stopped} leftover browser process(es) for ${sessionName}`,
+        );
+      clearProfileLocks(dir);
+    } catch (error) {
+      console.warn(`Could not release browser profile for ${sessionName}: ${error.message}`);
+    }
   }
 
   // Unlinks this computer from the person's phone (WhatsApp -> Linked devices) and discards
@@ -208,7 +256,7 @@ export class WhatsAppProvider {
     const target = path.resolve(this.tokenDir(tenantId, sessionName));
     if (!target.startsWith(base + path.sep)) return false;
     try {
-      fs.rmSync(target, { recursive: true, force: true });
+      fs.rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
       return true;
     } catch (error) {
       console.warn(`Could not delete saved login for ${sessionName}: ${error.message}`);
@@ -227,6 +275,9 @@ export class WhatsAppProvider {
       }
     }
     this.sessions.delete(key);
+    // While a number is still pairing (QR code on screen) there is no client to close, but the
+    // browser is running. Stop it so it cannot linger and lock the profile.
+    await this.releaseProfile(tenantId, sessionName);
   }
 
   async sendTextMessage(tenantId, sessionName, to, text) {

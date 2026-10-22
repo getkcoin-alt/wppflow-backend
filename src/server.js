@@ -25,6 +25,7 @@ import notificationRoutes from "./routes/notificationRoutes.js";
 import emailRoutes from "./routes/emailRoutes.js";
 import { errorHandler } from "./middleware/http.js";
 import { restoreSessions, closeSessions } from "./services/sessionService.js";
+import { sweepOrphanBrowsers } from "./services/whatsapp/browserProcess.js";
 import { startDomainJobs, stopDomainJobs } from "./services/domainJobs.js";
 import { startReconcileLoop, stopReconcileLoop } from "./services/syncService.js";
 
@@ -227,6 +228,10 @@ export async function startServer() {
 
   // 3. Initialize Message Queue
   await initMessageQueue(io);
+  // Browsers left running by the previous release would keep their profiles locked.
+  await sweepOrphanBrowsers(ENV.TOKEN_DIR)
+    .then((n) => n && console.warn(`Stopped ${n} orphaned browser process(es) from a previous run`))
+    .catch((e) => console.warn("Orphan browser sweep skipped:", e.message));
   await restoreSessions(io);
   startDomainJobs(io);
   startReconcileLoop(io);
