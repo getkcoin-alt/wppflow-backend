@@ -101,6 +101,8 @@ export class WhatsAppProvider {
           .then(() => fn(...args))
           .catch((error) => console.error("Provider event:", error.message));
     };
+    const profileDir = this.profileDir(tenantId, sessionName);
+    fs.mkdirSync(profileDir, { recursive: true, mode: 0o700 });
     const createOptions = {
       session: `tenant_${tenantId}_${sessionName}`,
       catchQR: (base64Qr, asciiQR, attempts, urlCode) => {
@@ -135,6 +137,10 @@ export class WhatsAppProvider {
       useChrome: true,
       devtools: false,
       folderNameToken: sessionTokenDir,
+      // WPPConnect keeps a single shared `puppeteerOptions` object in its defaults and writes the
+      // first session's profile folder into it, so every later session in this process would reuse
+      // that folder ("The browser is already running for ..."). Give each session its own.
+      puppeteerOptions: { userDataDir: path.resolve(profileDir) },
       browserArgs: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
