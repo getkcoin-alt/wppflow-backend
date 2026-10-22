@@ -117,6 +117,10 @@ router.post(
       email,
       password,
       companyName: req.body.companyName,
+      // Anyone who signs up on their own starts on the free plan: one person, one number. A paid plan is
+      // set by the platform admin, as the pricing page says.
+      plan: "Free",
+      sessionsLimit: 1,
     });
     res.status(201);
     await respondSession(res, user, { ...tenant, role });

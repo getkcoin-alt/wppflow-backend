@@ -53,6 +53,7 @@ test("Super admin -> company owner -> staff -> private WhatsApp sessions", async
         companyName: "Acme Retail",
         ownerName: "Olivia Owner",
         ownerEmail: "Olivia@Acme.test",
+        plan: "Business",
         sessionsLimit: 4,
       });
     assert.equal(res.status, 201, JSON.stringify(res.body));
@@ -224,7 +225,7 @@ test("Super admin -> company owner -> staff -> private WhatsApp sessions", async
 
   freshLimit();
   await t.test("an existing account made owner of another company can set a password from the link", async () => {
-    const res = await request(app).post("/api/admin/companies").set(saAuth).send({ companyName: "Second Co", ownerName: "Tina Staff", ownerEmail: "tina@acme.test", sessionsLimit: 2 });
+    const res = await request(app).post("/api/admin/companies").set(saAuth).send({ companyName: "Second Co", ownerName: "Tina Staff", ownerEmail: "tina@acme.test", plan: "Starter", sessionsLimit: 2 });
     assert.equal(res.status, 201);
     const mail = mails.at(-1);
     assert.equal(mail.to, "tina@acme.test");
@@ -256,7 +257,7 @@ test("Super admin -> company owner -> staff -> private WhatsApp sessions", async
 
   await t.test("a rejected email still creates the company and tells the admin why", async () => {
     setMailTransport({ sendMail: async () => { throw new Error("The scriza.in domain is not verified"); } });
-    const res = await request(app).post("/api/admin/companies").set(saAuth).send({ companyName: "Bounce Ltd", ownerName: "B", ownerEmail: "b@bounce.test" });
+    const res = await request(app).post("/api/admin/companies").set(saAuth).send({ companyName: "Bounce Ltd", ownerName: "B", ownerEmail: "b@bounce.test", plan: "Starter" });
     assert.equal(res.status, 201);
     assert.equal(res.body.emailSent, false);
     assert.match(res.body.message, /not verified/);
@@ -273,7 +274,7 @@ test("Super admin -> company owner -> staff -> private WhatsApp sessions", async
     const savedKey = ENV.RESEND_API_KEY;
     ENV.RESEND_API_KEY = "";
     try {
-      const res = await request(app).post("/api/admin/companies").set(saAuth).send({ companyName: "NoMail Ltd", ownerName: "N", ownerEmail: "n@nomail.test" });
+      const res = await request(app).post("/api/admin/companies").set(saAuth).send({ companyName: "NoMail Ltd", ownerName: "N", ownerEmail: "n@nomail.test", plan: "Starter" });
       assert.equal(res.status, 503);
       const { rowCount } = await query("SELECT 1 FROM tenants WHERE name='NoMail Ltd'");
       assert.equal(rowCount, 0);

@@ -141,6 +141,8 @@ export async function registerTenantAndUser({
   email,
   password,
   companyName,
+  plan = "Workspace",
+  sessionsLimit = 5,
 }) {
   const normalizedEmail = email.trim().toLowerCase();
   const passwordHash = await hashPassword(password);
@@ -163,10 +165,10 @@ export async function registerTenantAndUser({
     const tenantRes = await client.query(
       `
       INSERT INTO tenants (id, name, slug, plan, sessions_limit)
-      VALUES ($1, $2, $3, 'Workspace', 5)
+      VALUES ($1, $2, $3, $4, $5)
       RETURNING id, name, slug, plan, sessions_limit
     `,
-      [tenantId, (companyName || `${name}'s Workspace`).trim(), slug],
+      [tenantId, (companyName || `${name}'s Workspace`).trim(), slug, plan, sessionsLimit],
     );
     const tenant = tenantRes.rows[0];
 

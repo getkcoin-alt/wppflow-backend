@@ -11,25 +11,47 @@ export const FEATURE_LABELS = {
   ai: "The AI assistant",
 };
 const GROWTH = ["broadcasts", "automations", "audit", "ai"];
+// `numbers` is how many WhatsApp numbers the plan includes (null: agreed per company). `seats` is how many
+// people it is for (null: no limit).
 const TIERS = {
-  free: { name: "Free", seats: 1, features: [] },
-  starter: { name: "Starter", seats: null, features: [] },
-  growth: { name: "Growth", seats: null, features: GROWTH },
-  business: { name: "Business", seats: null, features: [...GROWTH, "api"] },
-  enterprise: { name: "Enterprise", seats: null, features: [...GROWTH, "api"] },
+  free: { name: "Free", numbers: 1, seats: 1, features: [] },
+  starter: { name: "Starter", numbers: 3, seats: null, features: [] },
+  growth: { name: "Growth", numbers: 10, seats: null, features: GROWTH },
+  business: { name: "Business", numbers: 25, seats: null, features: [...GROWTH, "api"] },
+  enterprise: { name: "Enterprise", numbers: null, seats: null, features: [...GROWTH, "api"] },
 };
 
 export function planOf(value) {
   const id = String(value || "").trim().toLowerCase();
   const tier = TIERS[id];
-  if (tier) return { id, name: tier.name, features: tier.features, seats: tier.seats, restricted: true };
+  if (tier) return { id, name: tier.name, features: tier.features, seats: tier.seats, numbers: tier.numbers, restricted: true };
   return {
     id: null,
     name: String(value || "Workspace"),
     features: Object.keys(FEATURE_LABELS),
     seats: null,
+    numbers: null,
     restricted: false,
   };
+}
+
+// The five plans, as the platform admin picks them when creating a company or changing its plan.
+export const planCatalogue = () =>
+  Object.entries(TIERS).map(([id, t]) => ({
+    id,
+    name: t.name,
+    numbers: t.numbers,
+    seats: t.seats,
+    features: Object.entries(FEATURE_LABELS).map(([key, label]) => ({ key, label, included: t.features.includes(key) })),
+  }));
+
+// Validates a plan chosen by the platform admin and returns it. Only the five plans can be chosen: the
+// original "Workspace" plan is kept for companies that already have it, but nobody new is put on it.
+export function choosePlan(value) {
+  const plan = planOf(value);
+  if (!plan.id)
+    throw fail(400, `Choose a plan: ${Object.values(TIERS).map((t) => t.name).join(", ")}`);
+  return plan;
 }
 export const planAllows = (value, feature) => planOf(value).features.includes(feature);
 
@@ -50,6 +72,8 @@ export const planView = (value) => {
     id: plan.id,
     name: plan.name,
     restricted: plan.restricted,
+    numbers: plan.numbers,
+    seats: plan.seats,
     features: Object.fromEntries(Object.keys(FEATURE_LABELS).map((f) => [f, plan.features.includes(f)])),
   };
 };

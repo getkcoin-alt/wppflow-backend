@@ -3,12 +3,14 @@ import { authenticateToken, requireSuperAdmin } from "../middleware/auth.js";
 import { query } from "../db/index.js";
 import { route, fail, text } from "../middleware/http.js";
 import { createCompany, resendOwnerSetupLink } from "../services/adminService.js";
+import { choosePlan, planCatalogue, planOf } from "../services/plans.js";
 const router = express.Router();
 router.use(authenticateToken, requireSuperAdmin);
 const companyView = (r) => ({
   id: r.id,
   name: r.name,
   plan: r.plan,
+  planId: planOf(r.plan).id,
   status: r.status,
   sessionsLimit: r.sessions_limit,
   createdAt: r.created_at,
@@ -28,11 +30,18 @@ const COMPANY_SQL = `SELECT t.*,u.name AS owner_name,u.email AS owner_email,u.mu
 const mailHint = (error) =>
   error ? ` Reason: ${error}. Check RESEND_API_KEY and that MAIL_FROM/RESEND_FROM_EMAIL uses a domain verified in Resend (the default sender is noreply@scriwo.com, so scriwo.com must stay verified in Resend).` : "";
 const limitOf = (value) => {
-  const n = Number(value ?? 5);
-  if (!Number.isInteger(n) || n < 1 || n > 500)
+  const n = Number(value);
+  if (value === null || value === "" || !Number.isInteger(n) || n < 1 || n > 500)
     throw fail(400, "Sessions limit must be a whole number from 1 to 500");
   return n;
 };
+// The number limit of a company: what the admin typed, or else what the plan includes.
+const limitFor = (plan, typed) => {
+  if (typed !== undefined) return limitOf(typed);
+  if (plan.numbers) return plan.numbers;
+  throw fail(400, `${plan.name} has a custom number limit: enter how many WhatsApp numbers this company gets`);
+};
+router.get("/plans", (req, res) => res.json({ status: "success", plans: planCatalogue() }));
 router.get(
   "/companies",
   route(async (req, res) => {
@@ -46,13 +55,14 @@ router.post(
     const ownerEmail = text(req.body.ownerEmail, "Owner email", 254).toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ownerEmail))
       throw fail(400, "Invalid owner email");
+    const plan = choosePlan(req.body.plan);
     const result = await createCompany({
       actorId: req.user.id,
       companyName: text(req.body.companyName, "Company name", 255),
       ownerName: text(req.body.ownerName, "Owner name", 255),
       ownerEmail,
-      sessionsLimit: limitOf(req.body.sessionsLimit),
-      plan: req.body.plan ? text(req.body.plan, "Plan", 50) : undefined,
+      sessionsLimit: limitFor(plan, req.body.sessionsLimit),
+      plan: plan.name,
     });
     const { rows } = await query(`${COMPANY_SQL} WHERE t.id=$1`, [result.tenant.id]);
     res.status(201).json({
@@ -82,6 +92,8 @@ router.post(
 router.patch(
   "/companies/:id",
   route(async (req, res) => {
+    const before = (await query(`${COMPANY_SQL} WHERE t.id=$1`, [req.params.id])).rows[0];
+    if (!before) throw fail(404, "Company not found");
     const fields = [],
       params = [];
     const set = (col, value) => {
@@ -93,24 +105,37 @@ router.patch(
         throw fail(400, "Invalid status");
       set("status", req.body.status);
     }
-    if (req.body.sessionsLimit !== undefined)
-      set("sessions_limit", limitOf(req.body.sessionsLimit));
+    // Moving a company to another plan also gives it that plan's number limit, unless one is typed.
+    let plan = null;
+    if (req.body.plan !== undefined) {
+      plan = choosePlan(req.body.plan);
+      set("plan", plan.name);
+    }
+    if (req.body.sessionsLimit !== undefined) set("sessions_limit", limitOf(req.body.sessionsLimit));
+    else if (plan?.numbers) set("sessions_limit", plan.numbers);
     if (req.body.name !== undefined) set("name", text(req.body.name, "Name", 255));
     if (!fields.length) throw fail(400, "Nothing to update");
     params.push(req.params.id);
-    const { rowCount } = await query(
-      `UPDATE tenants SET ${fields.join(",")},updated_at=now() WHERE id=$${params.length}`,
-      params,
-    );
-    if (!rowCount) throw fail(404, "Company not found");
+    await query(`UPDATE tenants SET ${fields.join(",")},updated_at=now() WHERE id=$${params.length}`, params);
     if (req.body.status === "suspended")
       req.app.get("io")?.in(`tenant:${req.params.id}`).disconnectSockets();
     await query(
       "INSERT INTO audit_events(tenant_id,actor_id,event_type,metadata) VALUES($1,$2,'company.updated',$3)",
-      [req.params.id, req.user.id, JSON.stringify(req.body)],
+      [req.params.id, req.user.id, JSON.stringify({ ...req.body, ...(plan ? { previousPlan: before.plan } : {}) })],
     );
     const { rows } = await query(`${COMPANY_SQL} WHERE t.id=$1`, [req.params.id]);
-    res.json({ status: "success", company: companyView(rows[0]) });
+    const company = companyView(rows[0]);
+    // Moving to a smaller plan never removes anything; say what the company has beyond it.
+    const warnings = [];
+    const after = planOf(company.plan);
+    if (plan) {
+      const people = company.staffCount + 1;
+      if (after.seats && people > after.seats)
+        warnings.push(`${after.name} is for ${after.seats === 1 ? "one person" : `${after.seats} people`}, but ${company.name} has ${people}. They keep their access; no one new can be added.`);
+      if (company.sessionsCount > company.sessionsLimit)
+        warnings.push(`${company.name} has ${company.sessionsCount} numbers linked, above the new limit of ${company.sessionsLimit}. They keep working; no new number can be linked.`);
+    }
+    res.json({ status: "success", company, warnings });
   }),
 );
 // Enquiries from the public website's contact form, newest first.

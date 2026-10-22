@@ -35,6 +35,7 @@ router.get(
       store: false,
       queue: queueHealth().connected,
       plan: planView(req.tenant?.plan),
+      numbersLimit: req.tenant?.sessionsLimit ?? null,
       ai: await aiStatus(req.tenant),
     }),
   ),
