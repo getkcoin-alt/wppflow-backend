@@ -8,6 +8,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { fail } from "../middleware/http.js";
+import { canThumbnail, makeThumbnail } from "./thumbnailService.js";
 // 16 MB for photos, video and audio (close to WhatsApp's own limit), 64 MB for documents.
 export const MEDIA_LIMIT_BYTES = 16 * 1024 * 1024;
 export const DOCUMENT_LIMIT_BYTES = 64 * 1024 * 1024;
@@ -101,8 +102,18 @@ export async function uploadUrl(key, mime, bytes) {
 }
 const safeName = (name) =>
   String(name || "file").replace(/[\r\n"\\/]/g, "_").slice(0, 150);
-// A short-lived address for one stored file. `inline` lets the browser show it (PDFs, images, video,
-// audio) instead of downloading it; anything else is always a download.
+// Signing at the start of a 30-minute window gives every request in that window the same address,
+// so the browser keeps photos it has already shown instead of fetching them again each time the
+// chat refreshes. An address works for 60 to 90 minutes; the chat asks for fresh ones when it
+// reloads or when a photo fails to open.
+const SIGN_WINDOW_MS = 30 * 60 * 1000;
+const LINK_LIFETIME_SECONDS = 90 * 60;
+const signingOptions = () => ({
+  expiresIn: LINK_LIFETIME_SECONDS,
+  signingDate: new Date(Math.floor(Date.now() / SIGN_WINDOW_MS) * SIGN_WINDOW_MS),
+});
+// An address for one stored file. `inline` lets the browser show it (PDFs, images, video, audio)
+// instead of downloading it; anything else is always a download.
 export async function downloadUrl(key, { inline = false, mime, filename } = {}) {
   const show = inline && canOpenInline(mime);
   const name = filename ? `; filename="${safeName(filename)}"` : "";
@@ -114,9 +125,16 @@ export async function downloadUrl(key, { inline = false, mime, filename } = {}) 
       ResponseContentDisposition: `${show ? "inline" : "attachment"}${name}`,
       ...(show ? { ResponseContentType: mime } : {}),
     }),
-    { expiresIn: 300 },
+    signingOptions(),
   );
 }
+// The small preview of a photo, shown in the chat feed.
+export const previewUrl = (key) =>
+  getSignedUrl(
+    client(),
+    new GetObjectCommand({ Bucket: process.env.S3_BUCKET, Key: key }),
+    signingOptions(),
+  );
 const textLike = (buffer) =>
   !buffer.includes(0) &&
   !/<(?:html|script|svg|!doctype)/i.test(buffer.subarray(0, 1024).toString());
@@ -172,10 +190,9 @@ export async function verifyUpload(attachment) {
     head.ContentType !== attachment.mime_type
   )
     throw fail(400, "Uploaded file does not match its declared type or size");
-  validateContent(
-    await readMedia(attachment.storage_key),
-    attachment.mime_type,
-  );
+  const buffer = await readMedia(attachment.storage_key);
+  validateContent(buffer, attachment.mime_type);
+  return buffer;
 }
 export async function readMedia(key) {
   const result = await sendCommand(
@@ -197,6 +214,28 @@ export async function readMedia(key) {
   }
   return Buffer.concat(chunks);
 }
+const previewKey = (key) => `${key}.preview`;
+// Makes and saves the small preview of a photo. Returns what the attachment row records:
+// { thumb_key, width, height }. A file that can't produce a preview records '' so it isn't retried.
+export async function savePreview(key, buffer, mime) {
+  if (!canThumbnail(mime)) return { thumb_key: null, width: null, height: null };
+  const preview = await makeThumbnail(buffer, mime);
+  if (!preview) return { thumb_key: "", width: null, height: null };
+  try {
+    await sendCommand(
+      new PutObjectCommand({
+        Bucket: process.env.S3_BUCKET,
+        Key: previewKey(key),
+        Body: preview.buffer,
+        ContentType: preview.mime,
+      }),
+    );
+  } catch (error) {
+    console.error("Preview could not be saved:", error.message);
+    return { thumb_key: null, width: preview.width, height: preview.height };
+  }
+  return { thumb_key: previewKey(key), width: preview.width, height: preview.height };
+}
 export async function storeIncoming(tenantId, buffer, mime) {
   validateMedia(mime, buffer.length);
   validateContent(buffer, mime);
@@ -209,7 +248,13 @@ export async function storeIncoming(tenantId, buffer, mime) {
       Body: buffer,
     }),
   );
-  return { id: crypto.randomUUID(), key, mime, bytes: buffer.length };
+  return {
+    id: crypto.randomUUID(),
+    key,
+    mime,
+    bytes: buffer.length,
+    ...(await savePreview(key, buffer, mime)),
+  };
 }
 
 const REQUIRED = ["S3_BUCKET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"];

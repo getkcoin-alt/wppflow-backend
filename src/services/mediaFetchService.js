@@ -7,11 +7,11 @@ import {
   validateMedia,
   validateContent,
   storeIncoming,
-  downloadUrl,
-  canOpenInline,
 } from "./mediaService.js";
 import {
   MEDIA_MESSAGE_TYPES,
+  ATTACHMENT_COLUMNS,
+  attachFile,
   countPendingMedia,
   formatMessage,
 } from "./messageService.js";
@@ -51,23 +51,11 @@ async function viewOf(tenantId, messageId) {
   const message = formatMessage(rows[0]);
   const attachment = (
     await query(
-      "SELECT storage_key,original_name,mime_type,byte_size FROM attachments WHERE tenant_id=$1 AND message_id=$2 AND upload_status='ready' ORDER BY created_at DESC LIMIT 1",
+      `SELECT ${ATTACHMENT_COLUMNS} FROM attachments WHERE tenant_id=$1 AND message_id=$2 AND upload_status='ready' ORDER BY created_at DESC LIMIT 1`,
       [tenantId, messageId],
     )
   ).rows[0];
-  if (attachment) {
-    message.mediaUrl = await downloadUrl(attachment.storage_key, { filename: attachment.original_name });
-    if (canOpenInline(attachment.mime_type))
-      message.openUrl = await downloadUrl(attachment.storage_key, {
-        inline: true,
-        mime: attachment.mime_type,
-        filename: attachment.original_name,
-      });
-    message.mimeType = attachment.mime_type;
-    message.fileName = attachment.original_name;
-    message.fileSize = `${Math.ceil(Number(attachment.byte_size) / 1024)} KB`;
-    message.mediaState = "ready";
-  }
+  if (attachment) await attachFile(message, attachment);
   return message;
 }
 
@@ -102,8 +90,8 @@ async function run({ tenantId, conversationId, messageId }) {
   validateContent(media.buffer, media.mime);
   const stored = await storeIncoming(tenantId, media.buffer, media.mime);
   await query(
-    `INSERT INTO attachments(id,tenant_id,conversation_id,message_id,storage_key,original_name,mime_type,byte_size,upload_status)
-     SELECT $1::varchar,$2::varchar,$3::varchar,$4::varchar,$5::varchar,$6::varchar,$7::varchar,$8::bigint,'ready'
+    `INSERT INTO attachments(id,tenant_id,conversation_id,message_id,storage_key,original_name,mime_type,byte_size,upload_status,thumb_key,width,height)
+     SELECT $1::varchar,$2::varchar,$3::varchar,$4::varchar,$5::varchar,$6::varchar,$7::varchar,$8::bigint,'ready',$9::varchar,$10::int,$11::int
       WHERE NOT EXISTS (SELECT 1 FROM attachments WHERE tenant_id=$2::varchar AND message_id=$4::varchar AND upload_status='ready')`,
     [
       crypto.randomUUID(),
@@ -114,6 +102,9 @@ async function run({ tenantId, conversationId, messageId }) {
       media.fileName || `${m.type}-${String(m.provider_message_id).slice(-6)}`,
       stored.mime,
       stored.bytes,
+      stored.thumb_key,
+      stored.width,
+      stored.height,
     ],
   );
   return viewOf(tenantId, messageId);

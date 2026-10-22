@@ -12,6 +12,7 @@ import {
   validateMedia,
   uploadUrl,
   verifyUpload,
+  savePreview,
   mediaTypes,
 } from "../services/mediaService.js";
 import { assertConversationAccess } from "../services/access.js";
@@ -48,10 +49,14 @@ router.post(
     const a = rows[0];
     if (!a) throw fail(404, "Attachment not found");
     await assertConversationAccess(req, a.conversation_id);
-    await verifyUpload(a);
+    const preview = await savePreview(
+      a.storage_key,
+      await verifyUpload(a),
+      a.mime_type,
+    );
     await query(
-      "UPDATE attachments SET upload_status='ready' WHERE id=$1 AND tenant_id=$2",
-      [a.id, req.tenantId],
+      "UPDATE attachments SET upload_status='ready',thumb_key=$3,width=$4,height=$5 WHERE id=$1 AND tenant_id=$2",
+      [a.id, req.tenantId, preview.thumb_key, preview.width, preview.height],
     );
     const result = await sendTextMessage({
       tenantId: req.tenantId,

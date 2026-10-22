@@ -10,7 +10,9 @@ import {
   canOpenInline,
   storeIncoming,
   downloadUrl,
+  previewUrl,
 } from "./mediaService.js";
+import { backfillPreviews } from "./previewService.js";
 
 export function formatMessage(m) {
   return m
@@ -350,7 +352,7 @@ export async function handleIncomingMessage({
           msg.mimeType,
         );
         await query(
-          `INSERT INTO attachments(id,tenant_id,conversation_id,message_id,storage_key,original_name,mime_type,byte_size,upload_status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'ready')`,
+          `INSERT INTO attachments(id,tenant_id,conversation_id,message_id,storage_key,original_name,mime_type,byte_size,upload_status,thumb_key,width,height) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'ready',$9,$10,$11)`,
           [
             attachment.id,
             tenantId,
@@ -360,6 +362,9 @@ export async function handleIncomingMessage({
             msg.fileName || "WhatsApp media",
             attachment.mime,
             attachment.bytes,
+            attachment.thumb_key,
+            attachment.width,
+            attachment.height,
           ],
         );
       } catch (error) {
@@ -454,6 +459,31 @@ export async function countPendingMedia(tenantId, conversationId) {
   );
   return rows[0].n;
 }
+export const ATTACHMENT_COLUMNS =
+  "id,tenant_id,message_id,storage_key,original_name,mime_type,byte_size,thumb_key,width,height";
+// Adds a saved file's addresses and details to its message.
+export async function attachFile(message, a) {
+  message.mediaUrl = await downloadUrl(a.storage_key, {
+    filename: a.original_name,
+  });
+  // Opens in the browser (PDF, photo, video, audio) instead of downloading.
+  if (canOpenInline(a.mime_type))
+    message.openUrl = await downloadUrl(a.storage_key, {
+      inline: true,
+      mime: a.mime_type,
+      filename: a.original_name,
+    });
+  // The small version the chat shows in place of the full photo.
+  if (a.thumb_key) message.thumbUrl = await previewUrl(a.thumb_key);
+  if (a.width && a.height) {
+    message.width = a.width;
+    message.height = a.height;
+  }
+  message.mimeType = a.mime_type;
+  message.fileName = a.original_name;
+  message.fileSize = `${Math.ceil(Number(a.byte_size) / 1024)} KB`;
+  message.mediaState = "ready";
+}
 export async function getConversationMessages({
   tenantId,
   conversationId,
@@ -478,33 +508,19 @@ export async function getConversationMessages({
     items = rows.slice(0, count),
     last = items.at(-1),
     messages = items.map(formatMessage).reverse();
-  let mediaPending;
+  let mediaPending, previewsPending = 0;
   if (mediaEnabled() && items.length) {
     const attachments = await query(
-      "SELECT message_id,storage_key,original_name,mime_type,byte_size FROM attachments WHERE tenant_id=$1 AND message_id=ANY($2) AND upload_status='ready'",
+      `SELECT ${ATTACHMENT_COLUMNS} FROM attachments WHERE tenant_id=$1 AND message_id=ANY($2) AND upload_status='ready'`,
       [tenantId, items.map((m) => m.id)],
     );
     await Promise.all(
       attachments.rows.map(async (a) => {
         const message = messages.find((m) => m.id === a.message_id);
-        if (message) {
-          message.mediaUrl = await downloadUrl(a.storage_key, {
-            filename: a.original_name,
-          });
-          // Opens in the browser (PDF, photo, video, audio) instead of downloading.
-          if (canOpenInline(a.mime_type))
-            message.openUrl = await downloadUrl(a.storage_key, {
-              inline: true,
-              mime: a.mime_type,
-              filename: a.original_name,
-            });
-          message.mimeType = a.mime_type;
-          message.fileName = a.original_name;
-          message.fileSize = `${Math.ceil(Number(a.byte_size) / 1024)} KB`;
-          message.mediaState = "ready";
-        }
+        if (message) await attachFile(message, a);
       }),
     );
+    previewsPending = backfillPreviews(attachments.rows);
   }
   // Files that were never saved (sent before storage was on, or from the phone while offline) say so,
   // so the chat can offer to load them from WhatsApp.
@@ -521,5 +537,6 @@ export async function getConversationMessages({
     hasMore,
     nextCursor: hasMore ? `${last.timestamp_epoch}:${last.id}` : null,
     ...(mediaPending !== undefined ? { mediaPending } : {}),
+    ...(previewsPending ? { previewsPending } : {}),
   };
 }
