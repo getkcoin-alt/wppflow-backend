@@ -169,6 +169,18 @@ export async function startTenantSession(
     })
     .catch((error) => console.error("Session failure cleanup:", error.message));
 }
+// Permanently remove a number: unlink it from the phone, stop the browser, delete the saved
+// login and forget the session. Inbox history is kept.
+export async function removeTenantSession(tenantId, sessionName, io) {
+  const unlinked = await provider.logoutSession(tenantId, sessionName);
+  await closeTenantSession(tenantId, sessionName, io, false);
+  provider.deleteTokens(tenantId, sessionName);
+  await query(
+    "DELETE FROM whatsapp_sessions WHERE tenant_id=$1 AND session_name=$2",
+    [tenantId, sessionName],
+  );
+  return { unlinked };
+}
 export async function closeTenantSession(
   tenantId,
   sessionName,

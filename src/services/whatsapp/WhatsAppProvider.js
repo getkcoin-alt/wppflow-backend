@@ -62,10 +62,7 @@ export class WhatsAppProvider {
     }
 
     const legacyTokenDir = path.join(ENV.TOKEN_DIR, sessionName);
-    const sessionTokenDir = path.join(
-      ENV.TOKEN_DIR,
-      `tenant_${tenantId}_${sessionName}`,
-    );
+    const sessionTokenDir = this.tokenDir(tenantId, sessionName);
     if (!fs.existsSync(sessionTokenDir)) {
       const owners = JSON.parse(process.env.LEGACY_SESSION_OWNERS || "{}");
       if (owners[sessionName] === tenantId && fs.existsSync(legacyTokenDir)) {
@@ -175,6 +172,48 @@ export class WhatsAppProvider {
     }
 
     return sessionState;
+  }
+
+  tokenDir(tenantId, sessionName) {
+    return path.join(ENV.TOKEN_DIR, `tenant_${tenantId}_${sessionName}`);
+  }
+
+  // Unlinks this computer from the person's phone (WhatsApp -> Linked devices) and discards
+  // the saved login. Closing the browser alone leaves the device linked. Returns whether
+  // WhatsApp confirmed the unlink; false means it must be removed from the phone by hand.
+  async logoutSession(tenantId, sessionName) {
+    const session = this.getSession(tenantId, sessionName);
+    if (!session?.client) return false;
+    let timer;
+    try {
+      const result = await Promise.race([
+        session.client.logout(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("logout timed out")), 15000);
+        }),
+      ]);
+      return result !== false;
+    } catch (error) {
+      console.warn(`WhatsApp logout for ${sessionName} failed: ${error.message}`);
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // Removes the saved login and browser profile from disk. Never touches anything outside
+  // the token directory.
+  deleteTokens(tenantId, sessionName) {
+    const base = path.resolve(ENV.TOKEN_DIR);
+    const target = path.resolve(this.tokenDir(tenantId, sessionName));
+    if (!target.startsWith(base + path.sep)) return false;
+    try {
+      fs.rmSync(target, { recursive: true, force: true });
+      return true;
+    } catch (error) {
+      console.warn(`Could not delete saved login for ${sessionName}: ${error.message}`);
+      return false;
+    }
   }
 
   async closeSession(tenantId, sessionName) {

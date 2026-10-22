@@ -10,6 +10,7 @@ import { defaultWhatsAppProvider as provider } from "../services/whatsapp/WhatsA
 import {
   startTenantSession,
   closeTenantSession,
+  removeTenantSession,
   validateSession,
 } from "../services/sessionService.js";
 import { syncConversations } from "../services/conversationService.js";
@@ -143,17 +144,18 @@ router.delete(
   requireRole("owner", "admin", "agent"),
   route(async (req, res) => {
     await assertSessionAccess(req, req.params.sessionName);
-    await closeTenantSession(
+    const { unlinked } = await removeTenantSession(
       req.tenantId,
       req.params.sessionName,
       req.app.get("io"),
-      false,
     );
-    await query(
-      "DELETE FROM whatsapp_sessions WHERE tenant_id=$1 AND session_name=$2",
-      [req.tenantId, req.params.sessionName],
-    );
-    res.json({ status: "success" });
+    res.json({
+      status: "success",
+      unlinked,
+      message: unlinked
+        ? "Removed and unlinked from the phone."
+        : "Removed here. WhatsApp could not unlink it automatically: on the phone open WhatsApp > Linked devices and remove it.",
+    });
   }),
 );
 router.patch(
