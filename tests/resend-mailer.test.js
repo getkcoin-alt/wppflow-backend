@@ -51,3 +51,9 @@ test("Mail is delivered through the Resend HTTP API", async (t) => {
   assert.equal(failed.reason, "delivery_failed");
   assert.match(failed.detail, /Resend 403: domain not verified/);
 });
+
+test("the production domains are always allowed origins and links point at the app domain", async () => {
+  assert.ok(ENV.ALLOWED_ORIGINS.includes("https://scriwo.com"));
+  assert.ok(ENV.ALLOWED_ORIGINS.includes("https://www.scriwo.com"));
+  assert.ok(!ENV.APP_URL.endsWith("/"), "no double slash in invite links");
+});

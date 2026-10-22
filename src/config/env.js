@@ -16,13 +16,21 @@ export const ENV = {
   DATABASE_URL:
     process.env.DATABASE_URL || "postgresql://localhost:5432/wppflow",
   REDIS_URL: process.env.REDIS_URL || "redis://127.0.0.1:6379",
-  ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS
-    ? process.env.ALLOWED_ORIGINS.split(",").map((s) => s.trim())
-    : [
-        "http://localhost:5173",
-        "http://localhost:3000",
-        "https://wppflow-beige.vercel.app",
-      ],
+  // The production domain is always allowed, even when ALLOWED_ORIGINS is set on the server,
+  // so a deploy can never lock the app out of its own API and live updates.
+  ALLOWED_ORIGINS: [
+    ...new Set([
+      ...(process.env.ALLOWED_ORIGINS
+        ? process.env.ALLOWED_ORIGINS.split(",").map((s) => s.trim())
+        : [
+            "http://localhost:5173",
+            "http://localhost:3000",
+            "https://wppflow-beige.vercel.app",
+          ]),
+      "https://scriwo.com",
+      "https://www.scriwo.com",
+    ]),
+  ].filter(Boolean),
   ENABLE_DEBUG_ROUTES: process.env.ENABLE_DEBUG_ROUTES === "true",
   TOKEN_DIR: process.env.TOKEN_DIR || "./tokens",
   BODY_LIMIT: process.env.BODY_LIMIT || "2mb",
@@ -35,7 +43,11 @@ export const ENV = {
   QR_TIMEOUT_MS: parseInt(process.env.QR_TIMEOUT_MS || "180000", 10),
   // 0 disables the periodic check that repairs messages missed by the live feed.
   SYNC_RECONCILE_MS: parseInt(process.env.SYNC_RECONCILE_MS || "300000", 10),
-  APP_URL: process.env.APP_URL || "http://localhost:5173",
+  // Base address of the web app, used in the links emailed to people.
+  APP_URL: (
+    process.env.APP_URL ||
+    (process.env.NODE_ENV === "production" ? "https://scriwo.com" : "http://localhost:5173")
+  ).replace(/\/+$/, ""),
   SUPERADMIN_EMAIL: (process.env.SUPERADMIN_EMAIL || "karnveer@scriza.in").toLowerCase().trim(),
   SUPERADMIN_PASSWORD: process.env.SUPERADMIN_PASSWORD || "",
   ALLOW_PUBLIC_SIGNUP: process.env.ALLOW_PUBLIC_SIGNUP !== "false",

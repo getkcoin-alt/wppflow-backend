@@ -91,7 +91,7 @@ export async function sendWelcomeEmail({
   to,
   name = 'there',
   workspaceName = 'your workspace',
-  loginUrl = 'https://wppflow-beige.vercel.app',
+  loginUrl = 'https://scriwo.com',
   temporaryPassword = null
 }) {
   const subject = `Welcome to Scriwo — ${workspaceName}`;
@@ -155,7 +155,7 @@ export async function sendInvitationEmail({
   name,
   inviterName = 'The Admin Team',
   workspaceName = 'your workspace',
-  loginUrl = 'https://wppflow-beige.vercel.app',
+  loginUrl = 'https://scriwo.com',
   temporaryPassword
 }) {
   const subject = `You have been invited to join ${workspaceName} on Scriwo`;

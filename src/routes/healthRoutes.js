@@ -1,6 +1,7 @@
 import express from "express";
 import { checkDatabaseHealth, query } from "../db/index.js";
 import { BUILD } from "../config/build.js";
+import { ENV } from "../config/env.js";
 import { defaultWhatsAppProvider } from "../services/whatsapp/WhatsAppProvider.js";
 import { getEmailServiceStatus } from "../services/emailService.js";
 
@@ -30,6 +31,7 @@ router.get("/health", async (req, res) => {
       type: "PostgreSQL",
     },
     build: BUILD,
+    appUrl: ENV.APP_URL,
     schemaVersion,
     emailService: getEmailServiceStatus(),
     activeSessions: activeSessionsCount,
