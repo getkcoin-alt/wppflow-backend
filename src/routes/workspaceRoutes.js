@@ -17,6 +17,8 @@ import {
 } from "../services/mediaService.js";
 import { requireFeature, planView } from "../services/plans.js";
 import { aiStatus } from "../services/aiService.js";
+import { isManager } from "../services/access.js";
+import { subscriptionView } from "../services/subscriptionService.js";
 import {
   resolveWebhook,
   encryptSecret,
@@ -37,6 +39,8 @@ router.get(
       plan: planView(req.tenant?.plan),
       numbersLimit: req.tenant?.sessionsLimit ?? null,
       ai: await aiStatus(req.tenant),
+      // What the company pays for and when it renews: for owners and administrators only.
+      ...(isManager(req) ? { subscription: subscriptionView(req.tenant) } : {}),
     }),
   ),
 );

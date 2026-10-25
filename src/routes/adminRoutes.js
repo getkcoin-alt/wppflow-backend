@@ -5,6 +5,7 @@ import { route, fail, text } from "../middleware/http.js";
 import { createCompany, resendOwnerSetupLink } from "../services/adminService.js";
 import { choosePlan, planCatalogue, planOf } from "../services/plans.js";
 import { dailyLimitOf, defaultDailyLimit } from "../services/aiService.js";
+import { subscriptionView, recordPayment, scheduleChange, clearScheduledChange, paymentsOf } from "../services/subscriptionService.js";
 const router = express.Router();
 router.use(authenticateToken, requireSuperAdmin);
 const companyView = (r) => ({
@@ -21,6 +22,8 @@ const companyView = (r) => ({
   staffCount: r.staff_count,
   sessionsCount: r.sessions_count,
   connectedSessions: r.connected_sessions,
+  // Where the company stands on what it pays for: the period, the renewal date, what happens next.
+  subscription: subscriptionView(r),
   // The AI assistant (Riwo) as part of the subscription: what the company may use and what it has used.
   ai: {
     included: planOf(r.plan).features.includes("ai"),
@@ -63,6 +66,17 @@ const aiLimitOf = (value) => {
     throw fail(400, "The daily AI allowance must be a whole number from 1 to 100000, or left blank for the default");
   return n;
 };
+// Moving to a smaller plan never removes anything; say what the company has beyond it.
+function planWarnings(company) {
+  const warnings = [];
+  const after = planOf(company.plan);
+  const people = company.staffCount + 1;
+  if (after.seats && people > after.seats)
+    warnings.push(`${after.name} is for ${after.seats === 1 ? "one person" : `${after.seats} people`}, but ${company.name} has ${people}. They keep their access; no one new can be added.`);
+  if (company.sessionsCount > company.sessionsLimit)
+    warnings.push(`${company.name} has ${company.sessionsCount} numbers linked, above the new limit of ${company.sessionsLimit}. They keep working; no new number can be linked.`);
+  return warnings;
+}
 router.get("/plans", (req, res) =>
   res.json({
     status: "success",
@@ -141,6 +155,11 @@ router.patch(
       plan = choosePlan(req.body.plan);
       set("plan", plan.name);
     }
+    // The Free plan has nothing to pay: its old billing period would only show as overdue if the company later returned.
+    if (plan?.id === "free")
+      fields.push("billing_cycle=NULL", "period_start=NULL", "period_end=NULL", "scheduled_plan=NULL", "reminded_soon_for=NULL", "reminded_overdue_for=NULL");
+    // A plan chosen now replaces any change that was waiting for the end of the period.
+    else if (plan) fields.push("scheduled_plan=NULL");
     if (req.body.sessionsLimit !== undefined) set("sessions_limit", limitOf(req.body.sessionsLimit));
     else if (plan?.numbers) set("sessions_limit", plan.numbers);
     if (req.body.name !== undefined) set("name", text(req.body.name, "Name", 255));
@@ -160,17 +179,43 @@ router.patch(
     );
     const { rows } = await query(`${COMPANY_SQL} WHERE t.id=$1`, [req.params.id]);
     const company = companyView(rows[0]);
-    // Moving to a smaller plan never removes anything; say what the company has beyond it.
-    const warnings = [];
-    const after = planOf(company.plan);
-    if (plan) {
-      const people = company.staffCount + 1;
-      if (after.seats && people > after.seats)
-        warnings.push(`${after.name} is for ${after.seats === 1 ? "one person" : `${after.seats} people`}, but ${company.name} has ${people}. They keep their access; no one new can be added.`);
-      if (company.sessionsCount > company.sessionsLimit)
-        warnings.push(`${company.name} has ${company.sessionsCount} numbers linked, above the new limit of ${company.sessionsLimit}. They keep working; no new number can be linked.`);
-    }
+    const warnings = plan ? planWarnings(company) : [];
     res.json({ status: "success", company, warnings });
+  }),
+);
+// ── Subscription: payments received, and what happens when the period ends ─────────────────────
+const companyAfter = async (id) => companyView((await query(`${COMPANY_SQL} WHERE t.id=$1`, [id])).rows[0]);
+router.get(
+  "/companies/:id/payments",
+  route(async (req, res) => {
+    if (!(await query("SELECT 1 FROM tenants WHERE id=$1", [req.params.id])).rowCount) throw fail(404, "Company not found");
+    res.json({ status: "success", payments: await paymentsOf(req.params.id) });
+  }),
+);
+router.post(
+  "/companies/:id/subscription/payment",
+  route(async (req, res) => {
+    const result = await recordPayment({ tenantId: req.params.id, actorId: req.user.id, body: req.body });
+    const company = await companyAfter(req.params.id);
+    res.status(201).json({
+      status: "success",
+      company,
+      warnings: result.planChanged ? planWarnings(company) : [],
+    });
+  }),
+);
+router.post(
+  "/companies/:id/subscription/schedule",
+  route(async (req, res) => {
+    await scheduleChange({ tenantId: req.params.id, actorId: req.user.id, plan: req.body.plan });
+    res.json({ status: "success", company: await companyAfter(req.params.id) });
+  }),
+);
+router.delete(
+  "/companies/:id/subscription/schedule",
+  route(async (req, res) => {
+    await clearScheduledChange({ tenantId: req.params.id, actorId: req.user.id });
+    res.json({ status: "success", company: await companyAfter(req.params.id) });
   }),
 );
 // Enquiries from the public website's contact form, newest first.
