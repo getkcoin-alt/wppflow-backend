@@ -6,6 +6,7 @@ import { mediaEnabled } from "../services/mediaService.js";
 import { aiConfigured, aiProvider } from "../services/aiService.js";
 import { defaultWhatsAppProvider } from "../services/whatsapp/WhatsAppProvider.js";
 import { getEmailServiceStatus } from "../services/emailService.js";
+import { paymentsStatus } from "../services/billingService.js";
 
 const router = express.Router();
 
@@ -36,6 +37,8 @@ router.get("/health", async (req, res) => {
     appUrl: ENV.APP_URL,
     media: { configured: mediaEnabled() },
     ai: { configured: aiConfigured(), provider: aiProvider() },
+    // whether online payment is switched on, and in which mode (test or live): never the keys
+    payments: paymentsStatus(),
     schemaVersion,
     emailService: getEmailServiceStatus(),
     activeSessions: activeSessionsCount,

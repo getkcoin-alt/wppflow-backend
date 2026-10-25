@@ -18,6 +18,8 @@ import sessionRoutes from "./routes/sessionRoutes.js";
 import campaignRoutes from "./routes/campaignRoutes.js";
 import contactRoutes from "./routes/contactRoutes.js";
 import labelRoutes from "./routes/labelRoutes.js";
+import billingRoutes from "./routes/billingRoutes.js";
+import { razorpayWebhook } from "./services/billingService.js";
 import automationRoutes from "./routes/automationRoutes.js";
 import leadRoutes from "./routes/leadRoutes.js";
 import healthRoutes from "./routes/healthRoutes.js";
@@ -40,6 +42,10 @@ const server = http.createServer(app);
 // The public website's contact form. It carries no cookies or tokens, and the website calls it
 // through its own domain, so it sits before the origin check: preview and future domains keep working.
 app.use("/api/public", express.json({ limit: "16kb" }), publicRoutes);
+
+// Razorpay's webhook: no cookies, no origin, and the signature covers the exact bytes, so it reads the body raw and
+// comes before the JSON parser below.
+app.post("/api/billing/razorpay/webhook", express.raw({ type: "*/*", limit: "1mb" }), razorpayWebhook(() => app.get("io")));
 
 // 1. Security & CORS Configuration
 app.use(
@@ -188,6 +194,7 @@ app.use("/api/sessions", sessionRoutes);
 app.use("/api/campaigns", campaignRoutes);
 app.use("/api/contacts", contactRoutes);
 app.use("/api/labels", labelRoutes);
+app.use("/api/billing", billingRoutes);
 app.use("/api/automations", automationRoutes);
 app.use("/api/leads", leadRoutes);
 app.use("/api/workspace", workspaceRoutes);
@@ -224,7 +231,7 @@ export async function startServer() {
     if (ENV.AUTO_MIGRATE) await runMigrations();
     else {
       const { rows } = await query(
-        "SELECT 1 FROM schema_migrations WHERE version='019_labels_contact_names'",
+        "SELECT 1 FROM schema_migrations WHERE version='020_billing'",
       );
       if (!rows.length)
         throw new Error(

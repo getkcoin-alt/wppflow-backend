@@ -6,6 +6,8 @@ import { createCompany, resendOwnerSetupLink } from "../services/adminService.js
 import { choosePlan, planCatalogue, planOf, updatePlan } from "../services/plans.js";
 import { dailyLimitOf, defaultDailyLimit } from "../services/aiService.js";
 import { subscriptionView, recordPayment, scheduleChange, clearScheduledChange, paymentsOf } from "../services/subscriptionService.js";
+import { invoiceForRecordedPayment, adminPayments, getInvoice } from "../services/billingService.js";
+import { renderInvoice, invoiceFileName } from "../services/invoicePdf.js";
 const router = express.Router();
 router.use(authenticateToken, requireSuperAdmin);
 const companyView = (r) => ({
@@ -206,11 +208,41 @@ router.post(
   route(async (req, res) => {
     const result = await recordPayment({ tenantId: req.params.id, actorId: req.user.id, body: req.body });
     const company = await companyAfter(req.params.id);
+    // a payment in rupees also gets a GST invoice, when the company has saved its billing details
+    const invoiced = await invoiceForRecordedPayment({ tenantId: req.params.id, paymentId: result.paymentId }).catch((e) => ({ skipped: e.message }));
     res.status(201).json({
       status: "success",
       company,
+      invoice: invoiced.invoice || null,
+      invoiceSkipped: invoiced.skipped || null,
+      paymentId: result.paymentId,
       warnings: [...(result.planChanged ? planWarnings(company) : []), ...(result.notice ? [result.notice] : [])],
     });
+  }),
+);
+// Issue the invoice for a recorded payment later, after the company has saved its billing details.
+router.post(
+  "/companies/:id/payments/:paymentId/invoice",
+  route(async (req, res) => {
+    const result = await invoiceForRecordedPayment({ tenantId: req.params.id, paymentId: req.params.paymentId });
+    if (!result.invoice) throw fail(400, result.skipped);
+    res.status(201).json({ status: "success", invoice: result.invoice });
+  }),
+);
+// Online payments across companies, and what needs a look: payments that did not match, refunds.
+router.get(
+  "/billing/payments",
+  route(async (req, res) => {
+    res.json({ status: "success", ...(await adminPayments({ status: String(req.query.status || "") })) });
+  }),
+);
+router.get(
+  "/companies/:id/invoices/:invoiceId/pdf",
+  route(async (req, res) => {
+    const invoice = await getInvoice(req.params.id, req.params.invoiceId);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${invoiceFileName(invoice.number)}"`);
+    renderInvoice(invoice).pipe(res);
   }),
 );
 router.post(

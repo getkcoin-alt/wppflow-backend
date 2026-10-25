@@ -3,6 +3,7 @@ import { pumpAutomations } from "./automationService.js";
 import { pumpWebhooks } from "./webhookService.js";
 import { pumpLeadReminders } from "./leadService.js";
 import { pumpSubscriptions } from "./subscriptionService.js";
+import { pumpBilling } from "./billingService.js";
 let timer, running;
 export function startDomainJobs(io) {
   timer = setInterval(() => {
@@ -13,6 +14,7 @@ export function startDomainJobs(io) {
       pumpWebhooks(),
       pumpLeadReminders(io),
       pumpSubscriptions(io),
+      pumpBilling(io),
     ])
       .then((results) => {
         for (const r of results)

@@ -27,15 +27,15 @@ export function addCycle(date, cycle) {
   target.setUTCDate(Math.min(d.getUTCDate(), last));
   return target.toISOString().slice(0, 10);
 }
-const showDate = (date) =>
+export const showDate = (date) =>
   utcDate(date).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
 
-const addDays = (date, n) => {
+export const addDays = (date, n) => {
   const d = utcDate(date);
   d.setUTCDate(d.getUTCDate() + n);
   return d.toISOString().slice(0, 10);
 };
-const rankOf = (id) => planCatalogue({ all: true }).findIndex((p) => p.id === id);
+export const rankOf = (id) => planCatalogue({ all: true }).findIndex((p) => p.id === id);
 
 // Where the company stands, worked out from the dates every time it is asked, so it can never be left stale:
 //   free         the Free plan: nothing to pay
@@ -83,13 +83,16 @@ const limitOf = (value) => {
     throw fail(400, "Sessions limit must be a whole number from 1 to 500");
   return n;
 };
-const audit = (client, tenantId, actorId, type, metadata) =>
+export const audit = (client, tenantId, actorId, type, metadata) =>
   client.query("INSERT INTO audit_events(tenant_id,actor_id,event_type,metadata) VALUES($1,$2,$3,$4)", [
     tenantId,
     actorId ?? null,
     type,
     JSON.stringify(metadata),
   ]);
+// The readable history shown to the company: what happened to the subscription, and when.
+export const logEvent = (client, tenantId, type, plan, details = {}) =>
+  client.query("INSERT INTO subscription_events(tenant_id,event_type,plan,details) VALUES($1,$2,$3,$4)", [tenantId, type, plan ?? null, JSON.stringify(details)]);
 const tenantRow = async (client, id) => {
   const { rows } = await client.query("SELECT * FROM tenants WHERE id=$1 FOR UPDATE", [id]);
   if (!rows[0]) throw fail(404, "Company not found");
@@ -100,12 +103,18 @@ const tenantRow = async (client, id) => {
 // is the one named, else the one scheduled for this period, else the plan it is on; paying for a different plan
 // moves the company to it. The period starts where the last one ended (or today when that was long ago), and
 // ends a month or a year later unless the admin gives the renewal date.
-export async function recordPayment({ tenantId, actorId, body = {}, now = todayUtc() }) {
-  return withTransaction(async (client) => {
+export async function recordPayment({ tenantId, actorId, body = {}, now = todayUtc(), client: given = null, trusted = false, source = "manual", orderId = null }) {
+  // `given` joins a transaction the caller already has open (an online payment is settled together with its
+  // invoice); `trusted` is a payment the gateway has already taken, which is honoured even if the plan was taken
+  // off sale while the customer was paying.
+  const work = async (client) => {
     const t = await tenantRow(client, tenantId);
     const current = planOf(t.plan);
     let target;
-    if (body.plan !== undefined && body.plan !== null && body.plan !== "") target = choosePlan(body.plan);
+    if (body.plan !== undefined && body.plan !== null && body.plan !== "") {
+      target = trusted ? planOf(body.plan) : choosePlan(body.plan);
+      if (!target.id) throw fail(400, "Choose the plan this payment is for");
+    }
     else if (t.scheduled_plan) target = planOf(t.scheduled_plan);
     else if (current.id) target = current;
     else throw fail(400, "Choose the plan this payment is for");
@@ -148,10 +157,11 @@ export async function recordPayment({ tenantId, actorId, body = {}, now = todayU
     );
     const paymentId = crypto.randomUUID();
     await client.query(
-      `INSERT INTO subscription_payments(id,tenant_id,recorded_by,plan,billing_cycle,period_start,period_end,amount,currency,reference)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-      [paymentId, tenantId, actorId ?? null, target.name, cycle, start, end, amount, currency, reference],
+      `INSERT INTO subscription_payments(id,tenant_id,recorded_by,plan,billing_cycle,period_start,period_end,amount,currency,reference,source,order_id)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [paymentId, tenantId, actorId ?? null, target.name, cycle, start, end, amount, currency, reference, source, orderId],
     );
+    await logEvent(client, tenantId, "payment", target.name, { cycle, periodStart: start, periodEnd: end, amount, currency, reference, source, previousPlan: t.plan });
     await audit(client, tenantId, actorId, "subscription.payment_recorded", {
       plan: target.name,
       previousPlan: t.plan,
@@ -168,8 +178,9 @@ export async function recordPayment({ tenantId, actorId, body = {}, now = todayU
       status === "overdue" || status === "expired"
         ? `The renewal date ${showDate(end)} has already passed, so the company will show as ${status === "expired" ? "expired and its paid features stay off" : "late"}. Check the dates if that is not what you meant.`
         : null;
-    return { paymentId, plan: target, planChanged: target.id !== current.id, notice };
-  });
+    return { paymentId, plan: target, planChanged: target.id !== current.id, notice, periodStart: start, periodEnd: end, cycle };
+  };
+  return given ? work(given) : withTransaction(work);
 }
 
 // "Moves to a smaller plan (or to Free) when the period ends". A bigger plan takes effect at once, so it is not
@@ -190,6 +201,7 @@ export async function scheduleChange({ tenantId, actorId, plan }) {
       to: target.name,
       on: dateOnly(t.period_end),
     });
+    await logEvent(client, tenantId, target.id === "free" ? "cancel_scheduled" : "downgrade_scheduled", current.name, { to: target.name, on: dateOnly(t.period_end) });
     return target;
   });
 }
@@ -200,13 +212,15 @@ export async function clearScheduledChange({ tenantId, actorId }) {
     if (!t.scheduled_plan) return false;
     await client.query("UPDATE tenants SET scheduled_plan=NULL,updated_at=now() WHERE id=$1", [tenantId]);
     await audit(client, tenantId, actorId, "subscription.change_cleared", { was: planOf(t.scheduled_plan).name });
+    await logEvent(client, tenantId, "change_cleared", planOf(t.plan).name, { was: planOf(t.scheduled_plan).name });
     return true;
   });
 }
 
 export async function paymentsOf(tenantId) {
   const { rows } = await query(
-    `SELECT p.*,u.name AS recorded_by_name FROM subscription_payments p LEFT JOIN users u ON u.id=p.recorded_by
+    `SELECT p.*,u.name AS recorded_by_name,i.id AS invoice_id,i.number AS invoice_number FROM subscription_payments p
+     LEFT JOIN users u ON u.id=p.recorded_by LEFT JOIN invoices i ON i.subscription_payment_id=p.id::text
      WHERE p.tenant_id=$1 ORDER BY p.created_at DESC LIMIT 100`,
     [tenantId],
   );
@@ -219,8 +233,10 @@ export async function paymentsOf(tenantId) {
     amount: p.amount === null ? null : Number(p.amount),
     currency: p.currency,
     reference: p.reference,
-    recordedBy: p.recorded_by_name || null,
+    recordedBy: p.recorded_by_name || (p.source === "manual" ? null : "Online payment"),
     recordedAt: p.created_at,
+    source: p.source,
+    invoice: p.invoice_id ? { id: p.invoice_id, number: p.invoice_number } : null,
   }));
 }
 
@@ -234,7 +250,7 @@ const managersOf = async (tenantId) =>
       [tenantId],
     )
   ).rows;
-const tell = async (io, tenantId, dedupeKey, title, body) =>
+export const tell = async (io, tenantId, dedupeKey, title, body) =>
   createNotifications({
     io,
     tenantId,
@@ -270,6 +286,7 @@ export async function applyDueChanges(io, now = todayUtc()) {
         [id, target.name, target.numbers ?? t.sessions_limit],
       );
       await audit(client, id, null, "subscription.change_applied", { from: t.plan, to: target.name, dueOn: dateOnly(t.period_end) });
+      await logEvent(client, id, "change_applied", target.name, { from: t.plan, dueOn: dateOnly(t.period_end) });
       return { from: t.plan, target, toFree };
     });
     if (!result) continue;
