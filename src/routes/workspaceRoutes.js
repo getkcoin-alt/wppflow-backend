@@ -36,7 +36,7 @@ router.get(
       media: mediaEnabled(),
       store: false,
       queue: queueHealth().connected,
-      plan: planView(req.tenant?.plan),
+      plan: planView(req.tenant),
       numbersLimit: req.tenant?.sessionsLimit ?? null,
       ai: await aiStatus(req.tenant),
       // What the company pays for and when it renews: for owners and administrators only.

@@ -15,7 +15,7 @@ import {
   requireRole,
 } from "../middleware/auth.js";
 import { authRateLimiter } from "../middleware/rateLimiter.js";
-import { planOf } from "../services/plans.js";
+import { entitledPlan, isLapsed } from "../services/plans.js";
 import { query, withTransaction } from "../db/index.js";
 import { ENV } from "../config/env.js";
 import { route, fail, text } from "../middleware/http.js";
@@ -287,16 +287,18 @@ router.post(
       [req.tenantId, email],
     );
     if (already.rowCount) throw fail(409, `${email} is already on your team`);
-    const seats = planOf(req.tenant?.plan).seats;
+    const seats = entitledPlan(req.tenant).seats;
     if (seats) {
       const people = await query(
         "SELECT count(*)::int AS n FROM memberships WHERE tenant_id=$1 AND status='active'",
         [req.tenantId],
       );
+      if (people.rows[0].n >= seats && isLapsed(req.tenant))
+        throw fail(403, "Payment for your plan is overdue, so no new people can be added until it is received. Pay the invoice or message the Scriwo team.");
       if (people.rows[0].n >= seats)
         throw fail(
           403,
-          `The ${planOf(req.tenant.plan).name} plan is for ${seats === 1 ? "one person" : `${seats} people`}. Ask the Scriwo team to move your company to a plan with a team.`,
+          `The ${entitledPlan(req.tenant).name} plan is for ${seats === 1 ? "one person" : `${seats} people`}. Ask the Scriwo team to move your company to a plan with a team.`,
         );
     }
     const token = crypto.randomBytes(32).toString("hex"),

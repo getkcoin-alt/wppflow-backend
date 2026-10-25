@@ -154,7 +154,7 @@ export async function usageOf(tenant) {
 // Why the assistant can't be used right now, or null when it can.
 export function unavailableReason(tenant) {
   if (!aiConfigured()) return "not_configured";
-  if (!planAllows(tenant.plan, "ai")) return "plan";
+  if (!planAllows(tenant, "ai")) return "plan";
   if (tenant.ai_enabled === false) return "disabled";
   return null;
 }

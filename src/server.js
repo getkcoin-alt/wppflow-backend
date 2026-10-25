@@ -30,6 +30,7 @@ import { errorHandler } from "./middleware/http.js";
 import { restoreSessions, closeSessions } from "./services/sessionService.js";
 import { sweepOrphanBrowsers } from "./services/whatsapp/browserProcess.js";
 import { startDomainJobs, stopDomainJobs } from "./services/domainJobs.js";
+import { loadPlans, keepPlansFresh } from "./services/plans.js";
 import { startReconcileLoop, stopReconcileLoop } from "./services/syncService.js";
 
 const app = express();
@@ -221,7 +222,7 @@ export async function startServer() {
     if (ENV.AUTO_MIGRATE) await runMigrations();
     else {
       const { rows } = await query(
-        "SELECT 1 FROM schema_migrations WHERE version='017_subscriptions'",
+        "SELECT 1 FROM schema_migrations WHERE version='018_plan_catalogue'",
       );
       if (!rows.length)
         throw new Error(
@@ -234,6 +235,9 @@ export async function startServer() {
   }
 
   await ensureSuperAdmin();
+  // The plans and their prices come from the database; a failed read keeps the built-in plans.
+  await loadPlans().catch((e) => console.error("Could not read the plans:", e.message));
+  keepPlansFresh();
 
   // 3. Initialize Message Queue
   await initMessageQueue(io);

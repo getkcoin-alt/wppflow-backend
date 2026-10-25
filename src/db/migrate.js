@@ -16,9 +16,10 @@ import * as m014 from "./migrations/014_ai_assistant.js";
 import * as m015 from "./migrations/015_automation_rules.js";
 import * as m016 from "./migrations/016_leads.js";
 import * as m017 from "./migrations/017_subscriptions.js";
+import * as m018 from "./migrations/018_plan_catalogue.js";
 
 const MIGRATION_ADVISORY_LOCK_ID = 88992211;
-const MIGRATIONS = [m001, m002, m003, m004, m005, m006, m007, m008, m009, m010, m011, m012, m013, m014, m015, m016, m017];
+const MIGRATIONS = [m001, m002, m003, m004, m005, m006, m007, m008, m009, m010, m011, m012, m013, m014, m015, m016, m017, m018];
 
 // A migration that cannot get its table lock (someone holds a long transaction) must fail
 // fast. Waiting forever would hang the deploy and queue every other query on that table

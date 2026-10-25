@@ -5,6 +5,7 @@ import { ENV } from "../config/env.js";
 import { route, fail, text } from "../middleware/http.js";
 import { contactFormLimiter, contactFormCeiling } from "../middleware/rateLimiter.js";
 import { sendLeadNotification } from "../services/mailer.js";
+import { publicPlans } from "../services/plans.js";
 
 // Endpoints the public website calls without signing in.
 const router = express.Router();
@@ -17,6 +18,12 @@ const optional = (value, name, max) => {
     throw fail(400, `${name} must be at most ${max} characters`);
   return value.trim();
 };
+
+// The plans for sale and their prices, as the server holds them: the website and the app read the same numbers.
+router.get("/plans", (req, res) => {
+  res.set("Cache-Control", "public, max-age=60");
+  res.json({ status: "success", plans: publicPlans() });
+});
 
 router.post(
   "/contact",

@@ -38,6 +38,8 @@ test("Where a company stands is worked out from its dates, never stored", () => 
   assert.equal(status(t(), "2026-10-17"), "active", "15 days is not");
   assert.equal(status(t(), "2026-11-01"), "due_soon", "due today");
   assert.equal(status(t(), "2026-11-02"), "overdue");
+  assert.equal(status(t(), "2026-11-08"), "overdue", "seven days late is still the grace period");
+  assert.equal(status(t(), "2026-11-09"), "expired", "the eighth day late: paid features are off");
   assert.equal(status(t({ scheduled_plan: "free" }), "2026-10-10"), "cancelling");
   assert.equal(status(t({ scheduled_plan: "starter" }), "2026-10-10"), "changing");
   const overdue = subscriptionView(t(), "2026-11-04");
@@ -225,14 +227,21 @@ test("The platform admin records payments; renewals, changes and reminders follo
     rows = await mine();
     assert.equal(rows.length, 2);
     assert.match(rows[1].title, /Payment for your Growth plan is overdue/);
-    await sendReminders(io, day(20));
+    assert.match(rows[1].body, /Everything keeps working until/);
+    await sendReminders(io, day(14));
     assert.equal((await mine()).length, 2, "overdue is said once");
+    await sendReminders(io, day(20));
+    rows = await mine();
+    assert.equal(rows.length, 3, "and the switch-off is said once, when it happens");
+    assert.match(rows[2].title, /Paid features are switched off for your Growth plan/);
+    await sendReminders(io, day(25));
+    assert.equal((await mine()).length, 3);
     assert.ok(rows.every((r) => r.user_id !== staff), "staff never see billing");
 
     // a payment starts a new period, which gets its own reminders
     await pay(company.id, { cycle: "monthly", periodStart: day(10), periodEnd: day(25) });
     await sendReminders(io, day(14));
-    assert.equal((await mine()).length, 3);
+    assert.equal((await mine()).length, 4);
   });
 
   await t.test("a cancelling company is told what happens, and a suspended one is left alone", async () => {

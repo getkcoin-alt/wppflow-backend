@@ -3,7 +3,7 @@ import { authenticateToken, requireSuperAdmin } from "../middleware/auth.js";
 import { query } from "../db/index.js";
 import { route, fail, text } from "../middleware/http.js";
 import { createCompany, resendOwnerSetupLink } from "../services/adminService.js";
-import { choosePlan, planCatalogue, planOf } from "../services/plans.js";
+import { choosePlan, planCatalogue, planOf, updatePlan } from "../services/plans.js";
 import { dailyLimitOf, defaultDailyLimit } from "../services/aiService.js";
 import { subscriptionView, recordPayment, scheduleChange, clearScheduledChange, paymentsOf } from "../services/subscriptionService.js";
 const router = express.Router();
@@ -80,8 +80,17 @@ function planWarnings(company) {
 router.get("/plans", (req, res) =>
   res.json({
     status: "success",
-    // `aiDaily` is what a company on the plan may ask Riwo each day unless the admin agrees another number
-    plans: planCatalogue().map((p) => ({ ...p, aiDaily: p.features.some((f) => f.key === "ai" && f.included) ? defaultDailyLimit() : null })),
+    // `aiDaily` is what a company on the plan may ask Riwo each day unless the admin agrees another number. Plans that are
+    // off sale are listed too, so the admin can put them back.
+    plans: planCatalogue({ all: true }).map((p) => ({ ...p, aiDaily: p.features.some((f) => f.key === "ai" && f.included) ? defaultDailyLimit() : null })),
+  }),
+);
+// Change a plan: its name, limits, features, whether it is for sale, and its prices. Takes effect at once.
+router.put(
+  "/plans/:code",
+  route(async (req, res) => {
+    const plan = await updatePlan(req.params.code, req.body || {}, req.user.id);
+    res.json({ status: "success", plan: { ...plan, aiDaily: plan.features.some((f) => f.key === "ai" && f.included) ? defaultDailyLimit() : null } });
   }),
 );
 router.get(
@@ -200,7 +209,7 @@ router.post(
     res.status(201).json({
       status: "success",
       company,
-      warnings: result.planChanged ? planWarnings(company) : [],
+      warnings: [...(result.planChanged ? planWarnings(company) : []), ...(result.notice ? [result.notice] : [])],
     });
   }),
 );

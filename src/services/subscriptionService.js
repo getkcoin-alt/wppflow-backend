@@ -1,45 +1,41 @@
 import crypto from "node:crypto";
 import { query, withTransaction } from "../db/index.js";
 import { fail } from "../middleware/http.js";
-import { choosePlan, planCatalogue, planOf } from "./plans.js";
+import { choosePlan, planCatalogue, planOf, GRACE_DAYS } from "./plans.js";
+import { dateOnly, daysBetween, todayUtc, utcDate } from "./dates.js";
 import { createNotifications } from "./notificationService.js";
 
 // A company's subscription: the plan it pays for, the period that payment covers, and what happens when the
 // period ends. Payments are taken outside the product (an invoice or a payment link), so the platform admin
 // records each one here. Nothing in this file switches a company off for not paying: a company that is overdue
-// is flagged for the team and told, and what to do about it stays a person's decision.
+// is flagged for the team and told. After the grace days (7) the paid features switch off, never any data.
 export const CYCLES = ["monthly", "annual"];
 export const SOON_DAYS = 14;
 const MAX_PERIOD_DAYS = 3 * 366;
+export { daysBetween, dateOnly, todayUtc };
 
-const pad = (n) => String(n).padStart(2, "0");
-export const todayUtc = () => new Date().toISOString().slice(0, 10);
-const DAY = 24 * 3600 * 1000;
-const utc = (date) => new Date(`${date}T00:00:00Z`);
-export const daysBetween = (from, to) => Math.round((utc(to) - utc(from)) / DAY);
-// A DATE column comes back from the database as a Date at local midnight; the rest of this file uses "2026-11-25".
-export const dateOnly = (value) => {
-  if (!value) return null;
-  if (typeof value === "string") return value.slice(0, 10);
-  return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
-};
 const validDate = (value) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value))) return false;
-  const d = utc(value);
+  const d = utcDate(value);
   return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === value;
 };
 // The same day next month (or next year); a month without that day ends on its last day.
 export function addCycle(date, cycle) {
-  const d = utc(date);
+  const d = utcDate(date);
   const target = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + (cycle === "annual" ? 12 : 1), 1));
   const last = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
   target.setUTCDate(Math.min(d.getUTCDate(), last));
   return target.toISOString().slice(0, 10);
 }
 const showDate = (date) =>
-  utc(date).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
+  utcDate(date).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
 
-const rankOf = (id) => planCatalogue().findIndex((p) => p.id === id);
+const addDays = (date, n) => {
+  const d = utcDate(date);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+};
+const rankOf = (id) => planCatalogue({ all: true }).findIndex((p) => p.id === id);
 
 // Where the company stands, worked out from the dates every time it is asked, so it can never be left stale:
 //   free         the Free plan: nothing to pay
@@ -47,7 +43,8 @@ const rankOf = (id) => planCatalogue().findIndex((p) => p.id === id);
 //   unrecorded   on a paid plan, but no payment has been recorded, so there is no renewal date
 //   active       paid, and the renewal is more than two weeks away
 //   due_soon     the renewal is within two weeks (or today)
-//   overdue      the period ended and no payment has been recorded for the next one
+//   overdue      the period ended and no payment has been recorded; everything still works for the grace days
+//   expired      more than the grace days overdue: the paid features are off until a payment is recorded
 //   changing     paid, and moving to a smaller plan when the period ends
 //   cancelling   paid, and moving to Free when the period ends
 export function subscriptionView(tenant, now = todayUtc()) {
@@ -61,6 +58,7 @@ export function subscriptionView(tenant, now = todayUtc()) {
   else if (plan.id === "free") status = "free";
   else if (!periodEnd) status = "unrecorded";
   else if (scheduled?.id) status = scheduled.id === "free" ? "cancelling" : "changing";
+  else if (daysLeft < -GRACE_DAYS) status = "expired";
   else if (daysLeft < 0) status = "overdue";
   else status = daysLeft <= SOON_DAYS ? "due_soon" : "active";
   const billed = status !== "free" && status !== "legacy";
@@ -73,6 +71,9 @@ export function subscriptionView(tenant, now = todayUtc()) {
     periodEnd: billed ? periodEnd : null,
     daysLeft: billed ? daysLeft : null,
     scheduledPlan: billed && scheduled?.id ? { id: scheduled.id, name: scheduled.name } : null,
+    // the last day everything still works when the payment is late, and whether the paid features are off now
+    graceEndsOn: billed && periodEnd ? addDays(periodEnd, GRACE_DAYS) : null,
+    lapsed: status === "expired",
   };
 }
 
@@ -142,7 +143,7 @@ export async function recordPayment({ tenantId, actorId, body = {}, now = todayU
 
     await client.query(
       `UPDATE tenants SET plan=$2,sessions_limit=$3,billing_cycle=$4,period_start=$5,period_end=$6,scheduled_plan=NULL,
-         reminded_soon_for=NULL,reminded_overdue_for=NULL,updated_at=now() WHERE id=$1`,
+         reminded_soon_for=NULL,reminded_overdue_for=NULL,reminded_expired_for=NULL,updated_at=now() WHERE id=$1`,
       [tenantId, target.name, sessionsLimit, cycle, start, end],
     );
     const paymentId = crypto.randomUUID();
@@ -161,7 +162,13 @@ export async function recordPayment({ tenantId, actorId, body = {}, now = todayU
       currency,
       reference,
     });
-    return { paymentId, plan: target, planChanged: target.id !== current.id };
+    // a renewal date already in the past would show the company as late, or switch its paid features off
+    const status = subscriptionView({ plan: target.name, billing_cycle: cycle, period_start: start, period_end: end, scheduled_plan: null }, now).status;
+    const notice =
+      status === "overdue" || status === "expired"
+        ? `The renewal date ${showDate(end)} has already passed, so the company will show as ${status === "expired" ? "expired and its paid features stay off" : "late"}. Check the dates if that is not what you meant.`
+        : null;
+    return { paymentId, plan: target, planChanged: target.id !== current.id, notice };
   });
 }
 
@@ -258,7 +265,7 @@ export async function applyDueChanges(io, now = todayUtc()) {
       const toFree = target.id === "free";
       await client.query(
         `UPDATE tenants SET plan=$2,sessions_limit=$3,scheduled_plan=NULL,updated_at=now()
-           ${toFree ? ",billing_cycle=NULL,period_start=NULL,period_end=NULL,reminded_soon_for=NULL,reminded_overdue_for=NULL" : ""}
+           ${toFree ? ",billing_cycle=NULL,period_start=NULL,period_end=NULL,reminded_soon_for=NULL,reminded_overdue_for=NULL,reminded_expired_for=NULL" : ""}
          WHERE id=$1`,
         [id, target.name, target.numbers ?? t.sessions_limit],
       );
@@ -285,7 +292,8 @@ export async function applyDueChanges(io, now = todayUtc()) {
 export async function sendReminders(io, now = todayUtc()) {
   const { rows } = await query(
     `SELECT * FROM tenants WHERE status='active' AND period_end IS NOT NULL AND period_end<=$1::date+$2::int
-       AND (reminded_soon_for IS DISTINCT FROM period_end OR reminded_overdue_for IS DISTINCT FROM period_end)`,
+       AND (reminded_soon_for IS DISTINCT FROM period_end OR reminded_overdue_for IS DISTINCT FROM period_end
+            OR reminded_expired_for IS DISTINCT FROM period_end)`,
     [now, SOON_DAYS],
   );
   let sent = 0;
@@ -304,11 +312,30 @@ export async function sendReminders(io, now = todayUtc()) {
           t.id,
           `subscription:${end}:overdue`,
           `Payment for your ${view.plan} plan is overdue`,
-          `It was due on ${showDate(end)}. Please pay the invoice or message the Scriwo team, so that nothing is interrupted.`,
+          `It was due on ${showDate(end)}. Everything keeps working until ${showDate(view.graceEndsOn)}; after that the paid features switch off (nothing is deleted) until payment is received. Please pay the invoice or message the Scriwo team.`,
         );
         sent++;
       } catch (error) {
         await query("UPDATE tenants SET reminded_overdue_for=NULL WHERE id=$1", [t.id]); // try again next time
+        throw error;
+      }
+    } else if (view.status === "expired") {
+      const claimed = await query(
+        "UPDATE tenants SET reminded_expired_for=period_end,reminded_overdue_for=period_end WHERE id=$1 AND reminded_expired_for IS DISTINCT FROM period_end RETURNING id",
+        [t.id],
+      );
+      if (!claimed.rowCount) continue;
+      try {
+        await tell(
+          io,
+          t.id,
+          `subscription:${end}:expired`,
+          `Paid features are switched off for your ${view.plan} plan`,
+          `Payment was due on ${showDate(end)} and has not been received. Broadcasts, automations, the pipeline and the other paid features are off, and your numbers and conversations are untouched. Pay the invoice or message the Scriwo team and they come back at once.`,
+        );
+        sent++;
+      } catch (error) {
+        await query("UPDATE tenants SET reminded_expired_for=NULL WHERE id=$1", [t.id]); // try again next time
         throw error;
       }
     } else if (["due_soon", "cancelling", "changing"].includes(view.status)) {

@@ -6,6 +6,7 @@ import { fail } from "../middleware/http.js";
 import { emitForSession } from "./realtime.js";
 import { scheduleSync } from "./syncService.js";
 import { notifySessionLost } from "./notificationService.js";
+import { isLapsed, entitledPlan } from "./plans.js";
 // What the person pairing a number sees: plain language, never server file paths.
 export function friendlyStartError(error) {
   const message = String(error?.message || error || "");
@@ -46,7 +47,7 @@ export async function startTenantSession(
   }
   await withTransaction(async (c) => {
     const tenant = await c.query(
-      "SELECT sessions_limit,status FROM tenants WHERE id=$1 FOR UPDATE",
+      "SELECT sessions_limit,status,plan,period_end,scheduled_plan FROM tenants WHERE id=$1 FOR UPDATE",
       [tenantId],
     );
     if (!tenant.rows[0]) throw fail(404, "Workspace not found");
@@ -66,11 +67,13 @@ export async function startTenantSession(
       "SELECT count(*)::int AS count FROM whatsapp_sessions WHERE tenant_id=$1",
       [tenantId],
     );
-    if (
-      !exists.rowCount &&
-      count.rows[0].count >= tenant.rows[0].sessions_limit
-    )
-      throw fail(403, "Session quota reached");
+    // Past the grace period, the plan it pays for is not in force: the numbers it has keep working, no new one is added.
+    const limit = isLapsed(tenant.rows[0]) ? Math.min(tenant.rows[0].sessions_limit, entitledPlan(tenant.rows[0]).numbers ?? 1) : tenant.rows[0].sessions_limit;
+    if (!exists.rowCount && count.rows[0].count >= limit)
+      throw fail(
+        403,
+        isLapsed(tenant.rows[0]) ? "Payment for your plan is overdue, so no new number can be linked. Pay the invoice or message the Scriwo team." : "Session quota reached",
+      );
     await c.query(
       `INSERT INTO whatsapp_sessions(id,tenant_id,session_name,status,worker_id,lease_until,owner_user_id,restore_on_start) VALUES($1,$2,$3,'STARTING',$4,now()+interval '45 seconds',$5,false)
       ON CONFLICT(tenant_id,session_name) DO UPDATE SET status='STARTING',last_error=NULL,worker_id=$4,lease_until=now()+interval '45 seconds',owner_user_id=COALESCE(whatsapp_sessions.owner_user_id,$5),updated_at=now()`,

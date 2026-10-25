@@ -131,11 +131,11 @@ export async function pumpAutomations(io) {
     const message = messages[0];
     if (message) {
       const conv = (await query("SELECT * FROM conversations WHERE id=$1 AND tenant_id=$2", [message.conversation_id, event.tenant_id])).rows[0];
-      const tenant = (await query("SELECT plan,name FROM tenants WHERE id=$1", [event.tenant_id])).rows[0];
+      const tenant = (await query("SELECT plan,name,period_end,scheduled_plan FROM tenants WHERE id=$1", [event.tenant_id])).rows[0];
       // A company whose plan doesn't include automations keeps its rules but they don't run. A group chat is
       // never answered automatically: one reply would go to everyone in it.
       const rules =
-        conv && !conv.is_group && tenant && planAllows(tenant.plan, "automations")
+        conv && !conv.is_group && tenant && planAllows(tenant, "automations")
           ? (await query("SELECT * FROM automations WHERE tenant_id=$1 AND is_enabled=true ORDER BY created_at, id", [event.tenant_id])).rows
           : [];
       rules.sort((a, b) => order(a) - order(b));
