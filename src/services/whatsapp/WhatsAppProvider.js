@@ -106,12 +106,15 @@ export class WhatsAppProvider {
     const createOptions = {
       session: `tenant_${tenantId}_${sessionName}`,
       catchQR: (base64Qr, asciiQR, attempts, urlCode) => {
+        console.log(`WhatsApp ${sessionName}: QR code ready (attempt ${attempts})`);
         sessionState.status = SESSION_STATUS.QRCODE;
         sessionState.qrcode = base64Qr;
         notify(callbacks.onQr, base64Qr, attempts);
         notify(callbacks.onStatus, SESSION_STATUS.QRCODE);
       },
       statusFind: (statusSession, session) => {
+        // One line per step, so a number that "connects by itself" can be told from one that was scanned.
+        console.log(`WhatsApp ${sessionName}: ${statusSession}`);
         if (statusSession === "isLogged" || statusSession === "inChat") {
           sessionState.status = SESSION_STATUS.CONNECTED;
           sessionState.qrcode = null;
@@ -181,6 +184,7 @@ export class WhatsAppProvider {
     }
     sessionState.client = client;
     sessionState.phone = await client.getWid().catch(() => null);
+    console.log(`WhatsApp ${sessionName}: signed in as …${String(sessionState.phone || "").replace(/\D/g, "").slice(-4) || "unknown"}`);
     sessionState.status = SESSION_STATUS.CONNECTED;
     if (callbacks.onStatus) await callbacks.onStatus(SESSION_STATUS.CONNECTED);
 
