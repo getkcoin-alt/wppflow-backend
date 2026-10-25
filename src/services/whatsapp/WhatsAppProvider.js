@@ -495,6 +495,28 @@ export class WhatsAppProvider {
 
   // Is this number on WhatsApp? `checked: false` means it could not be found out (the number is offline or the
   // lookup failed), which is not the same as "no": the caller decides whether to go ahead.
+  // "Are you there?": asks the linked phone's WhatsApp Web whether it is still connected. A browser that has hung
+  // or a phone that lost its link answers late or not at all, which is what the number-health check looks for.
+  async ping(tenantId, sessionName, timeoutMs = 8000) {
+    const client = this.getSession(tenantId, sessionName)?.client;
+    if (!client) return { ok: false, error: "This number is not running on the server" };
+    if (typeof client.isConnected !== "function") return { ok: true };
+    let timer;
+    try {
+      const connected = await Promise.race([
+        client.isConnected(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`No answer within ${Math.round(timeoutMs / 1000)} second${Math.round(timeoutMs / 1000) === 1 ? "" : "s"}`)), timeoutMs);
+        }),
+      ]);
+      return connected ? { ok: true } : { ok: false, error: "WhatsApp reports this number as not connected" };
+    } catch (error) {
+      return { ok: false, error: String(error?.message || error).slice(0, 200) };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async checkNumber(tenantId, sessionName, phone) {
     const client = this.getSession(tenantId, sessionName)?.client;
     if (!client || typeof client.checkNumberStatus !== "function") return { checked: false };

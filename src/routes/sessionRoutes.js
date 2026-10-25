@@ -18,6 +18,7 @@ import { syncContacts } from "./contactRoutes.js";
 import { route, fail } from "../middleware/http.js";
 import { isManager, assertSessionAccess } from "../services/access.js";
 import { emitForSession, forgetSessionOwner } from "../services/realtime.js";
+import { numberHealth, numberHealthView, THRESHOLDS } from "../services/numberHealth.js";
 const router = express.Router();
 router.use(authenticateToken, requireTenantContext, requireScope("sessions"));
 const manager = isManager;
@@ -70,6 +71,20 @@ router.get(
       sessions: await Promise.all(
         rows.map((s) => sessionView(req.tenantId, s.session_name, true)),
       ),
+    });
+  }),
+);
+// How each number is doing: whether it answers, how long it has been connected or down, failed and waiting messages.
+// Managers see every number of the workspace; staff see their own.
+router.get(
+  "/health",
+  route(async (req, res) => {
+    const numbers = await numberHealth(req.tenantId, { ownerUserId: manager(req) ? null : req.user.id });
+    res.json({
+      status: "success",
+      scope: manager(req) ? "workspace" : "own",
+      checkedEverySeconds: THRESHOLDS.heartbeatEverySeconds,
+      numbers: numbers.map(numberHealthView),
     });
   }),
 );

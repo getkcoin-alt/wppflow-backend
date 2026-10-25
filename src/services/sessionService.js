@@ -17,6 +17,22 @@ export function friendlyStartError(error) {
 const workerId = crypto.randomUUID(),
   owned = new Map();
 let recoveryTimer;
+// What the database remembers when a number changes state: the status itself, the pairing, since when it has been
+// connected or down, and the counters of the number-health screen that a successful connection resets.
+export function saveSessionStatus({ tenantId, sessionName, workerId: ownerWorker, status, phone }) {
+  return query(
+    `UPDATE whatsapp_sessions SET status=$1::varchar,phone=COALESCE($2,phone),qr_code=CASE WHEN $1::varchar='QRCODE' THEN qr_code ELSE NULL END,
+            restore_on_start=CASE WHEN $1::varchar='CONNECTED' AND COALESCE($2,phone) IS NOT NULL THEN true ELSE restore_on_start END,
+            last_error=CASE WHEN $1::varchar='CONNECTED' THEN NULL WHEN $1::varchar='EXPIRED' THEN 'The QR code was not scanned in time. Start again and scan it within a few minutes.' ELSE last_error END,
+            connected_since=CASE WHEN $1::varchar<>'CONNECTED' THEN NULL WHEN status='CONNECTED' THEN COALESCE(connected_since,now()) ELSE now() END,
+            down_since=CASE WHEN $1::varchar='CONNECTED' THEN NULL WHEN status='CONNECTED' THEN now() ELSE down_since END,
+            reconnect_attempts=CASE WHEN $1::varchar='CONNECTED' THEN 0 ELSE reconnect_attempts END,
+            heartbeat_failures=CASE WHEN $1::varchar='CONNECTED' THEN 0 ELSE heartbeat_failures END,
+            heartbeat_error=CASE WHEN $1::varchar='CONNECTED' THEN NULL ELSE heartbeat_error END,
+            updated_at=now() WHERE tenant_id=$3 AND session_name=$4 AND worker_id=$5`,
+    [status, phone, tenantId, sessionName, ownerWorker],
+  );
+}
 export function validateSession(value) {
   if (
     typeof value !== "string" ||
@@ -112,13 +128,7 @@ export async function startTenantSession(
       },
       onStatus: async (status) => {
         const phone = provider.getSession(tenantId, sessionName)?.phone || null;
-        await query(
-          `UPDATE whatsapp_sessions SET status=$1::varchar,phone=COALESCE($2,phone),qr_code=CASE WHEN $1::varchar='QRCODE' THEN qr_code ELSE NULL END,
-            restore_on_start=CASE WHEN $1::varchar='CONNECTED' AND COALESCE($2,phone) IS NOT NULL THEN true ELSE restore_on_start END,
-            last_error=CASE WHEN $1::varchar='CONNECTED' THEN NULL WHEN $1::varchar='EXPIRED' THEN 'The QR code was not scanned in time. Start again and scan it within a few minutes.' ELSE last_error END,
-            updated_at=now() WHERE tenant_id=$3 AND session_name=$4 AND worker_id=$5`,
-          [status, phone, tenantId, sessionName, workerId],
-        );
+        await saveSessionStatus({ tenantId, sessionName, workerId, status, phone });
         if (["DISCONNECTED", "EXPIRED"].includes(status)) {
           // A drop we did not ask for (phone offline, logged out, browser died): not a
           // deliberate "disconnect" click, which removes the session from `owned` first.
@@ -229,10 +239,16 @@ async function recoverSessions(io) {
   const { rows } = await query(
     "SELECT tenant_id,session_name FROM whatsapp_sessions WHERE restore_on_start=true AND (lease_until IS NULL OR lease_until<now())",
   );
-  for (const s of rows)
+  for (const s of rows) {
+    // Every time the server brings a number back by itself is counted, so the health screen can say so.
+    await query(
+      "UPDATE whatsapp_sessions SET reconnect_attempts=reconnect_attempts+1,last_reconnect_at=now() WHERE tenant_id=$1 AND session_name=$2",
+      [s.tenant_id, s.session_name],
+    ).catch(() => {});
     await startTenantSession(s.tenant_id, s.session_name, io).catch((e) =>
       console.error("Session recovery failed:", e.message),
     );
+  }
 }
 export async function restoreSessions(io) {
   await recoverSessions(io);

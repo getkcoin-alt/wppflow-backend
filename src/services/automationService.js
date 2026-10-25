@@ -3,6 +3,7 @@ import { query, withTransaction } from "../db/index.js";
 import { addContactTag } from "./labelService.js";
 import { sendTextMessage } from "./messageService.js";
 import { planAllows } from "./plans.js";
+import { assignConversation, autoAssignNewChat } from "./assignmentService.js";
 import { personalise } from "./templating.js";
 import { createLeadFromChat } from "./leadService.js";
 import { matchesKeywords, withinHours, sendsReply } from "./automationRules.js";
@@ -83,11 +84,12 @@ async function perform(rule, { message, conv, contact, company, execution, io })
       return;
     case "assign_agent": {
       const member = await query(
-        "SELECT u.name FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=$1 AND m.status='active' AND u.status='active' AND u.name=$2",
+        "SELECT u.id FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=$1 AND m.status='active' AND u.status='active' AND u.name=$2 ORDER BY u.id LIMIT 1",
         [tenantId, rule.action_summary],
       );
       if (!member.rowCount) throw new Error("Assigned teammate is unavailable");
-      await query("UPDATE conversations SET assigned_to=$1 WHERE id=$2 AND tenant_id=$3", [rule.action_summary, conv.id, tenantId]);
+      // the same as the Assign menu: the teammate can open the chat, is told, and the lead for this customer follows
+      await assignConversation({ tenantId, conversationId: conv.id, userId: member.rows[0].id, io });
       break;
     }
     case "add_tag":
@@ -128,7 +130,15 @@ export async function pumpAutomations(io) {
     );
     const message = messages[0];
     if (message) {
-      const conv = (await query("SELECT * FROM conversations WHERE id=$1 AND tenant_id=$2", [message.conversation_id, event.tenant_id])).rows[0];
+      let conv = (await query("SELECT * FROM conversations WHERE id=$1 AND tenant_id=$2", [message.conversation_id, event.tenant_id])).rows[0];
+      // a new chat goes to someone first, so a rule that makes a lead gives it to the person who has the chat
+      if (conv && !conv.is_group && !conv.assigned_user_id) {
+        const auto = await autoAssignNewChat({ tenantId: event.tenant_id, conversation: conv, message, io }).catch((e) => {
+          console.error("Automatic assignment failed:", e.message);
+          return null;
+        });
+        if (auto?.assigned) conv = (await query("SELECT * FROM conversations WHERE id=$1 AND tenant_id=$2", [conv.id, event.tenant_id])).rows[0];
+      }
       const tenant = (await query("SELECT plan,name,period_end,scheduled_plan FROM tenants WHERE id=$1", [event.tenant_id])).rows[0];
       // A company whose plan doesn't include automations keeps its rules but they don't run. A group chat is
       // never answered automatically: one reply would go to everyone in it.
