@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
-import { query } from "../db/index.js";
+import { query, withTransaction } from "../db/index.js";
+import { addContactTag } from "./labelService.js";
 import { sendTextMessage } from "./messageService.js";
 import { planAllows } from "./plans.js";
 import { personalise } from "./templating.js";
@@ -91,10 +92,7 @@ async function perform(rule, { message, conv, contact, company, execution, io })
     }
     case "add_tag":
       if (!contact) throw new Error("This chat has no contact to tag");
-      await query(
-        `UPDATE contacts SET tags=CASE WHEN COALESCE(tags,'[]'::jsonb) ? $3::text THEN tags ELSE COALESCE(tags,'[]'::jsonb) || to_jsonb($3::text) END,updated_at=now() WHERE id=$1 AND tenant_id=$2`,
-        [contact.id, tenantId, rule.action_summary],
-      );
+      await withTransaction((c) => addContactTag(c, tenantId, contact.id, rule.action_summary));
       break;
     case "opt_in":
     case "opt_out": {

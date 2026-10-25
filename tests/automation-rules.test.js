@@ -201,6 +201,8 @@ test("Automation rules: what they can start on, what they do, and the limits tha
     await hear("and a quote", { from: "971555550008" });
     const tags = (await query("SELECT tags FROM contacts WHERE tenant_id=$1 AND phone='971555550008'", [tenantId])).rows[0].tags;
     assert.deepEqual(tags, ["interested"]);
+    const labelled = await query("SELECT l.name FROM contact_labels cl JOIN labels l ON l.id=cl.label_id JOIN contacts c ON c.id=cl.contact_id WHERE c.tenant_id=$1 AND c.phone='971555550008'", [tenantId]);
+    assert.deepEqual(labelled.rows.map((r) => r.name), ["interested"], "the tag is a label too");
     assert.deepEqual(await sent("971555550008"), [], "no reply was asked for");
     await clearRules();
   });

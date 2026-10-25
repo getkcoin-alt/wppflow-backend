@@ -493,6 +493,28 @@ export class WhatsAppProvider {
     };
   }
 
+  // Is this number on WhatsApp? `checked: false` means it could not be found out (the number is offline or the
+  // lookup failed), which is not the same as "no": the caller decides whether to go ahead.
+  async checkNumber(tenantId, sessionName, phone) {
+    const client = this.getSession(tenantId, sessionName)?.client;
+    if (!client || typeof client.checkNumberStatus !== "function") return { checked: false };
+    let timer;
+    try {
+      const result = await Promise.race([
+        client.checkNumberStatus(`${String(phone).replace(/\D/g, "")}@c.us`),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("timed out")), 8000);
+        }),
+      ]);
+      if (result?.numberExists === false) return { checked: true, exists: false };
+      return { checked: true, exists: true, jid: result?.id?._serialized || null };
+    } catch {
+      return { checked: false };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async getContacts(tenantId, sessionName) {
     const client = this.getSession(tenantId, sessionName)?.client;
     if (!client) throw new Error("WhatsApp session is offline");

@@ -115,13 +115,18 @@ test("Real API, database and dispatcher regression suite", async (t) => {
           .contacts[0].customTraits.source,
         "API",
       );
-      const invalid = await api("post", "/api/contacts/import").send({
+      // A row that cannot be used is reported and skipped; the rest of the file still goes in.
+      const partial = await api("post", "/api/contacts/import").send({
         rows: [
-          { name: "Rollback", phone: "15559991111" },
+          { name: "Imported", phone: "15559991111" },
           { name: "Missing phone" },
+          { name: "Local number", phone: "0501234567" },
         ],
       });
-      assert.equal(invalid.status, 400);
+      assert.equal(partial.status, 200);
+      assert.equal(partial.body.imported, 1);
+      assert.equal(partial.body.skippedCount, 2);
+      assert.match(partial.body.skipped[0].reason, /country code/);
       assert.equal(
         (
           await query(
@@ -129,6 +134,10 @@ test("Real API, database and dispatcher regression suite", async (t) => {
             [tenantId],
           )
         ).rowCount,
+        1,
+      );
+      assert.equal(
+        (await query("SELECT 1 FROM contacts WHERE tenant_id=$1 AND phone='0501234567'", [tenantId])).rowCount,
         0,
       );
       await query(

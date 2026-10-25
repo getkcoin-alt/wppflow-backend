@@ -246,7 +246,12 @@ export async function handleIncomingMessage({
       ? null
       : (
           await c.query(
-            `INSERT INTO contacts(id,tenant_id,name,phone) VALUES($1,$2,$3,$4) ON CONFLICT(tenant_id,phone) DO UPDATE SET updated_at=contacts.updated_at RETURNING id`,
+            // WhatsApp's name for the person is kept in whatsapp_name. The name on the contact only follows it while it
+            // is still the bare number or WhatsApp's own earlier name: a name the team typed is never replaced.
+            `INSERT INTO contacts(id,tenant_id,name,whatsapp_name,phone) VALUES($1,$2,$3,$3,$4) ON CONFLICT(tenant_id,phone) DO UPDATE SET
+               whatsapp_name=CASE WHEN EXCLUDED.whatsapp_name<>EXCLUDED.phone THEN EXCLUDED.whatsapp_name ELSE contacts.whatsapp_name END,
+               name=CASE WHEN NOT contacts.name_edited AND EXCLUDED.whatsapp_name<>EXCLUDED.phone AND (contacts.name=contacts.phone OR contacts.name=contacts.whatsapp_name) THEN EXCLUDED.whatsapp_name ELSE contacts.name END,
+               updated_at=contacts.updated_at RETURNING id`,
             [crypto.randomUUID(), tenantId, personName, phone],
           )
         ).rows[0].id;
@@ -255,7 +260,9 @@ export async function handleIncomingMessage({
       VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(tenant_id,session_name,provider_chat_id) DO UPDATE SET
         contact_id=COALESCE(conversations.contact_id,EXCLUDED.contact_id),
         is_group=conversations.is_group OR EXCLUDED.is_group,
-        contact_name=CASE WHEN $9::boolean THEN EXCLUDED.contact_name ELSE conversations.contact_name END
+        contact_name=CASE WHEN $9::boolean THEN EXCLUDED.contact_name
+          WHEN NOT conversations.is_group AND conversations.contact_name=conversations.phone AND EXCLUDED.contact_name<>conversations.phone THEN COALESCE((SELECT c.name FROM contacts c WHERE c.id=conversations.contact_id),EXCLUDED.contact_name)
+          ELSE conversations.contact_name END
       RETURNING id`,
       [
         crypto.randomUUID(),

@@ -17,6 +17,7 @@ import conversationRoutes from "./routes/conversationRoutes.js";
 import sessionRoutes from "./routes/sessionRoutes.js";
 import campaignRoutes from "./routes/campaignRoutes.js";
 import contactRoutes from "./routes/contactRoutes.js";
+import labelRoutes from "./routes/labelRoutes.js";
 import automationRoutes from "./routes/automationRoutes.js";
 import leadRoutes from "./routes/leadRoutes.js";
 import healthRoutes from "./routes/healthRoutes.js";
@@ -186,6 +187,7 @@ app.use("/api/conversations", conversationRoutes);
 app.use("/api/sessions", sessionRoutes);
 app.use("/api/campaigns", campaignRoutes);
 app.use("/api/contacts", contactRoutes);
+app.use("/api/labels", labelRoutes);
 app.use("/api/automations", automationRoutes);
 app.use("/api/leads", leadRoutes);
 app.use("/api/workspace", workspaceRoutes);
@@ -222,7 +224,7 @@ export async function startServer() {
     if (ENV.AUTO_MIGRATE) await runMigrations();
     else {
       const { rows } = await query(
-        "SELECT 1 FROM schema_migrations WHERE version='018_plan_catalogue'",
+        "SELECT 1 FROM schema_migrations WHERE version='019_labels_contact_names'",
       );
       if (!rows.length)
         throw new Error(

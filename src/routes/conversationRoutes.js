@@ -9,7 +9,8 @@ import crypto from "node:crypto";
 import { query } from "../db/index.js";
 import { route, fail } from "../middleware/http.js";
 import { defaultWhatsAppProvider as provider } from "../services/whatsapp/WhatsAppProvider.js";
-import { formatConversation } from "../services/conversationService.js";
+import { formatConversation, withLabels } from "../services/conversationService.js";
+import { normalizePhone, displayPhone, PHONE_HELP } from "../services/phone.js";
 import { handleIncomingMessage } from "../services/messageService.js";
 import { fetchMessageMedia, fetchPendingMedia } from "../services/mediaFetchService.js";
 import {
@@ -40,42 +41,59 @@ router.use(requireTenantContext);
 router.use(requireScope("inbox"));
 router.use(requireWriteAccess);
 
+// Opens the chat with a saved contact (contactId) or with a number typed in (phone, optionally a name), on one of the
+// WhatsApp numbers this person may use.
 router.post(
   "/",
   route(async (req, res) => {
     const { contactId, channel, sessionName } = req.body;
-    const contact = await query(
-      "SELECT * FROM contacts WHERE id=$1 AND tenant_id=$2",
-      [contactId, req.tenantId],
-    );
-    if (!contact.rows[0]) throw fail(404, "Contact not found");
     const name = sessionName || channel;
     await assertSessionAccess(req, name);
-    const c = contact.rows[0],
-      jid = c.phone.includes("@")
-        ? c.phone
-        : `${c.phone.replace(/\D/g, "")}@c.us`;
+    let c,
+      created = false;
+    if (contactId) {
+      const contact = await query("SELECT * FROM contacts WHERE id=$1 AND tenant_id=$2", [contactId, req.tenantId]);
+      if (!contact.rows[0]) throw fail(404, "Contact not found");
+      c = contact.rows[0];
+    } else {
+      const typed = normalizePhone(req.body.phone);
+      if (!typed) throw fail(400, PHONE_HELP);
+      const line = await query("SELECT status FROM whatsapp_sessions WHERE tenant_id=$1 AND session_name=$2", [req.tenantId, name]);
+      if (line.rows[0]?.status !== "CONNECTED")
+        throw fail(409, "That WhatsApp number is not connected right now. Reconnect it under Numbers, or choose another number.");
+      // WhatsApp knows the number's real address (some countries differ from how people write it)
+      const found = await provider.checkNumber(req.tenantId, name, typed);
+      if (found.checked && !found.exists) throw fail(422, `${displayPhone(typed)} is not on WhatsApp. Check the number and the country code.`);
+      const real = found.jid && /^\d{8,15}@c\.us$/.test(found.jid) ? found.jid.replace(/@c\.us$/, "") : typed;
+      const known = await query("SELECT * FROM contacts WHERE tenant_id=$1 AND phone = ANY($2::text[]) ORDER BY (phone=$3) DESC LIMIT 1", [req.tenantId, [real, `+${real}`], real]);
+      if (known.rows[0]) c = known.rows[0];
+      else {
+        const label = typeof req.body.name === "string" && req.body.name.trim() ? req.body.name.trim().slice(0, 255) : "";
+        const inserted = await query(
+          "INSERT INTO contacts(id,tenant_id,name,phone,name_edited) VALUES($1,$2,$3,$4,$5) ON CONFLICT(tenant_id,phone) DO UPDATE SET updated_at=contacts.updated_at RETURNING *",
+          [crypto.randomUUID(), req.tenantId, label || displayPhone(real), real, Boolean(label)],
+        );
+        c = inserted.rows[0];
+        created = true;
+        req.app.get("io")?.to(`tenant:${req.tenantId}`).emit("contact:changed", { contactId: c.id });
+      }
+    }
+    const jid = c.phone.includes("@") ? c.phone : `${c.phone.replace(/\D/g, "")}@c.us`;
     const { rows } = await query(
       `INSERT INTO conversations(id,tenant_id,session_name,provider_chat_id,contact_id,phone,contact_name,avatar) VALUES($1,$2,$3,$4,$5,$6,$7,$8)
     ON CONFLICT(tenant_id,session_name,provider_chat_id) DO UPDATE SET contact_id=EXCLUDED.contact_id RETURNING *`,
-      [
-        crypto.randomUUID(),
-        req.tenantId,
-        name,
-        jid,
-        c.id,
-        c.phone,
-        c.name,
-        c.avatar,
-      ],
+      [crypto.randomUUID(), req.tenantId, name, jid, c.id, c.phone, c.name, c.avatar],
     );
-    res
-      .status(201)
-      .json({
-        status: "success",
-        chat: formatConversation(rows[0]),
-        conversation: formatConversation(rows[0]),
-      });
+    // whether this person has agreed to hear from the company (for broadcasts); a direct message is still the sender's call
+    const consent = await query("SELECT opt_in_status FROM consents WHERE tenant_id=$1 AND phone=$2", [req.tenantId, c.phone]);
+    const [chat] = await withLabels(req.tenantId, [formatConversation(rows[0])]);
+    res.status(201).json({
+      status: "success",
+      chat,
+      conversation: chat,
+      contactCreated: created,
+      optedIn: consent.rows[0] ? Boolean(consent.rows[0].opt_in_status) : null,
+    });
   }),
 );
 router.patch(
@@ -178,7 +196,7 @@ router.post(
  */
 router.get("/", async (req, res) => {
   try {
-    const { limit, cursor, filter, search, sessionName } = req.query;
+    const { limit, cursor, filter, search, sessionName, labels, labelMode, assigned, activeDays } = req.query;
     const result = await getConversations({
       tenantId: req.tenantId,
       limit,
@@ -186,6 +204,10 @@ router.get("/", async (req, res) => {
       filter,
       search,
       sessionName,
+      labelIds: String(labels || "").split(",").map((x) => x.trim()).filter(Boolean),
+      labelMode,
+      assignedUserId: assigned === "me" ? req.user.id : assigned || null,
+      activeDays,
       ownerUserId: isManager(req) ? null : req.user.id,
     });
     res.json({ status: "success", ...result });
@@ -223,7 +245,7 @@ router.get(
       [req.params.id, req.tenantId],
     );
     if (!rows[0]) throw fail(404, "Conversation not found");
-    const conversation = formatConversation(rows[0]);
+    const [conversation] = await withLabels(req.tenantId, [formatConversation(rows[0])]);
     res.json({ status: "success", conversation, chat: conversation });
   }),
 );

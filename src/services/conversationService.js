@@ -7,6 +7,21 @@ import { emitForConversation, emitForSession } from "./realtime.js";
 import { formatConversation } from "./conversationFormat.js";
 export { formatConversation };
 
+// The labels of the person each chat is with, so the list can show and filter by them. Groups have no contact.
+export async function withLabels(tenantId, conversations) {
+  const ids = [...new Set(conversations.map((c) => c.contactId).filter(Boolean))];
+  const by = new Map();
+  if (ids.length) {
+    const { rows } = await query(
+      `SELECT cl.contact_id,l.id,l.name,l.color FROM contact_labels cl JOIN labels l ON l.id=cl.label_id
+       WHERE cl.tenant_id=$1 AND cl.contact_id = ANY($2::text[]) ORDER BY lower(l.name)`,
+      [tenantId, ids],
+    );
+    for (const r of rows) (by.get(r.contact_id) || by.set(r.contact_id, []).get(r.contact_id)).push({ id: r.id, name: r.name, color: r.color });
+  }
+  return conversations.map((c) => ({ ...c, labels: by.get(c.contactId) || [] }));
+}
+
 export async function getConversations({
   tenantId,
   sessionName = null,
@@ -15,6 +30,10 @@ export async function getConversations({
   cursor = null,
   filter = "all",
   search = "",
+  labelIds = [],
+  labelMode = "any",
+  assignedUserId = null,
+  activeDays = null,
 }) {
   const parsedLimit = Math.min(Math.max(parseInt(limit, 10) || 30, 1), 100);
   let sql = `
@@ -48,6 +67,25 @@ export async function getConversations({
     sql += ` AND (contact_name ILIKE $${params.length} OR phone ILIKE $${params.length})`;
   }
 
+  // Filters that combine: labels (any, or all of them), who the chat is with, and how recently it was active.
+  const wanted = [...new Set((labelIds || []).map(String).filter(Boolean))];
+  if (wanted.length) {
+    params.push(wanted);
+    sql +=
+      labelMode === "all"
+        ? ` AND (SELECT count(DISTINCT cl.label_id) FROM contact_labels cl WHERE cl.contact_id=conversations.contact_id AND cl.tenant_id=conversations.tenant_id AND cl.label_id = ANY($${params.length}::text[])) = ${wanted.length}`
+        : ` AND EXISTS (SELECT 1 FROM contact_labels cl WHERE cl.contact_id=conversations.contact_id AND cl.tenant_id=conversations.tenant_id AND cl.label_id = ANY($${params.length}::text[]))`;
+  }
+  if (assignedUserId === "none") sql += ` AND assigned_user_id IS NULL`;
+  else if (assignedUserId) {
+    params.push(Number(assignedUserId) || 0);
+    sql += ` AND assigned_user_id = $${params.length}`;
+  }
+  if (activeDays) {
+    params.push(Math.min(Math.max(Number(activeDays) || 0, 1), 3650));
+    sql += ` AND last_active_epoch >= extract(epoch FROM now()) - $${params.length}::int * 86400`;
+  }
+
   // Compound cursor: (last_active_epoch, id)
   if (cursor) {
     const parts = String(cursor).split(":");
@@ -77,7 +115,7 @@ export async function getConversations({
       ? `${items[items.length - 1].last_active_epoch}:${items[items.length - 1].id}`
       : null;
 
-  const formatted = items.map(formatConversation);
+  const formatted = await withLabels(tenantId, items.map(formatConversation));
 
   return {
     conversations: formatted,
@@ -158,7 +196,7 @@ export async function syncConversations({
       )
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,(SELECT id FROM contacts WHERE tenant_id=$2::varchar AND phone=$13 LIMIT 1))
       ON CONFLICT (tenant_id, session_name, provider_chat_id) DO UPDATE SET
-        contact_name = EXCLUDED.contact_name,
+        contact_name = COALESCE((SELECT c.name FROM contacts c WHERE c.id=COALESCE(conversations.contact_id,EXCLUDED.contact_id) AND c.name_edited AND NOT conversations.is_group), EXCLUDED.contact_name),
         is_group = EXCLUDED.is_group,
         contact_id = COALESCE(conversations.contact_id,EXCLUDED.contact_id),
         avatar = COALESCE(NULLIF(EXCLUDED.avatar, ''), conversations.avatar),
@@ -235,6 +273,6 @@ export async function getConversationChanges({
   return {
     serverTime,
     hasMore,
-    conversations: rows.slice(0, cap).map(formatConversation),
+    conversations: await withLabels(tenantId, rows.slice(0, cap).map(formatConversation)),
   };
 }
