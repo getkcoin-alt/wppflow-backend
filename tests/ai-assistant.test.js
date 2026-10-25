@@ -7,7 +7,7 @@ import { query } from "../src/db/index.js";
 import { registerTenantAndUser, generateAccessToken } from "../src/services/authService.js";
 import { handleIncomingMessage } from "../src/services/messageService.js";
 import { pumpAutomations } from "../src/services/automationService.js";
-import { setAiClient, parseSummary } from "../src/services/aiService.js";
+import { setAiClient, parseSummary, parseLeadSuggestion } from "../src/services/aiService.js";
 import { closeSessions } from "../src/services/sessionService.js";
 
 // A stand-in for the Anthropic client that records every request and answers from a script.
@@ -153,6 +153,35 @@ test("The AI assistant (Riwo) helps staff write, and never sends anything itself
     assert.deepEqual(res.body.sections.map((s) => s.label), ["Wants", "Key details", "Status", "Next step"]);
     assert.equal(res.body.sections[3].text, "confirm the viewing time");
     assert.deepEqual(parseSummary("just a paragraph with no labels"), []);
+  });
+
+  await t.test("suggests what to put in a new lead, which a person then confirms", async () => {
+    fake.answer({ text: 'Title: "2 bedroom in Marina"\nValue: AED 1.4M\nNext step: Confirm the viewing time for tomorrow.\nFollow up in: 2 days' });
+    const leadsBefore = (await query("SELECT count(*)::int AS n FROM leads WHERE tenant_id=$1", [tenantId])).rows[0].n;
+    const res = await ai(`/conversations/${chat}/lead-suggestion`, samAuth);
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.deepEqual([res.body.title, res.body.value, res.body.nextStep, res.body.followUpDays], ["2 bedroom in Marina", 1400000, "Confirm the viewing time for tomorrow.", 2]);
+    const { params } = fake.calls.at(-1);
+    const prompt = params.messages[0].content;
+    assert.match(prompt, /<conversation>[\s\S]*Hi, is the 2 bedroom in Marina still available\?[\s\S]*<\/conversation>/);
+    assert.match(prompt, /Never guess/);
+    assert.doesNotMatch(prompt, /919876543210/, "the customer's phone number is never sent");
+    assert.equal((await query("SELECT count(*)::int AS n FROM leads WHERE tenant_id=$1", [tenantId])).rows[0].n, leadsBefore, "nothing is created by asking");
+    assert.equal((await ai(`/conversations/${chat}/lead-suggestion`, tinaAuth)).status, 404, "only for a chat the person can open");
+  });
+
+  await t.test("reads Riwo's suggestion carefully: amounts with K and M, no guesses, sensible follow-up days", () => {
+    const read = (value, extra = "") => parseLeadSuggestion(`Title: Deal\nValue: ${value}\nNext step: Call.\nFollow up in: ${extra}`);
+    assert.equal(read("850k").value, 850000);
+    assert.equal(read("1,200,000").value, 1200000);
+    assert.equal(read("AED 2.5 million").value, 2500000);
+    assert.equal(read("0").value, 0);
+    assert.equal(read("not mentioned").value, 0);
+    assert.equal(read("99999999999999").value, 0, "an absurd amount is dropped");
+    assert.equal(read("0", "3").followUpDays, 3);
+    assert.equal(read("0", "400 days").followUpDays, 2, "out of range falls back to two days");
+    assert.equal(read("0", "tomorrow").followUpDays, 2);
+    assert.deepEqual(parseLeadSuggestion("nothing useful"), { title: "", value: 0, nextStep: "", followUpDays: 2 });
   });
 
   await t.test("improves and translates text, and refuses empty, oversized or odd requests", async () => {
@@ -324,6 +353,7 @@ test("Plans decide which features a company has, as the pricing page says", asyn
   const outcomes = async () => ({
     broadcasts: (await get("/api/campaigns")).status,
     automations: (await get("/api/automations")).status,
+    leads: (await get("/api/leads/board")).status,
     audit: (await get("/api/workspace/audit")).status,
     api: (await get("/api/workspace/keys")).status,
     ai: (await request(app).post("/api/ai/improve").set(owner).send({ text: "hi" })).status,
@@ -333,7 +363,7 @@ test("Plans decide which features a company has, as the pricing page says", asyn
   await t.test("Free and Starter have the inbox, notes and contacts, but not the paid extras", async () => {
     for (const plan of ["Free", "starter", " STARTER "]) {
       await setPlan(plan);
-      assert.deepEqual(await outcomes(), { broadcasts: LOCKED, automations: LOCKED, audit: LOCKED, api: LOCKED, ai: LOCKED }, plan);
+      assert.deepEqual(await outcomes(), { broadcasts: LOCKED, automations: LOCKED, leads: LOCKED, audit: LOCKED, api: LOCKED, ai: LOCKED }, plan);
     }
     await setPlan("Starter");
     const locked = await get("/api/campaigns");
@@ -342,15 +372,15 @@ test("Plans decide which features a company has, as the pricing page says", asyn
     assert.equal((await get("/api/conversations")).status, 200);
   });
 
-  await t.test("Growth adds broadcasts, automations, the audit log and AI", async () => {
+  await t.test("Growth adds broadcasts, automations, the sales pipeline, the audit log and AI", async () => {
     await setPlan("Growth");
-    assert.deepEqual(await outcomes(), { broadcasts: ALLOWED, automations: ALLOWED, audit: ALLOWED, api: LOCKED, ai: ALLOWED });
+    assert.deepEqual(await outcomes(), { broadcasts: ALLOWED, automations: ALLOWED, leads: ALLOWED, audit: ALLOWED, api: LOCKED, ai: ALLOWED });
   });
 
   await t.test("Business and Enterprise add the API; unknown plan names keep everything", async () => {
     for (const plan of ["Business", "enterprise", "Workspace", "Platform", "Custom deal"]) {
       await setPlan(plan);
-      assert.deepEqual(await outcomes(), { broadcasts: ALLOWED, automations: ALLOWED, audit: ALLOWED, api: ALLOWED, ai: ALLOWED }, plan);
+      assert.deepEqual(await outcomes(), { broadcasts: ALLOWED, automations: ALLOWED, leads: ALLOWED, audit: ALLOWED, api: ALLOWED, ai: ALLOWED }, plan);
     }
   });
 
@@ -358,7 +388,7 @@ test("Plans decide which features a company has, as the pricing page says", asyn
     await setPlan("Starter");
     const caps = (await get("/api/workspace/capabilities")).body;
     assert.equal(caps.plan.name, "Starter");
-    assert.deepEqual(caps.plan.features, { broadcasts: false, automations: false, audit: false, api: false, ai: false });
+    assert.deepEqual(caps.plan.features, { broadcasts: false, automations: false, leads: false, audit: false, api: false, ai: false });
     assert.equal(caps.ai.available, false);
     assert.equal(caps.ai.reason, "plan");
   });

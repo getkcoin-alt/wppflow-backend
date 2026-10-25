@@ -194,6 +194,33 @@ export const AUTOMATION_TEMPLATES = [
   },
   // ── Organise leads ─────────────────────────────────────────────────────────────────────────────
   {
+    id: "new-lead",
+    group: "Organise leads",
+    name: "Create a lead for every new customer",
+    description: "Adds each new person who messages you to your sales pipeline, so nobody is forgotten. People who already have an open lead keep it.",
+    rule: {
+      triggerType: "first_message",
+      triggerCondition: "",
+      actionType: "create_lead",
+      actionSummary: "",
+      config: {},
+    },
+    needs: [],
+  },
+  {
+    id: "quote-lead",
+    group: "Organise leads",
+    name: "Create a lead when someone asks for a quote",
+    description: "Adds the person to your sales pipeline when they ask for a quote, a demo or more details, and thanks them.",
+    rule: {
+      ...keyword("quote, quotation, demo, interested, tell me more, more details, more info"),
+      actionType: "create_lead",
+      actionSummary: "",
+      config: { match: "contains", reply: "Thanks for your interest! A member of our team will be in touch shortly." },
+    },
+    needs: [],
+  },
+  {
     id: "interested",
     group: "Organise leads",
     name: "Tag interested customers",

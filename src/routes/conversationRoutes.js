@@ -18,6 +18,7 @@ import {
   assertConversationAccess,
 } from "../services/access.js";
 import { emitForConversation } from "../services/realtime.js";
+import { syncLeadOwner } from "../services/leadService.js";
 import { notifyAssignment, notifyInternalNote } from "../services/notificationService.js";
 import { sendMessageRateLimiter } from "../middleware/rateLimiter.js";
 import {
@@ -127,6 +128,9 @@ router.patch(
         actor: req.user,
         assigneeId: assignedUserId,
       }).catch((e) => console.error("Assignment notification failed:", e.message));
+    // the lead for this customer follows the chat: one idea of who has them
+    if (assignmentChanges)
+      syncLeadOwner({ tenantId: req.tenantId, conversation: rows[0], ownerUserId: assignedUserId, io: req.app.get("io") }).catch((e) => console.error("Lead owner sync failed:", e.message));
     const conversation = formatConversation(rows[0]);
     emitForConversation(
       req.app.get("io"),

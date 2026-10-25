@@ -6,11 +6,12 @@ import { fail } from "../middleware/http.js";
 export const FEATURE_LABELS = {
   broadcasts: "Broadcasts",
   automations: "Automations",
+  leads: "The sales pipeline",
   audit: "The audit log",
   api: "API keys and webhooks",
   ai: "The AI assistant",
 };
-const GROWTH = ["broadcasts", "automations", "audit", "ai"];
+const GROWTH = ["broadcasts", "automations", "leads", "audit", "ai"];
 // `numbers` is how many WhatsApp numbers the plan includes (null: agreed per company). `seats` is how many
 // people it is for (null: no limit).
 const TIERS = {

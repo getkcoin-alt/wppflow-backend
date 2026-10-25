@@ -14,6 +14,7 @@ import {
   aiStatus,
   suggestReply,
   summarize,
+  suggestLead,
   improveText,
   translateText,
   diagnoseAi,
@@ -71,6 +72,14 @@ router.post(
       status: "success",
       ...(await summarize({ tenant: req.tenant, conversationId: req.params.id })),
     });
+  }),
+);
+router.post(
+  "/conversations/:id/lead-suggestion",
+  perPerson,
+  route(async (req, res) => {
+    await assertConversationAccess(req, req.params.id);
+    res.json({ status: "success", ...(await suggestLead({ tenant: req.tenant, conversationId: req.params.id })) });
   }),
 );
 router.post(

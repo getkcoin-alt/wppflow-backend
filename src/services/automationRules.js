@@ -3,7 +3,7 @@ import { unknownVariables, VARIABLES } from "./templating.js";
 
 // What a rule is made of. A rule starts on a TRIGGER and does one ACTION; it can also send a confirmation reply.
 export const TRIGGERS = ["keyword", "first_message", "after_hours"];
-export const ACTIONS = ["reply_text", "assign_agent", "add_tag", "opt_in", "opt_out"];
+export const ACTIONS = ["reply_text", "assign_agent", "add_tag", "opt_in", "opt_out", "create_lead"];
 export const MATCHES = ["contains", "word", "exact"];
 
 // ── Keywords ─────────────────────────────────────────────────────────────────────────────────────

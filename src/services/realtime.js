@@ -65,3 +65,15 @@ export function emitForConversation(
     })
     .catch((e) => console.error("Realtime emit failed:", e.message));
 }
+
+// A lead changed: the managers, whoever owns it and whoever owns the WhatsApp number it came from are told, so
+// their open boards refresh. The screens ask the server again, which applies the visibility rule.
+export function emitForLead(io, tenantId, lead) {
+  if (!io) return;
+  const send = (sessionOwner) =>
+    emitScoped(io, tenantId, [lead.owner_user_id, sessionOwner], "lead:changed", { leadId: lead.id });
+  if (!lead.session_name) return send(null);
+  ownerOf(tenantId, lead.session_name)
+    .then(send)
+    .catch((e) => console.error("Realtime emit failed:", e.message));
+}

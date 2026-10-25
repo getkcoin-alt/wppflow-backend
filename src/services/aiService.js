@@ -326,6 +326,42 @@ Keep the whole summary under 100 words.`,
   return { text, model, sections: parseSummary(text) };
 }
 
+// What Riwo suggests when someone adds a customer to the pipeline: a name for the opportunity, an amount only
+// if one was clearly stated, and what to do next. A person reads it and changes it before anything is saved.
+export function parseLeadSuggestion(text) {
+  const line = (label) => new RegExp(`^\\s*${label}\\s*:\\s*(.+)$`, "im").exec(text)?.[1]?.trim() || "";
+  // "1.4M", "850k" and "1,200,000" all mean what they say
+  const said = /([0-9][0-9,]*(?:\.[0-9]+)?)\s*(million|thousand|m|k)?\b/i.exec(line("Value"));
+  const factor = { m: 1e6, million: 1e6, k: 1e3, thousand: 1e3 }[said?.[2]?.toLowerCase()] || 1;
+  const amount = said ? Number(said[1].replace(/,/g, "")) * factor : 0;
+  const days = Math.round(Number(line("Follow up in").replace(/[^0-9.]/g, "")));
+  return {
+    title: line("Title").replace(/^["“']|["”']$/g, "").slice(0, 120),
+    value: Number.isFinite(amount) && amount > 0 && amount < 1e10 ? amount : 0,
+    nextStep: line("Next step").slice(0, 240),
+    followUpDays: Number.isFinite(days) && days >= 1 && days <= 30 ? days : 2,
+  };
+}
+export async function suggestLead({ tenant, conversationId }) {
+  assertAvailable(tenant);
+  const context = await conversationContext(tenant, conversationId);
+  if (context.lines.length < 1) throw fail(422, "There isn't enough in this chat to suggest anything yet.");
+  const user = [
+    `Customer name: ${context.contact}`,
+    context.notes.length ? `<internal_notes>\n${context.notes.map((n) => `- ${n}`).join("\n")}\n</internal_notes>` : "",
+    `<conversation>\n${context.lines.join("\n")}\n</conversation>`,
+    `A salesperson is adding this customer to their sales pipeline. Write in English, in plain text, as exactly these four lines and nothing else:
+Title: a short name for the opportunity, up to 8 words, such as "2 bedroom in Marina" or "Annual checkup"
+Value: the amount of money the customer or staff clearly mentioned, as a plain number with no currency symbol. If no amount was clearly stated, write 0. Never guess.
+Next step: one short sentence on what the salesperson should do next
+Follow up in: a whole number of days from 1 to 14`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  const { text, model } = await run(tenant, { system: systemFor(tenant.name), user, maxTokens: 4096 });
+  return { ...parseLeadSuggestion(text), model };
+}
+
 export async function improveText({ tenant, text, style = "polish" }) {
   const draft = cleanText(text, "Your message");
   const instruction = STYLES[style] || STYLES.polish;

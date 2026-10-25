@@ -3,6 +3,7 @@ import { query } from "../db/index.js";
 import { sendTextMessage } from "./messageService.js";
 import { planAllows } from "./plans.js";
 import { personalise } from "./templating.js";
+import { createLeadFromChat } from "./leadService.js";
 import { matchesKeywords, withinHours, sendsReply } from "./automationRules.js";
 
 export const automationView = (a) => ({
@@ -107,6 +108,10 @@ async function perform(rule, { message, conv, contact, company, execution, io })
       );
       break;
     }
+    case "create_lead":
+      // a person who already has an open lead keeps it: nothing is duplicated
+      await createLeadFromChat({ tenantId, conversation: conv, source: "automation", io });
+      break;
     default:
       throw new Error("Unsupported automation action");
   }

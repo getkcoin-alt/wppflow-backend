@@ -41,7 +41,7 @@ test("The platform admin chooses a company's plan, and the plan decides what it 
   };
   const outcomes = async (auth) => {
     const get = (path) => request(app).get(path).set(auth).then((r) => r.status);
-    return { broadcasts: await get("/api/campaigns"), automations: await get("/api/automations"), audit: await get("/api/workspace/audit"), api: await get("/api/workspace/keys") };
+    return { broadcasts: await get("/api/campaigns"), automations: await get("/api/automations"), leads: await get("/api/leads/board"), audit: await get("/api/workspace/audit"), api: await get("/api/workspace/keys") };
   };
 
   await t.test("the plans are listed for the platform admin only", async () => {
@@ -56,7 +56,7 @@ test("The platform admin chooses a company's plan, and the plan decides what it 
       ["enterprise", null, null],
     ]);
     const growth = res.body.plans.find((p) => p.id === "growth");
-    assert.deepEqual(growth.features.filter((f) => f.included).map((f) => f.key), ["broadcasts", "automations", "audit", "ai"]);
+    assert.deepEqual(growth.features.filter((f) => f.included).map((f) => f.key), ["broadcasts", "automations", "leads", "audit", "ai"]);
     assert.deepEqual(res.body.plans.find((p) => p.id === "business").features.filter((f) => !f.included), []);
   });
 
@@ -92,12 +92,12 @@ test("The platform admin chooses a company's plan, and the plan decides what it 
   await t.test("what a company can use follows the plan it was given", async () => {
     const free = (await add({ plan: "Free" })).body.company;
     const freeAuth = await ownerOf(free);
-    assert.deepEqual(await outcomes(freeAuth), { broadcasts: 403, automations: 403, audit: 403, api: 403 });
+    assert.deepEqual(await outcomes(freeAuth), { broadcasts: 403, automations: 403, leads: 403, audit: 403, api: 403 });
     const growth = (await add({ plan: "Growth" })).body.company;
-    assert.deepEqual(await outcomes(await ownerOf(growth)), { broadcasts: 200, automations: 200, audit: 200, api: 403 });
+    assert.deepEqual(await outcomes(await ownerOf(growth)), { broadcasts: 200, automations: 200, leads: 200, audit: 200, api: 403 });
     const business = (await add({ plan: "Business" })).body.company;
     const businessAuth = await ownerOf(business);
-    assert.deepEqual(await outcomes(businessAuth), { broadcasts: 200, automations: 200, audit: 200, api: 200 });
+    assert.deepEqual(await outcomes(businessAuth), { broadcasts: 200, automations: 200, leads: 200, audit: 200, api: 200 });
     const caps = (await request(app).get("/api/workspace/capabilities").set(businessAuth)).body;
     assert.deepEqual([caps.plan.name, caps.plan.numbers, caps.numbersLimit], ["Business", 25, 25]);
   });
@@ -165,7 +165,7 @@ test("The platform admin chooses a company's plan, and the plan decides what it 
     const user = (await query("SELECT id,email,name FROM users WHERE email='legacy@plans-admin.test'")).rows[0];
     await query("INSERT INTO memberships(tenant_id,user_id,role) VALUES('tenant_legacy',$1,'owner')", [user.id]);
     const auth = { Authorization: `Bearer ${generateAccessToken(user, "tenant_legacy", "owner")}` };
-    assert.deepEqual(await outcomes(auth), { broadcasts: 200, automations: 200, audit: 200, api: 200 });
+    assert.deepEqual(await outcomes(auth), { broadcasts: 200, automations: 200, leads: 200, audit: 200, api: 200 });
     const list = (await request(app).get("/api/admin/companies").set(admin)).body.companies.find((c) => c.id === "tenant_legacy");
     assert.deepEqual([list.plan, list.planId], ["Workspace", null]);
   });

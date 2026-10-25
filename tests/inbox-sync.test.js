@@ -9,6 +9,15 @@ import { handleIncomingMessage } from "../src/services/messageService.js";
 import { defaultWhatsAppProvider as provider } from "../src/services/whatsapp/WhatsAppProvider.js";
 
 const settle = () => new Promise((r) => setTimeout(r, 120));
+// Waits for something to happen instead of guessing how long it takes: a busy machine is slower.
+const until = async (fn, ms = 5000) => {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (fn()) return;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error("condition not reached");
+};
 const recorder = () => {
   const events = [];
   const io = {
@@ -66,7 +75,7 @@ test("Inbox sync: catch-up, first-time backfill, change-only reconcile, data-car
     assert.equal((await query("SELECT count(*)::int n FROM contacts WHERE tenant_id=$1 AND phone IN ('15551110001','15551110009')", [tenantId])).rows[0].n, 2, "contacts imported in batch, duplicates collapsed");
     const conv = (await query("SELECT unread_count,last_message FROM conversations WHERE tenant_id=$1 AND provider_chat_id='15551110001@c.us'", [tenantId])).rows[0];
     assert.equal(conv.unread_count, 2, "history import never inflates unread counts");
-    await settle();
+    await until(() => events.some((e) => e.event === "sync:progress" && e.payload.phase === "done"));
     const phases = events.filter((e) => e.event === "sync:progress").map((e) => e.payload.phase);
     assert.deepEqual([phases[0], phases.at(-1)], ["chats", "done"]);
     assert.ok(phases.includes("messages"));
@@ -100,7 +109,7 @@ test("Inbox sync: catch-up, first-time backfill, change-only reconcile, data-car
     const { io, events } = recorder();
     const result = await syncSession({ tenantId, sessionName: "line-1", io });
     assert.equal(result.failed, true);
-    await settle();
+    await until(() => events.at(-1)?.payload.phase === "failed");
     assert.equal(events.at(-1).payload.phase, "failed");
     // the lock is released, so the next attempt runs
     provider.syncConversations = async () => remote;
@@ -110,7 +119,7 @@ test("Inbox sync: catch-up, first-time backfill, change-only reconcile, data-car
   await t.test("live message events carry the updated conversation so lists update in place", async () => {
     const { io, events } = recorder();
     await handleIncomingMessage({ tenantId, sessionName: "line-1", io, msg: wire("LIVE1", "brand new", 1800000000) });
-    await settle();
+    await until(() => events.some((e) => e.event === "message:received") && events.some((e) => e.event === "conversation:updated"));
     const received = events.find((e) => e.event === "message:received").payload;
     assert.equal(received.message.text, "brand new");
     assert.equal(received.conversation.id, received.conversationId);

@@ -18,6 +18,7 @@ import sessionRoutes from "./routes/sessionRoutes.js";
 import campaignRoutes from "./routes/campaignRoutes.js";
 import contactRoutes from "./routes/contactRoutes.js";
 import automationRoutes from "./routes/automationRoutes.js";
+import leadRoutes from "./routes/leadRoutes.js";
 import healthRoutes from "./routes/healthRoutes.js";
 import workspaceRoutes from "./routes/workspaceRoutes.js";
 import mediaRoutes from "./routes/mediaRoutes.js";
@@ -185,6 +186,7 @@ app.use("/api/sessions", sessionRoutes);
 app.use("/api/campaigns", campaignRoutes);
 app.use("/api/contacts", contactRoutes);
 app.use("/api/automations", automationRoutes);
+app.use("/api/leads", leadRoutes);
 app.use("/api/workspace", workspaceRoutes);
 app.use("/api/attachments", mediaRoutes);
 app.use("/api/ai", aiRoutes);
@@ -219,7 +221,7 @@ export async function startServer() {
     if (ENV.AUTO_MIGRATE) await runMigrations();
     else {
       const { rows } = await query(
-        "SELECT 1 FROM schema_migrations WHERE version='015_automation_rules'",
+        "SELECT 1 FROM schema_migrations WHERE version='016_leads'",
       );
       if (!rows.length)
         throw new Error(
