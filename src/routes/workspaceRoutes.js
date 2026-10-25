@@ -39,6 +39,9 @@ router.get(
       plan: planView(req.tenant),
       numbersLimit: req.tenant?.sessionsLimit ?? null,
       ai: await aiStatus(req.tenant),
+      // How fast a reply should come, and the teams people are in: the inbox shows who has waited too long
+      replyTargetMinutes: (await query("SELECT sla_minutes FROM report_settings WHERE tenant_id=$1", [req.tenantId])).rows[0]?.sla_minutes ?? 30,
+      teams: (await query("SELECT DISTINCT category FROM memberships WHERE tenant_id=$1 AND status='active' ORDER BY category", [req.tenantId])).rows.map((r) => r.category),
       // What the company pays for and when it renews: for owners and administrators only.
       ...(isManager(req) ? { subscription: subscriptionView(req.tenant) } : {}),
     }),

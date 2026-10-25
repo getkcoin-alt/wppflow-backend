@@ -248,4 +248,17 @@ test("Inbox: waiting and overdue chats, pinning, who else is typing, and follow-
     await put({ taskEscalationHours: 24 });
     assert.equal(await escalateOverdueTasks(null), 1);
   });
+  await t.test("the workspace tells the browser the reply target and the teams, to flag late chats and offer the team filter", async () => {
+    const caps = async () => (await request(app).get("/api/workspace/capabilities").set(sam.auth)).body;
+    let body = await caps();
+    assert.equal(body.replyTargetMinutes, 30, "the default target");
+    assert.ok(body.teams.includes("sales") && body.teams.includes("support"), "each team that has someone on it");
+    assert.deepEqual([...body.teams].sort(), body.teams, "listed in a steady order");
+    assert.equal((await request(app).put("/api/reports/settings").set(owner.auth).send({ slaMinutes: 12 })).status, 200);
+    assert.equal((await caps()).replyTargetMinutes, 12);
+    // someone who left is not a team
+    await query("UPDATE memberships SET status='removed' WHERE tenant_id=$1 AND user_id=$2", [tenantId, tina.id]);
+    body = await caps();
+    assert.ok(!body.teams.includes("support"));
+  });
 });
