@@ -30,11 +30,19 @@ async function ownerOf(tenantId, sessionName) {
   return rows[0]?.owner_user_id ?? null;
 }
 
+// Looking up the owner takes a database round trip, and two lookups can finish in either order, so
+// "failed" could reach the browser before the "chats" that was sent first. A number's events wait
+// for the ones sent before them.
+const sessionTails = new Map();
 export function emitForSession(io, tenantId, sessionName, event, payload) {
   if (!io) return;
-  ownerOf(tenantId, sessionName)
+  const key = `${tenantId}:${sessionName}`;
+  const tail = (sessionTails.get(key) || Promise.resolve())
+    .then(() => ownerOf(tenantId, sessionName))
     .then((owner) => emitScoped(io, tenantId, owner, event, payload))
     .catch((e) => console.error("Realtime emit failed:", e.message));
+  sessionTails.set(key, tail);
+  tail.then(() => sessionTails.get(key) === tail && sessionTails.delete(key));
 }
 
 // With { snapshot: true } the event also carries the conversation's current state, so
