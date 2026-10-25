@@ -855,3 +855,78 @@ export async function adminPayments({ status = "" } = {}) {
     refunds: refunds.rows.map((r) => ({ id: r.refund_id, company: r.company, paymentId: r.gateway_payment_id, amountMinor: Number(r.amount_minor), currency: r.currency, status: r.status, at: r.created_at })),
   };
 }
+
+// What an accountant or the platform owner checks: money that came in against the invoices issued, and everything that
+// does not add up. "Exceptions" are things a person should look at; an empty list is the good answer.
+export async function billingAudit({ days = 30, nowMs = Date.now() } = {}) {
+  const span = Math.min(Math.max(Number(days) || 30, 1), 366);
+  const since = new Date(nowMs - span * 86400_000).toISOString();
+  const [taken, issued, orders, refunds] = await Promise.all([
+    query(
+      `SELECT currency,source,count(*)::int AS payments,COALESCE(sum(amount),0)::numeric AS amount FROM subscription_payments
+       WHERE created_at >= $1 AND currency IS NOT NULL GROUP BY currency,source ORDER BY currency,source`,
+      [since],
+    ),
+    query(
+      `SELECT currency,count(*)::int AS invoices,COALESCE(sum(taxable_minor),0)::bigint AS taxable,COALESCE(sum(cgst_minor+sgst_minor+igst_minor),0)::bigint AS tax,COALESCE(sum(total_minor),0)::bigint AS total
+       FROM invoices WHERE created_at >= $1 GROUP BY currency ORDER BY currency`,
+      [since],
+    ),
+    query("SELECT status,count(*)::int AS n FROM payment_orders WHERE source IN ('checkout','autopay') AND created_at >= $1 GROUP BY status", [since]),
+    query("SELECT currency,count(*)::int AS n,COALESCE(sum(amount_minor),0)::bigint AS amount FROM payment_refunds WHERE created_at >= $1 GROUP BY currency", [since]),
+  ]);
+  const company = (alias = "t") => `${alias}.name AS company`;
+  const [mismatch, unsettled, paidNoPayment, noInvoice, stuckHooks, gaps, badSignatures] = await Promise.all([
+    query(`SELECT o.id,o.tenant_id,${company()},o.total_minor,o.currency,o.gateway_payment_id,o.failure_reason,o.updated_at FROM payment_orders o JOIN tenants t ON t.id=o.tenant_id WHERE o.status='mismatch' ORDER BY o.updated_at DESC LIMIT 50`),
+    query(
+      `SELECT o.id,o.tenant_id,${company()},o.total_minor,o.currency,o.gateway_payment_id,o.status,o.updated_at FROM payment_orders o JOIN tenants t ON t.id=o.tenant_id
+       WHERE o.gateway_payment_id IS NOT NULL AND o.status IN ('created','attempted') AND o.updated_at < now()-interval '1 hour' ORDER BY o.updated_at DESC LIMIT 50`,
+    ),
+    query(
+      `SELECT o.id,o.tenant_id,${company()},o.total_minor,o.currency,o.gateway_payment_id,o.paid_at FROM payment_orders o JOIN tenants t ON t.id=o.tenant_id
+       WHERE o.status='paid' AND o.subscription_payment_id IS NULL ORDER BY o.paid_at DESC LIMIT 50`,
+    ),
+    query(
+      `SELECT p.id,p.tenant_id,${company()},p.plan,p.amount,p.currency,p.source,p.created_at FROM subscription_payments p JOIN tenants t ON t.id=p.tenant_id
+       WHERE p.amount > 0 AND p.created_at >= $1 AND NOT EXISTS (SELECT 1 FROM invoices i WHERE i.subscription_payment_id=p.id::text) ORDER BY p.created_at DESC LIMIT 50`,
+      [since],
+    ),
+    query(`SELECT event_id,event,received_at,attempts,result FROM gateway_webhook_receipts WHERE processed_at IS NULL AND received_at < now()-interval '10 minutes' ORDER BY received_at DESC LIMIT 50`),
+    // an invoice number that was skipped in a series is a compliance question, not a rounding matter
+    query(
+      `SELECT i.series,g.n AS missing FROM (SELECT series,max(seq) AS top FROM invoices GROUP BY series) i
+       CROSS JOIN LATERAL generate_series(1,i.top) AS g(n) WHERE NOT EXISTS (SELECT 1 FROM invoices x WHERE x.series=i.series AND x.seq=g.n) ORDER BY i.series,g.n LIMIT 100`,
+    ),
+    query(
+      `SELECT a.id,a.tenant_id,${company("t")},a.metadata,a.created_at FROM audit_events a JOIN tenants t ON t.id=a.tenant_id WHERE a.event_type='payment.signature_invalid' AND a.created_at >= $1 ORDER BY a.id DESC LIMIT 50`,
+      [since],
+    ),
+  ]);
+  const events = (
+    await query(
+      `SELECT a.id,a.event_type,a.metadata,a.created_at,t.name AS company,u.name AS actor FROM audit_events a JOIN tenants t ON t.id=a.tenant_id LEFT JOIN users u ON u.id=a.actor_id
+       WHERE a.event_type ~ '^(payment|subscription|autopay|invoice|plan)\\.' AND a.created_at >= $1 ORDER BY a.id DESC LIMIT 100`,
+      [since],
+    )
+  ).rows.map((e) => ({ id: e.id, type: e.event_type, company: e.company, actor: e.actor, at: e.created_at, details: e.metadata }));
+  const money = (r) => ({ currency: r.currency, amount: Number(r.amount) });
+  const exceptions = {
+    amountMismatch: mismatch.rows.map((o) => ({ orderId: o.id, companyId: o.tenant_id, company: o.company, totalMinor: Number(o.total_minor), currency: o.currency, paymentId: o.gateway_payment_id, reason: o.failure_reason, at: o.updated_at })),
+    notSettled: unsettled.rows.map((o) => ({ orderId: o.id, companyId: o.tenant_id, company: o.company, totalMinor: Number(o.total_minor), currency: o.currency, paymentId: o.gateway_payment_id, status: o.status, at: o.updated_at })),
+    paidButNoSubscriptionRecord: paidNoPayment.rows.map((o) => ({ orderId: o.id, companyId: o.tenant_id, company: o.company, totalMinor: Number(o.total_minor), currency: o.currency, paymentId: o.gateway_payment_id, at: o.paid_at })),
+    paymentWithoutInvoice: noInvoice.rows.map((p) => ({ paymentId: p.id, companyId: p.tenant_id, company: p.company, plan: p.plan, amount: Number(p.amount), currency: p.currency, source: p.source, at: p.created_at })),
+    webhooksNotProcessed: stuckHooks.rows.map((w) => ({ eventId: w.event_id, event: w.event, receivedAt: w.received_at, attempts: w.attempts, result: w.result })),
+    invoiceNumberGaps: gaps.rows.map((g) => ({ series: g.series, missing: Number(g.missing) })),
+    invalidSignatures: badSignatures.rows.map((a) => ({ companyId: a.tenant_id, company: a.company, details: a.metadata, at: a.created_at })),
+  };
+  return {
+    range: { days: span, since },
+    payments: { configured: paymentsStatus(), takings: taken.rows.map((r) => ({ ...money(r), source: r.source, payments: r.payments })) },
+    invoices: issued.rows.map((r) => ({ currency: r.currency, invoices: r.invoices, taxableMinor: Number(r.taxable), taxMinor: Number(r.tax), totalMinor: Number(r.total) })),
+    orders: Object.fromEntries(orders.rows.map((o) => [o.status, o.n])),
+    refunds: refunds.rows.map((r) => ({ currency: r.currency, refunds: r.n, amountMinor: Number(r.amount) })),
+    exceptions,
+    exceptionCount: Object.values(exceptions).reduce((n, list) => n + list.length, 0),
+    events,
+  };
+}

@@ -19,6 +19,7 @@ import { requireFeature, planView } from "../services/plans.js";
 import { aiStatus } from "../services/aiService.js";
 import { isManager } from "../services/access.js";
 import { subscriptionView } from "../services/subscriptionService.js";
+import { supportSessions } from "../services/platformService.js";
 import {
   resolveWebhook,
   encryptSecret,
@@ -139,6 +140,12 @@ router.get(
     );
     res.json({ status: "success", events: rows });
   }),
+);
+// Every time someone from Scriwo looked at this account, why, and what they looked at.
+router.get(
+  "/support-access",
+  requireRole("owner", "admin"),
+  route(async (req, res) => res.json({ status: "success", sessions: await supportSessions(req.tenantId) })),
 );
 router.get(
   "/health",

@@ -7,7 +7,7 @@ import { query } from "../src/db/index.js";
 import { registerTenantAndUser, generateAccessToken } from "../src/services/authService.js";
 import { handleIncomingMessage } from "../src/services/messageService.js";
 import { pumpAutomations } from "../src/services/automationService.js";
-import { setAiClient, parseSummary, parseLeadSuggestion } from "../src/services/aiService.js";
+import { setAiClient, parseSummary, parseLeadSuggestion, parseMood } from "../src/services/aiService.js";
 import { closeSessions } from "../src/services/sessionService.js";
 
 // A stand-in for the Anthropic client that records every request and answers from a script.
@@ -153,6 +153,21 @@ test("The AI assistant (Riwo) helps staff write, and never sends anything itself
     assert.deepEqual(res.body.sections.map((s) => s.label), ["Wants", "Key details", "Status", "Next step"]);
     assert.equal(res.body.sections[3].text, "confirm the viewing time");
     assert.deepEqual(parseSummary("just a paragraph with no labels"), []);
+    assert.equal(res.body.mood, null, "no mood line, no mood");
+  });
+
+  await t.test("says how the customer sounds, as one of four words, and only when Riwo said so in that form", async () => {
+    fake.answer({ text: "Wants: a refund\nKey details: order 4120, AED 300\nStatus: waited three days for a reply\nNext step: call today\nMood: Frustrated - waited three days, asked twice" });
+    const res = await ai(`/conversations/${chat}/summary`, samAuth);
+    assert.deepEqual(res.body.mood, { label: "frustrated", note: "waited three days, asked twice" });
+    assert.deepEqual(res.body.sections.map((s) => s.label), ["Wants", "Key details", "Status", "Next step"], "the mood is its own field, not a fifth section");
+    // the instruction Riwo got names the four words and says it describes the chat
+    assert.match(fake.calls.at(-1).params.messages[0].content, /Mood: one word from Positive, Neutral, Frustrated or Urgent/);
+    assert.deepEqual(parseMood("Mood: urgent: the flight is tonight"), { label: "urgent", note: "the flight is tonight" });
+    assert.deepEqual(parseMood("mood : POSITIVE"), { label: "positive", note: "" });
+    assert.equal(parseMood("Mood: Furious - very"), null, "a word that is not one of the four is dropped, not guessed");
+    assert.equal(parseMood("The customer's mood: happy"), null);
+    assert.equal(parseMood("Wants: a refund"), null);
   });
 
   await t.test("suggests what to put in a new lead, which a person then confirms", async () => {

@@ -331,6 +331,14 @@ export function parseSummary(text) {
   }
   return sections.filter((s) => s.text).length >= 2 ? sections : [];
 }
+// How the customer sounds in this chat, as one of four words and a few of Riwo's own about why. It describes the
+// chat, not the person, and it is only ever shown beside a summary a teammate asked for.
+export const MOODS = ["positive", "neutral", "frustrated", "urgent"];
+export function parseMood(text) {
+  const m = /^\s*Mood\s*:\s*([A-Za-z]+)\s*(?:[-–—:,]\s*(.*))?$/im.exec(text);
+  const label = m?.[1]?.toLowerCase();
+  return MOODS.includes(label) ? { label, note: (m[2] || "").trim().slice(0, 120) } : null;
+}
 export async function summarize({ tenant, conversationId }) {
   assertAvailable(tenant);
   const context = await conversationContext(tenant, conversationId);
@@ -339,17 +347,18 @@ export async function summarize({ tenant, conversationId }) {
     `Customer name: ${context.contact}`,
     context.notes.length ? `<internal_notes>\n${context.notes.map((n) => `- ${n}`).join("\n")}\n</internal_notes>` : "",
     `<conversation>\n${context.lines.join("\n")}\n</conversation>`,
-    `Summarize this conversation for a colleague who is taking it over. Write in English, in plain text, as exactly these four lines and nothing else:
+    `Summarize this conversation for a colleague who is taking it over. Write in English, in plain text, as exactly these five lines and nothing else:
 Wants: what the customer is asking for
 Key details: names, numbers, dates, amounts and the product, property or service involved
 Status: what has been answered or promised so far, and by whom
 Next step: the most useful thing to do next
-Keep the whole summary under 100 words.`,
+Mood: one word from Positive, Neutral, Frustrated or Urgent for how the customer sounds in this chat, then a dash and at most eight words on why
+Keep the whole summary under 110 words.`,
   ]
     .filter(Boolean)
     .join("\n\n");
   const { text, model } = await run(tenant, { system: systemFor(tenant.name), user, maxTokens: 4096 });
-  return { text, model, sections: parseSummary(text) };
+  return { text, model, sections: parseSummary(text), mood: parseMood(text) };
 }
 
 // What Riwo suggests when someone adds a customer to the pipeline: a name for the opportunity, an amount only

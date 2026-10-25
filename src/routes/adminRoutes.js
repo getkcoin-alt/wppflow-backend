@@ -6,7 +6,8 @@ import { createCompany, resendOwnerSetupLink } from "../services/adminService.js
 import { choosePlan, planCatalogue, planOf, updatePlan } from "../services/plans.js";
 import { dailyLimitOf, defaultDailyLimit } from "../services/aiService.js";
 import { subscriptionView, recordPayment, scheduleChange, clearScheduledChange, paymentsOf } from "../services/subscriptionService.js";
-import { invoiceForRecordedPayment, adminPayments, getInvoice } from "../services/billingService.js";
+import { invoiceForRecordedPayment, adminPayments, getInvoice, billingAudit } from "../services/billingService.js";
+import { platformOverview, platformNumberHealth, startSupportSession, endSupportSession, supportLook, supportSessions } from "../services/platformService.js";
 import { renderInvoice, invoiceFileName } from "../services/invoicePdf.js";
 const router = express.Router();
 router.use(authenticateToken, requireSuperAdmin);
@@ -260,6 +261,44 @@ router.delete(
   }),
 );
 // Enquiries from the public website's contact form, newest first.
+// ── Across every company: totals, the health of every number, and the books ────────────────────────────────
+router.get(
+  "/overview",
+  route(async (req, res) => res.json({ status: "success", overview: await platformOverview({ fresh: req.query.fresh === "1" }) })),
+);
+router.get(
+  "/number-health",
+  route(async (req, res) => res.json({ status: "success", ...(await platformNumberHealth({ problemsOnly: req.query.problems === "1" })) })),
+);
+router.get(
+  "/billing/audit",
+  route(async (req, res) => res.json({ status: "success", audit: await billingAudit({ days: req.query.days }) })),
+);
+
+// ── Support access: look at a company's account for a stated reason, on the record ─────────────────────
+router.get(
+  "/companies/:id/support",
+  route(async (req, res) => {
+    if (!(await query("SELECT 1 FROM tenants WHERE id=$1", [req.params.id])).rowCount) throw fail(404, "Company not found");
+    res.json({ status: "success", sessions: await supportSessions(req.params.id) });
+  }),
+);
+router.post(
+  "/companies/:id/support",
+  route(async (req, res) => {
+    const session = await startSupportSession({ tenantId: req.params.id, admin: req.user, reason: req.body.reason, minutes: req.body.minutes ?? 60, io: req.app.get("io") });
+    res.status(201).json({ status: "success", session });
+  }),
+);
+router.delete(
+  "/companies/:id/support",
+  route(async (req, res) => res.json({ status: "success", ...(await endSupportSession({ tenantId: req.params.id, admin: req.user })) })),
+);
+router.get(
+  "/companies/:id/support/:section",
+  route(async (req, res) => res.json({ status: "success", ...(await supportLook({ tenantId: req.params.id, admin: req.user, section: req.params.section })) })),
+);
+
 router.get(
   "/leads",
   route(async (req, res) => {
