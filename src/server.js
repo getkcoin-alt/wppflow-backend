@@ -19,6 +19,7 @@ import campaignRoutes from "./routes/campaignRoutes.js";
 import contactRoutes from "./routes/contactRoutes.js";
 import labelRoutes from "./routes/labelRoutes.js";
 import billingRoutes from "./routes/billingRoutes.js";
+import reportRoutes from "./routes/reportRoutes.js";
 import { razorpayWebhook } from "./services/billingService.js";
 import automationRoutes from "./routes/automationRoutes.js";
 import leadRoutes from "./routes/leadRoutes.js";
@@ -195,6 +196,7 @@ app.use("/api/campaigns", campaignRoutes);
 app.use("/api/contacts", contactRoutes);
 app.use("/api/labels", labelRoutes);
 app.use("/api/billing", billingRoutes);
+app.use("/api/reports", reportRoutes);
 app.use("/api/automations", automationRoutes);
 app.use("/api/leads", leadRoutes);
 app.use("/api/workspace", workspaceRoutes);
@@ -231,7 +233,7 @@ export async function startServer() {
     if (ENV.AUTO_MIGRATE) await runMigrations();
     else {
       const { rows } = await query(
-        "SELECT 1 FROM schema_migrations WHERE version='020_billing'",
+        "SELECT 1 FROM schema_migrations WHERE version='021_reply_analytics'",
       );
       if (!rows.length)
         throw new Error(

@@ -174,6 +174,7 @@ router.post(
       text: req.body.text,
       idempotencyKey: req.body.idempotencyKey,
       agentName: req.user.name,
+      sentByUserId: req.user.id ?? null,
       type: "internal_note",
       io: req.app.get("io"),
     });
@@ -381,6 +382,7 @@ router.post("/:id/messages", sendMessageRateLimiter, async (req, res) => {
       text,
       idempotencyKey,
       agentName: req.user.name || "Agent",
+      sentByUserId: req.user.id ?? null,
       io,
     });
 

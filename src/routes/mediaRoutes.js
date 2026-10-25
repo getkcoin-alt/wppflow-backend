@@ -66,6 +66,7 @@ router.post(
       type: mediaTypes[a.mime_type],
       attachment: a,
       agentName: req.user.name,
+      sentByUserId: req.user.id ?? null,
       io: req.app.get("io"),
     });
     res.status(201).json({ status: "success", ...result });

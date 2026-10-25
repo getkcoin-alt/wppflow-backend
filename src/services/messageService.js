@@ -61,6 +61,7 @@ export async function sendTextMessage({
   text,
   idempotencyKey,
   agentName = "Agent",
+  sentByUserId = null,
   io = null,
   type = "text",
   attachment = null,
@@ -128,8 +129,8 @@ export async function sendTextMessage({
       stamp = new Date().toISOString(),
       note = type === "internal_note";
     const saved = await c.query(
-      `INSERT INTO messages(id,tenant_id,conversation_id,idempotency_key,sender,agent_name,text,type,status,ack,timestamp,timestamp_epoch)
-      VALUES($1,$2,$3,$4,'agent',$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      `INSERT INTO messages(id,tenant_id,conversation_id,idempotency_key,sender,agent_name,text,type,status,ack,timestamp,timestamp_epoch,sent_by_user_id)
+      VALUES($1,$2,$3,$4,'agent',$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
       [
         id,
         tenantId,
@@ -142,6 +143,7 @@ export async function sendTextMessage({
         note ? 1 : 0,
         stamp,
         epoch,
+        sentByUserId,
       ],
     );
     if (!note) {
