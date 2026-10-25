@@ -40,6 +40,7 @@ const entry = (code, name, numbers, seats, features, extra = {}) => ({
   seats,
   features,
   maxContacts: null,
+  maxBroadcasts: null,
   trialDays: 0,
   taxMode: "exclusive",
   prices: [],
@@ -63,6 +64,7 @@ export async function loadPlans() {
         sortOrder: r.sort_order,
         isActive: r.is_active,
         maxContacts: r.max_contacts,
+        maxBroadcasts: r.max_broadcasts_per_month ?? null,
         trialDays: r.trial_days,
         taxMode: r.tax_mode,
         prices: prices.rows
@@ -80,7 +82,7 @@ export function keepPlansFresh(everyMs = 60000) {
 }
 
 const sorted = (all = false) => [...plans.values()].filter((p) => all || p.isActive).sort((a, b) => a.sortOrder - b.sortOrder);
-const planShape = (p) => ({ id: p.code, name: p.name, features: p.features, seats: p.seats, numbers: p.numbers, restricted: true });
+const planShape = (p) => ({ id: p.code, name: p.name, features: p.features, seats: p.seats, numbers: p.numbers, maxContacts: p.maxContacts ?? null, maxBroadcasts: p.maxBroadcasts ?? null, restricted: true });
 
 export function planOf(value) {
   const id = String(value || "").trim().toLowerCase();
@@ -92,6 +94,8 @@ export function planOf(value) {
     features: Object.keys(FEATURE_LABELS),
     seats: null,
     numbers: null,
+    maxContacts: null,
+    maxBroadcasts: null,
     restricted: false,
   };
 }
@@ -120,6 +124,7 @@ export const planCatalogue = ({ all = false } = {}) =>
     isActive: p.isActive,
     trialDays: p.trialDays,
     maxContacts: p.maxContacts,
+    maxBroadcasts: p.maxBroadcasts,
     taxMode: p.taxMode,
     prices: p.prices,
     features: Object.entries(FEATURE_LABELS).map(([key, label]) => ({ key, label, included: p.features.includes(key) })),
@@ -207,6 +212,7 @@ export async function updatePlan(code, patch, actorId) {
   if (patch.numbers !== undefined) next.numbers = whole(patch.numbers, "WhatsApp numbers", { min: 1, max: 500, nullable: true });
   if (patch.seats !== undefined) next.seats = whole(patch.seats, "People", { min: 1, max: 1000, nullable: true });
   if (patch.maxContacts !== undefined) next.maxContacts = whole(patch.maxContacts, "Contacts", { min: 1, max: 100000000, nullable: true });
+  if (patch.maxBroadcasts !== undefined) next.maxBroadcasts = whole(patch.maxBroadcasts, "Broadcasts a month", { min: 1, max: 100000, nullable: true });
   if (patch.trialDays !== undefined) next.trialDays = whole(patch.trialDays, "Trial days", { min: 0, max: 90 });
   if (patch.isActive !== undefined) {
     if (typeof patch.isActive !== "boolean") throw fail(400, "isActive must be true or false");
@@ -231,11 +237,11 @@ export async function updatePlan(code, patch, actorId) {
     });
     if (id === "free" && next.prices.some((p) => p.amountMinor > 0)) throw fail(400, "The Free plan has no price");
   }
-  const snapshot = (p) => ({ name: p.name, numbers: p.numbers, seats: p.seats, features: p.features, isActive: p.isActive, maxContacts: p.maxContacts, trialDays: p.trialDays, prices: p.prices });
+  const snapshot = (p) => ({ name: p.name, numbers: p.numbers, seats: p.seats, features: p.features, isActive: p.isActive, maxContacts: p.maxContacts, maxBroadcasts: p.maxBroadcasts, trialDays: p.trialDays, prices: p.prices });
   await withTransaction(async (client) => {
     await client.query(
-      `UPDATE plans SET name=$2,numbers=$3,seats=$4,features=$5,is_active=$6,max_contacts=$7,trial_days=$8,updated_at=now() WHERE code=$1`,
-      [id, next.name, next.numbers, next.seats, JSON.stringify(next.features), next.isActive, next.maxContacts, next.trialDays],
+      `UPDATE plans SET name=$2,numbers=$3,seats=$4,features=$5,is_active=$6,max_contacts=$7,trial_days=$8,max_broadcasts_per_month=$9,updated_at=now() WHERE code=$1`,
+      [id, next.name, next.numbers, next.seats, JSON.stringify(next.features), next.isActive, next.maxContacts, next.trialDays, next.maxBroadcasts],
     );
     if (patch.prices !== undefined) {
       await client.query("DELETE FROM plan_prices WHERE plan_code=$1", [id]);

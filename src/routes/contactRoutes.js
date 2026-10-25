@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { assertRoomForContacts, assertImportFits, contactCount, roomForContacts } from "../services/limitsService.js";
 import express from "express";
 import {
   authenticateToken,
@@ -52,10 +53,22 @@ export async function syncContacts(tenantId, sessionName) {
       avatar: c.profilePicThumbObj?.eurl || "",
     });
   }
-  // One statement per 500 contacts instead of one per contact.
+  // One statement per 500 contacts instead of one per contact. A company at its plan's contact limit still gets the
+  // people it has updated, but no new ones are added from the phone.
   const all = [...byPhone.values()];
+  let room = await roomForContacts(tenantId);
+  let skipped = 0;
   for (let i = 0; i < all.length; i += 500) {
-    const chunk = all.slice(i, i + 500);
+    let chunk = all.slice(i, i + 500);
+    if (room !== null) {
+      const have = new Set((await query("SELECT phone FROM contacts WHERE tenant_id=$1 AND phone = ANY($2::text[])", [tenantId, chunk.map((c) => c.phone)])).rows.map((r) => r.phone));
+      const fresh = chunk.filter((c) => !have.has(c.phone));
+      const take = new Set(fresh.slice(0, room).map((c) => c.phone));
+      room -= take.size;
+      skipped += fresh.length - take.size;
+      chunk = chunk.filter((c) => have.has(c.phone) || take.has(c.phone));
+    }
+    if (!chunk.length) continue;
     await query(
       // WhatsApp's name is kept in whatsapp_name; the name a person on the team typed is never overwritten, and a
       // real name is never replaced by the bare number.
@@ -73,7 +86,8 @@ export async function syncContacts(tenantId, sessionName) {
       ],
     );
   }
-  return all.length;
+  if (skipped) console.warn(`Contact sync: ${skipped} new contacts were not added because the plan's contact limit is reached`);
+  return all.length - skipped;
 }
 const audit = (client, req, event, metadata) =>
   client.query("INSERT INTO audit_events(tenant_id,actor_id,event_type,metadata) VALUES($1,$2,$3,$4)", [req.tenantId, req.user?.id ?? null, event, JSON.stringify(metadata)]);
@@ -168,6 +182,8 @@ router.post(
     let imported = 0;
     const touched = [];
     await withTransaction(async (c) => {
+      const db = (sql, params) => c.query(sql, params);
+      const before = await contactCount(req.tenantId, db);
       for (const row of rows) {
         // One row at a time: a row that cannot be used is reported and the rest of the file still goes in.
         await c.query("SAVEPOINT import_row");
@@ -207,6 +223,8 @@ router.post(
           skipped.push({ name: String(row?.name ?? "").slice(0, 60), phone: String(row?.phone ?? "").slice(0, 40), reason: e.message });
         }
       }
+      // over the plan's contact limit: this batch is not saved at all, and the message says why
+      await assertImportFits(req.tenantId, before, db);
     });
     changed(req, touched);
     res.json({ status: "success", imported, skipped: skipped.slice(0, 50), skippedCount: skipped.length });
@@ -229,6 +247,7 @@ router.post(
         message: `${displayPhone(phone)} is already saved as "${known.rows[0].name}"`,
         contactId: known.rows[0].id,
       });
+    await assertRoomForContacts(req.tenantId, 1);
     const contact = await withTransaction(async (c) => {
       const { rows } = await c.query(
         `INSERT INTO contacts(id,tenant_id,name,phone,email,custom_traits,name_edited) VALUES($1,$2,$3,$4,$5,$6,true) RETURNING *`,

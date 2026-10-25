@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { assertRoomForBroadcast } from "./limitsService.js";
 import { query, withTransaction } from "../db/index.js";
 import { sendTextMessage } from "./messageService.js";
 import { fail } from "../middleware/http.js";
@@ -90,6 +91,9 @@ export async function startCampaign(tenantId, id) {
     if (!camp) throw fail(404, "Campaign not found");
     if (camp.status === "completed")
       throw fail(409, "Completed campaigns cannot be restarted");
+    // the plan's monthly broadcast limit: starts are counted one company at a time, so two at once cannot both slip in
+    await c.query("SELECT 1 FROM tenants WHERE id=$1 FOR UPDATE", [tenantId]);
+    await assertRoomForBroadcast(tenantId, camp, (sql, params) => c.query(sql, params));
     const session = await c.query(
       "SELECT id FROM whatsapp_sessions WHERE tenant_id=$1 AND session_name=$2",
       [tenantId, camp.session_name],
@@ -110,7 +114,7 @@ export async function startCampaign(tenantId, id) {
     if (!count.rows[0].count)
       throw fail(400, "No opted-in recipients match this segment");
     const updated = await c.query(
-      "UPDATE campaigns SET status='running',total_recipients=$1,updated_at=now() WHERE id=$2 AND tenant_id=$3 RETURNING *",
+      "UPDATE campaigns SET status='running',total_recipients=$1,started_at=COALESCE(started_at,now()),updated_at=now() WHERE id=$2 AND tenant_id=$3 RETURNING *",
       [count.rows[0].count, id, tenantId],
     );
     return campaignView(updated.rows[0]);

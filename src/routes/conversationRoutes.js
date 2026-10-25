@@ -1,4 +1,5 @@
 import express from "express";
+import { assertRoomForContacts } from "../services/limitsService.js";
 import {
   authenticateToken,
   requireTenantContext,
@@ -69,6 +70,7 @@ router.post(
       if (known.rows[0]) c = known.rows[0];
       else {
         const label = typeof req.body.name === "string" && req.body.name.trim() ? req.body.name.trim().slice(0, 255) : "";
+        await assertRoomForContacts(req.tenantId, 1);
         const inserted = await query(
           "INSERT INTO contacts(id,tenant_id,name,phone,name_edited) VALUES($1,$2,$3,$4,$5) ON CONFLICT(tenant_id,phone) DO UPDATE SET updated_at=contacts.updated_at RETURNING *",
           [crypto.randomUUID(), req.tenantId, label || displayPhone(real), real, Boolean(label)],
