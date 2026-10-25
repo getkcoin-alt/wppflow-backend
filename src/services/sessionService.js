@@ -111,7 +111,7 @@ export async function startTenantSession(
         const phone = provider.getSession(tenantId, sessionName)?.phone || null;
         await query(
           `UPDATE whatsapp_sessions SET status=$1::varchar,phone=COALESCE($2,phone),qr_code=CASE WHEN $1::varchar='QRCODE' THEN qr_code ELSE NULL END,
-            restore_on_start=CASE WHEN $1::varchar='CONNECTED' THEN true ELSE restore_on_start END,
+            restore_on_start=CASE WHEN $1::varchar='CONNECTED' AND COALESCE($2,phone) IS NOT NULL THEN true ELSE restore_on_start END,
             last_error=CASE WHEN $1::varchar='CONNECTED' THEN NULL WHEN $1::varchar='EXPIRED' THEN 'The QR code was not scanned in time. Start again and scan it within a few minutes.' ELSE last_error END,
             updated_at=now() WHERE tenant_id=$3 AND session_name=$4 AND worker_id=$5`,
           [status, phone, tenantId, sessionName, workerId],

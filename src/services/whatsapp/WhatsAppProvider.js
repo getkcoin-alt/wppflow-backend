@@ -116,6 +116,10 @@ export class WhatsAppProvider {
         // One line per step, so a number that "connects by itself" can be told from one that was scanned.
         console.log(`WhatsApp ${sessionName}: ${statusSession}`);
         if (statusSession === "isLogged" || statusSession === "inChat") {
+          // While the login is still being checked these can arrive for a number that has not been
+          // scanned yet (a fresh or unpaired profile reported inChat, then notLogged and a QR code).
+          // The number is connected when create() returns, below; only later reports count here.
+          if (!sessionState.client) return;
           sessionState.status = SESSION_STATUS.CONNECTED;
           sessionState.qrcode = null;
           notify(callbacks.onStatus, SESSION_STATUS.CONNECTED);
