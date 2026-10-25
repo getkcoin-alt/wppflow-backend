@@ -6,7 +6,7 @@ import { dateOnly, daysBetween, todayUtc, utcDate } from "./dates.js";
 import { createNotifications } from "./notificationService.js";
 
 // A company's subscription: the plan it pays for, the period that payment covers, and what happens when the
-// period ends. Payments are taken outside the product (an invoice or a payment link), so the platform admin
+// period ends. Payments are made online from Plans & Billing, or taken outside the product (an invoice), so the platform admin
 // records each one here. Nothing in this file switches a company off for not paying: a company that is overdue
 // is flagged for the team and told. After the grace days (7) the paid features switch off, never any data.
 export const CYCLES = ["monthly", "annual"];
@@ -367,7 +367,7 @@ export async function sendReminders(io, now = todayUtc()) {
           ? [`Your ${view.plan} plan ends ${days}`, `On ${showDate(end)} your company moves to the Free plan: one WhatsApp number and one person. Your conversations are kept.`]
           : view.status === "changing"
             ? [`Your plan moves to ${view.scheduledPlan.name} ${days}`, `On ${showDate(end)} your company moves from ${view.plan} to ${view.scheduledPlan.name}. Nothing you have is deleted.`]
-            : [`Your ${view.plan} plan renews ${days}`, `The renewal date is ${showDate(end)}. Our team sends the invoice or payment link before then; message them if you want to change anything.`];
+            : [`Your ${view.plan} plan renews ${days}`, `The renewal date is ${showDate(end)}. Renew from Plans & Billing in the app, or wait for the invoice from our team; message them if you want to change anything.`];
       try {
         await tell(io, t.id, `subscription:${end}:soon`, title, body);
         sent++;
