@@ -126,7 +126,7 @@ router.patch(
     }
     const { rows } = await query(
       `UPDATE conversations SET assigned_to=COALESCE($1,assigned_to),assigned_user_id=CASE WHEN $6::boolean THEN $7::int ELSE assigned_user_id END,
-       is_closed=COALESCE($2,is_closed),tags=COALESCE($3,tags),updated_at=now() WHERE id=$4 AND tenant_id=$5 RETURNING *`,
+       is_closed=COALESCE($2,is_closed),tags=COALESCE($3,tags),is_pinned=COALESCE($8::boolean,is_pinned),updated_at=now() WHERE id=$4 AND tenant_id=$5 RETURNING *`,
       [
         assignedName,
         req.body.isClosed ?? null,
@@ -135,6 +135,7 @@ router.patch(
         req.tenantId,
         assignmentChanges,
         assignedUserId,
+        typeof req.body.isPinned === "boolean" ? req.body.isPinned : null,
       ],
     );
     if (!rows[0]) throw fail(404, "Conversation not found");
@@ -197,7 +198,7 @@ router.post(
  */
 router.get("/", async (req, res) => {
   try {
-    const { limit, cursor, filter, search, sessionName, labels, labelMode, assigned, activeDays } = req.query;
+    const { limit, cursor, filter, search, sessionName, labels, labelMode, assigned, activeDays, team, awaiting, overdue } = req.query;
     const result = await getConversations({
       tenantId: req.tenantId,
       limit,
@@ -209,6 +210,9 @@ router.get("/", async (req, res) => {
       labelMode,
       assignedUserId: assigned === "me" ? req.user.id : assigned || null,
       activeDays,
+      team: team ? String(team) : "",
+      awaiting: awaiting === "1",
+      overdue: overdue === "1",
       ownerUserId: isManager(req) ? null : req.user.id,
     });
     res.json({ status: "success", ...result });

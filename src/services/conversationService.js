@@ -34,13 +34,16 @@ export async function getConversations({
   labelMode = "any",
   assignedUserId = null,
   activeDays = null,
+  team = "",
+  awaiting = false,
+  overdue = false,
 }) {
   const parsedLimit = Math.min(Math.max(parseInt(limit, 10) || 30, 1), 100);
   let sql = `
     SELECT id, tenant_id, session_name, provider_chat_id, contact_id, phone,
            contact_name, avatar, unread_count, is_group, group_members_count,
            assigned_to, assigned_user_id, is_closed, is_pinned, is_archived, last_active_epoch,
-           last_message, tags, created_at, updated_at
+           last_message, tags, awaiting_since, created_at, updated_at
     FROM conversations
     WHERE tenant_id = $1 AND provider_chat_id !~ '@(broadcast|newsletter)$'
   `;
@@ -85,6 +88,23 @@ export async function getConversations({
     params.push(Math.min(Math.max(Number(activeDays) || 0, 1), 3650));
     sql += ` AND last_active_epoch >= extract(epoch FROM now()) - $${params.length}::int * 86400`;
   }
+  // A team (the label a teammate has): the chats assigned to someone on it, and unassigned chats on a number one of them owns.
+  if (team) {
+    params.push(String(team).slice(0, 40));
+    const t = `$${params.length}`;
+    sql += ` AND (assigned_user_id IN (SELECT user_id FROM memberships WHERE tenant_id=$1 AND category=${t})
+      OR (assigned_user_id IS NULL AND session_name IN (SELECT ws.session_name FROM whatsapp_sessions ws JOIN memberships m ON m.user_id=ws.owner_user_id AND m.tenant_id=ws.tenant_id WHERE ws.tenant_id=$1 AND m.category=${t})))`;
+  }
+  // Chats where the customer wrote last and nobody on the team has answered, and those that have waited past the reply target.
+  if (awaiting || overdue) sql += ` AND awaiting_since IS NOT NULL AND NOT is_closed AND NOT is_group`;
+  if (overdue) {
+    const target = (await query("SELECT sla_minutes FROM report_settings WHERE tenant_id=$1", [tenantId])).rows[0]?.sla_minutes ?? 30;
+    params.push(target);
+    sql += ` AND awaiting_since < extract(epoch FROM now()) - $${params.length}::int * 60`;
+  }
+  // Pinned chats stay at the top of the first page, whatever else is going on, so they are fetched apart from the paging below.
+  const base = { sql, params: [...params] };
+  sql += ` AND NOT is_pinned`;
 
   // Compound cursor: (last_active_epoch, id)
   if (cursor) {
@@ -107,6 +127,7 @@ export async function getConversations({
   sql += ` ORDER BY last_active_epoch DESC, id DESC LIMIT $${params.length}`;
 
   const { rows } = await query(sql, params);
+  const pinned = cursor ? [] : (await query(`${base.sql} AND is_pinned ORDER BY last_active_epoch DESC, id DESC LIMIT 20`, base.params)).rows;
   const hasMore = rows.length > parsedLimit;
   const items = hasMore ? rows.slice(0, parsedLimit) : rows;
 
@@ -115,7 +136,7 @@ export async function getConversations({
       ? `${items[items.length - 1].last_active_epoch}:${items[items.length - 1].id}`
       : null;
 
-  const formatted = await withLabels(tenantId, items.map(formatConversation));
+  const formatted = await withLabels(tenantId, [...pinned, ...items].map(formatConversation));
 
   return {
     conversations: formatted,
@@ -264,7 +285,7 @@ export async function getConversationChanges({
     `SELECT id, tenant_id, session_name, provider_chat_id, contact_id, phone,
             contact_name, avatar, unread_count, is_group, group_members_count,
             assigned_to, assigned_user_id, is_closed, is_pinned, is_archived, last_active_epoch,
-            last_message, tags, created_at, updated_at
+            last_message, tags, awaiting_since, created_at, updated_at
      FROM conversations WHERE tenant_id=$1 AND updated_at > $2 AND provider_chat_id !~ '@(broadcast|newsletter)$'${scope}
      ORDER BY updated_at ASC LIMIT $${params.length}`,
     params,

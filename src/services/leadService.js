@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { query, withTransaction } from "../db/index.js";
 import { fail } from "../middleware/http.js";
-import { isManager } from "./access.js";
+import { isManager, assertConversationAccess } from "./access.js";
 import { createNotifications } from "./notificationService.js";
 import { emitForLead } from "./realtime.js";
 
@@ -400,7 +400,10 @@ async function announce(io, tenantId, leadId) {
 // ── Follow-ups ───────────────────────────────────────────────────────────────────────────────────
 export const taskView = (r) => ({
   id: r.id,
-  leadId: r.lead_id,
+  leadId: r.lead_id || null,
+  // set for a follow-up made from a chat that has no lead
+  chatId: r.conversation_id && !r.lead_id ? r.conversation_id : null,
+  escalated: Boolean(r.escalated_at),
   title: r.title,
   dueAt: r.due_at,
   assignedUserId: r.assigned_user_id,
@@ -434,14 +437,113 @@ export async function addTask(req, lead, { title, dueAt, assignedUserId }) {
 export async function findTask(req, taskId) {
   const { rows } = await query("SELECT * FROM lead_tasks WHERE id=$1 AND tenant_id=$2", [taskId, req.tenantId]);
   if (!rows[0]) throw fail(404, "Follow-up not found");
-  await findLead(req, rows[0].lead_id); // only someone who can see the lead can touch its follow-ups
+  // the person a follow-up is for can always see and finish it; anyone else needs to see the lead (or, with no lead, the chat)
+  if (rows[0].assigned_user_id && rows[0].assigned_user_id === req.user?.id) return rows[0];
+  if (rows[0].lead_id) await findLead(req, rows[0].lead_id);
+  else await assertConversationAccess(req, rows[0].conversation_id).catch(() => { throw fail(404, "Follow-up not found"); });
   return rows[0];
 }
 
-// Follow-ups for the Today screen: mine by default, everyone's for a manager who asks.
+// A follow-up from a chat that has no lead behind it: "call back on Thursday", without putting the person in the pipeline.
+export async function addChatTask(req, { conversationId, title, dueAt, assignedUserId }) {
+  const convo = await assertConversationAccess(req, conversationId);
+  const chat = (await query("SELECT id,is_group,contact_id,assigned_user_id FROM conversations WHERE id=$1 AND tenant_id=$2", [conversationId, req.tenantId])).rows[0];
+  if (!chat) throw fail(404, "Conversation not found");
+  if (chat.is_group) throw fail(400, "A follow-up is for a person, not a group");
+  const text = String(title || "").trim().slice(0, 255);
+  if (!text) throw fail(400, "Say what to follow up on");
+  const due = new Date(dueAt);
+  if (!Number.isFinite(due.getTime())) throw fail(400, "Choose when it is due");
+  const who = assignedUserId ? await activeMember(req.tenantId, assignedUserId) : null;
+  if (assignedUserId && !who) throw fail(400, "The follow-up can only go to an active teammate");
+  const id = crypto.randomUUID();
+  const assignee = who?.id ?? chat.assigned_user_id ?? convo.owner_user_id ?? req.user.id;
+  await query("INSERT INTO lead_tasks(id,tenant_id,lead_id,conversation_id,title,due_at,assigned_user_id,created_by) VALUES($1,$2,NULL,$3,$4,$5,$6,$7)", [id, req.tenantId, conversationId, text, due.toISOString(), assignee, req.user.id]);
+  return id;
+}
+
+// The follow-ups on one chat: its own, and those of the open lead of the person it is with.
+export async function chatTasks(req, conversationId) {
+  await assertConversationAccess(req, conversationId);
+  const { rows } = await query(
+    `SELECT t.*,u.name AS assigned_name FROM lead_tasks t LEFT JOIN users u ON u.id=t.assigned_user_id
+     WHERE t.tenant_id=$1 AND (t.conversation_id=$2 OR t.lead_id IN (
+       SELECT l.id FROM leads l JOIN conversations c ON c.tenant_id=l.tenant_id AND c.contact_id=l.contact_id WHERE c.id=$2 AND c.tenant_id=$1 AND l.status='open'))
+     ORDER BY (t.done_at IS NOT NULL),t.due_at`,
+    [req.tenantId, conversationId],
+  );
+  return rows.map(taskView);
+}
+
+// Changes a follow-up. Moving it to someone else is written to the audit log and the new person is told; a new time
+// reminds again and starts the overdue clock again.
+export async function patchTask(req, task, body) {
+  const sets = [],
+    params = [];
+  const set = (col, v) => {
+    params.push(v);
+    sets.push(`${col}=$${params.length}`);
+  };
+  if (typeof body.done === "boolean") set("done_at", body.done ? new Date().toISOString() : null);
+  if (body.title !== undefined) {
+    const t = String(body.title).trim().slice(0, 255);
+    if (!t) throw fail(400, "Say what to follow up on");
+    set("title", t);
+  }
+  if (body.dueAt !== undefined) {
+    const due = new Date(body.dueAt);
+    if (!Number.isFinite(due.getTime())) throw fail(400, "Choose when it is due");
+    set("due_at", due.toISOString());
+    sets.push("notified_at=NULL", "escalated_at=NULL");
+  }
+  let reassigned = null;
+  if (body.assignedUserId !== undefined) {
+    const who = await activeMember(req.tenantId, body.assignedUserId);
+    if (!who) throw fail(400, "The follow-up can only go to an active teammate");
+    if (who.id !== task.assigned_user_id) {
+      set("assigned_user_id", who.id);
+      sets.push("notified_at=NULL", "escalated_at=NULL");
+      reassigned = who;
+    }
+  }
+  if (!sets.length) throw fail(400, "Nothing to update");
+  params.push(task.id, req.tenantId);
+  const { rows } = await query(`UPDATE lead_tasks SET ${sets.join(",")} WHERE id=$${params.length - 1} AND tenant_id=$${params.length} RETURNING *`, params);
+  if (reassigned) {
+    await query("INSERT INTO audit_events(tenant_id,actor_id,event_type,metadata) VALUES($1,$2,'task.reassigned',$3)", [
+      req.tenantId,
+      req.user.id,
+      JSON.stringify({ taskId: task.id, title: rows[0].title, from: task.assigned_user_id, to: reassigned.id, toName: reassigned.name }),
+    ]);
+    if (reassigned.id !== req.user.id)
+      await createNotifications({
+        io: req.app.get("io"),
+        tenantId: req.tenantId,
+        actor: req.user,
+        conversationId: task.conversation_id || null,
+        dedupeKey: `task-assigned:${task.id}:${reassigned.id}:${Date.now()}`,
+        recipients: [{ userId: reassigned.id, type: "lead_task" }],
+        title: `A follow-up was given to you: ${rows[0].title}`,
+        body: `${req.user.name || "A teammate"} moved it to you.`,
+      }).catch((e) => console.error("Reassignment notice failed:", e.message));
+  }
+  return rows[0];
+}
+
+// Follow-ups for the Today screen: mine by default, everyone's for a manager who asks. A follow-up belongs to a lead,
+// or to a chat that has none.
 export async function dueTasks(req, { when = "today", everyone = false, until } = {}) {
   const params = [req.tenantId];
-  const where = ["t.tenant_id=$1", "t.done_at IS NULL", visibleTo(req, params)];
+  const leadVisible = visibleTo(req, params);
+  let chatVisible = "TRUE";
+  if (!isManager(req)) {
+    params.push(req.user.id);
+    const p = `$${params.length}`;
+    chatVisible = `(cv.assigned_user_id=${p} OR EXISTS (SELECT 1 FROM whatsapp_sessions ws WHERE ws.tenant_id=cv.tenant_id AND ws.session_name=cv.session_name AND ws.owner_user_id=${p}))`;
+  }
+  params.push(req.user.id);
+  const me = `t.assigned_user_id=$${params.length}`;
+  const where = ["t.tenant_id=$1", "t.done_at IS NULL", `(${me} OR (t.lead_id IS NOT NULL AND ${leadVisible}) OR (t.lead_id IS NULL AND ${chatVisible}))`, "(l.id IS NULL OR l.status='open')"];
   if (!(everyone && isManager(req))) {
     params.push(req.user.id);
     where.push(`COALESCE(t.assigned_user_id,l.owner_user_id)=$${params.length}`);
@@ -453,10 +555,14 @@ export async function dueTasks(req, { when = "today", everyone = false, until } 
     where.push(`t.due_at <= $${params.length}`);
   } else if (when === "overdue") where.push("t.due_at < now()");
   const { rows } = await query(
-    `SELECT t.*,u.name AS assigned_name,COALESCE(NULLIF(l.title,''),NULLIF(ct.name,''),l.contact_name,l.phone) AS lead_title,COALESCE(NULLIF(ct.name,''),l.contact_name,l.phone) AS contact_name,s.name AS stage_name,
-       (SELECT c.id FROM conversations c WHERE c.tenant_id=l.tenant_id AND c.contact_id=l.contact_id AND (l.session_name IS NULL OR c.session_name=l.session_name) ORDER BY c.last_active_epoch DESC LIMIT 1) AS conversation_id
-     FROM lead_tasks t JOIN leads l ON l.id=t.lead_id JOIN pipeline_stages s ON s.id=l.stage_id LEFT JOIN contacts ct ON ct.id=l.contact_id LEFT JOIN users u ON u.id=t.assigned_user_id
-     WHERE ${where.join(" AND ")} AND l.status='open' ORDER BY t.due_at LIMIT 200`,
+    `SELECT t.*,u.name AS assigned_name,
+       COALESCE(NULLIF(l.title,''),NULLIF(ct.name,''),l.contact_name,l.phone,NULLIF(cv.contact_name,''),cv.phone) AS lead_title,
+       COALESCE(NULLIF(ct.name,''),l.contact_name,l.phone,NULLIF(cv.contact_name,''),cv.phone) AS contact_name,
+       s.name AS stage_name,
+       COALESCE(t.conversation_id,(SELECT c.id FROM conversations c WHERE c.tenant_id=l.tenant_id AND c.contact_id=l.contact_id AND (l.session_name IS NULL OR c.session_name=l.session_name) ORDER BY c.last_active_epoch DESC LIMIT 1)) AS conversation_id
+     FROM lead_tasks t LEFT JOIN leads l ON l.id=t.lead_id LEFT JOIN pipeline_stages s ON s.id=l.stage_id LEFT JOIN contacts ct ON ct.id=l.contact_id
+       LEFT JOIN conversations cv ON cv.id=t.conversation_id LEFT JOIN users u ON u.id=t.assigned_user_id
+     WHERE ${where.join(" AND ")} ORDER BY t.due_at LIMIT 200`,
     params,
   );
   return rows.map(taskView);
@@ -465,16 +571,21 @@ export async function dueTasks(req, { when = "today", everyone = false, until } 
 // Tells the person a follow-up is for once it is due, one time.
 export async function pumpLeadReminders(io) {
   const { rows } = await query(
-    `SELECT t.id,t.tenant_id,t.title,t.assigned_user_id,l.owner_user_id,l.contact_id,l.session_name,COALESCE(NULLIF(ct.name,''),l.contact_name,l.phone) AS who
-     FROM lead_tasks t JOIN leads l ON l.id=t.lead_id LEFT JOIN contacts ct ON ct.id=l.contact_id
-     WHERE t.done_at IS NULL AND t.notified_at IS NULL AND t.due_at <= now() AND l.status='open' ORDER BY t.due_at LIMIT 50`,
+    `SELECT t.id,t.tenant_id,t.title,t.assigned_user_id,t.conversation_id,l.owner_user_id,COALESCE(l.contact_id,cv.contact_id) AS contact_id,COALESCE(l.session_name,cv.session_name) AS session_name,
+            COALESCE(NULLIF(ct.name,''),l.contact_name,l.phone,NULLIF(cv.contact_name,''),cv.phone) AS who
+     FROM lead_tasks t LEFT JOIN leads l ON l.id=t.lead_id LEFT JOIN contacts ct ON ct.id=l.contact_id LEFT JOIN conversations cv ON cv.id=t.conversation_id
+     WHERE t.done_at IS NULL AND t.notified_at IS NULL AND t.due_at <= now() AND (l.id IS NULL OR l.status='open') ORDER BY t.due_at LIMIT 50`,
   );
   for (const t of rows) {
     // claim it first, so two servers never both send it
     const claimed = await query("UPDATE lead_tasks SET notified_at=now() WHERE id=$1 AND notified_at IS NULL RETURNING id", [t.id]);
     if (!claimed.rowCount) continue;
     const recipient = t.assigned_user_id || t.owner_user_id || (await query("SELECT owner_user_id FROM whatsapp_sessions WHERE tenant_id=$1 AND session_name=$2", [t.tenant_id, t.session_name])).rows[0]?.owner_user_id;
-    const chat = t.contact_id ? (await query("SELECT id FROM conversations WHERE tenant_id=$1 AND contact_id=$2 AND ($3::varchar IS NULL OR session_name=$3::varchar) ORDER BY last_active_epoch DESC LIMIT 1", [t.tenant_id, t.contact_id, t.session_name])).rows[0] : null;
+    const chat = t.conversation_id
+      ? { id: t.conversation_id }
+      : t.contact_id
+        ? (await query("SELECT id FROM conversations WHERE tenant_id=$1 AND contact_id=$2 AND ($3::varchar IS NULL OR session_name=$3::varchar) ORDER BY last_active_epoch DESC LIMIT 1", [t.tenant_id, t.contact_id, t.session_name])).rows[0]
+        : null;
     await createNotifications({
       io, tenantId: t.tenant_id, actor: null, conversationId: chat?.id || null, dedupeKey: `task:${t.id}`,
       recipients: [{ userId: recipient, type: "lead_task" }],
@@ -482,6 +593,44 @@ export async function pumpLeadReminders(io) {
       body: t.who || "",
     });
   }
+  await escalateOverdueTasks(io);
+}
+
+// A follow-up that stays overdue for a company's chosen number of hours (24 by default, 0 to switch it off) is told to
+// the owner and the administrators, once, so it does not sit unnoticed with one person. Moving it to a new time or a
+// new person starts the clock again.
+export async function escalateOverdueTasks(io, now = new Date()) {
+  const { rows } = await query(
+    `SELECT t.id,t.tenant_id,t.title,t.due_at,t.assigned_user_id,t.conversation_id,u.name AS assignee,
+            COALESCE(NULLIF(ct.name,''),l.contact_name,l.phone,NULLIF(cv.contact_name,''),cv.phone) AS who
+     FROM lead_tasks t LEFT JOIN leads l ON l.id=t.lead_id LEFT JOIN contacts ct ON ct.id=l.contact_id LEFT JOIN conversations cv ON cv.id=t.conversation_id
+       LEFT JOIN users u ON u.id=t.assigned_user_id LEFT JOIN report_settings rs ON rs.tenant_id=t.tenant_id
+     WHERE t.done_at IS NULL AND t.escalated_at IS NULL AND COALESCE(rs.task_escalation_hours,24)>0
+       AND t.due_at < $1::timestamptz - COALESCE(rs.task_escalation_hours,24) * interval '1 hour' AND (l.id IS NULL OR l.status='open') ORDER BY t.due_at LIMIT 50`,
+    [now.toISOString()],
+  );
+  let escalated = 0;
+  for (const t of rows) {
+    const claimed = await query("UPDATE lead_tasks SET escalated_at=now() WHERE id=$1 AND escalated_at IS NULL RETURNING id", [t.id]);
+    if (!claimed.rowCount) continue;
+    const managers = (
+      await query(`SELECT u.id FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=$1 AND m.status='active' AND u.status='active' AND m.role IN ('owner','admin')`, [t.tenant_id])
+    ).rows.filter((m) => m.id !== t.assigned_user_id);
+    await query("INSERT INTO audit_events(tenant_id,actor_id,event_type,metadata) VALUES($1,NULL,'task.escalated',$2)", [t.tenant_id, JSON.stringify({ taskId: t.id, title: t.title, assignedTo: t.assignee || null, dueAt: t.due_at })]);
+    if (managers.length)
+      await createNotifications({
+        io,
+        tenantId: t.tenant_id,
+        actor: null,
+        conversationId: t.conversation_id || null,
+        dedupeKey: `task-escalated:${t.id}`,
+        recipients: managers.map((m) => ({ userId: m.id, type: "lead_task" })),
+        title: `Overdue follow-up: ${t.title}`,
+        body: `${t.who ? `${t.who}. ` : ""}${t.assignee ? `With ${t.assignee}, ` : ""}due ${new Date(t.due_at).toISOString().slice(0, 10)} and still not done.`,
+      }).catch((e) => console.error("Escalation notice failed:", e.message));
+    escalated++;
+  }
+  return escalated;
 }
 
 // ── Pipeline settings ────────────────────────────────────────────────────────────────────────────

@@ -166,7 +166,8 @@ export async function sendTextMessage({
         ],
       );
       await c.query(
-        "UPDATE conversations SET last_active_epoch=$1,last_message=$2,updated_at=now() WHERE id=$3 AND tenant_id=$4",
+        // a reply from a person ends the customer's wait; an automatic reply or a broadcast does not
+        "UPDATE conversations SET last_active_epoch=$1,last_message=$2,awaiting_since=CASE WHEN $5::boolean THEN NULL ELSE awaiting_since END,updated_at=now() WHERE id=$3 AND tenant_id=$4",
         [
           epoch,
           JSON.stringify({
@@ -177,6 +178,7 @@ export async function sendTextMessage({
           }),
           conversationId,
           tenantId,
+          !["Automation", "Campaign"].includes(agentName),
         ],
       );
     }
@@ -330,7 +332,10 @@ export async function handleIncomingMessage({
       );
     }
     await c.query(
-      `UPDATE conversations SET unread_count=unread_count+$1,last_message=CASE WHEN last_active_epoch<=$2 THEN $3 ELSE last_message END,last_active_epoch=GREATEST(last_active_epoch,$2),updated_at=now() WHERE id=$4 AND tenant_id=$5`,
+      // awaiting_since: a customer's message starts a wait if none is running; a reply typed on the phone ends it.
+      // Imported history and groups never change it.
+      `UPDATE conversations SET unread_count=unread_count+$1,last_message=CASE WHEN last_active_epoch<=$2 THEN $3 ELSE last_message END,last_active_epoch=GREATEST(last_active_epoch,$2),
+         awaiting_since=CASE WHEN $6::boolean THEN COALESCE(awaiting_since,$2) WHEN $7::boolean THEN NULL ELSE awaiting_since END,updated_at=now() WHERE id=$4 AND tenant_id=$5`,
       [
         !history && !msg.fromMe ? 1 : 0,
         epoch,
@@ -342,6 +347,8 @@ export async function handleIncomingMessage({
         }),
         id,
         tenantId,
+        !history && !msg.fromMe && !isGroup,
+        !history && Boolean(msg.fromMe) && !isGroup,
       ],
     );
     return saved.rows[0];

@@ -56,6 +56,8 @@ export async function getSettings(tenantId) {
     slaMinutes: r?.sla_minutes ?? 30,
     dailyInApp: r?.daily_in_app ?? true,
     dailyEmail: r?.daily_email ?? false,
+    // hours a follow-up may stay overdue before the owner and administrators are told; 0 switches it off
+    taskEscalationHours: r?.task_escalation_hours ?? 24,
     teams: Object.fromEntries(teams.rows.map((t) => [t.team, t.sla_minutes])),
   };
 }
@@ -70,11 +72,17 @@ export async function saveSettings(tenantId, body = {}) {
     slaMinutes: body.slaMinutes === undefined ? current.slaMinutes : minutes(body.slaMinutes, "The reply target"),
     dailyInApp: body.dailyInApp === undefined ? current.dailyInApp : Boolean(body.dailyInApp),
     dailyEmail: body.dailyEmail === undefined ? current.dailyEmail : Boolean(body.dailyEmail),
+    taskEscalationHours: current.taskEscalationHours,
   };
+  if (body.taskEscalationHours !== undefined) {
+    const h = Number(body.taskEscalationHours);
+    if (!Number.isInteger(h) || h < 0 || h > 720) throw fail(400, "The escalation time must be a whole number of hours from 0 to 720 (0 switches it off)");
+    next.taskEscalationHours = h;
+  }
   await query(
-    `INSERT INTO report_settings(tenant_id,sla_minutes,daily_in_app,daily_email) VALUES($1,$2,$3,$4)
-     ON CONFLICT(tenant_id) DO UPDATE SET sla_minutes=EXCLUDED.sla_minutes,daily_in_app=EXCLUDED.daily_in_app,daily_email=EXCLUDED.daily_email,updated_at=now()`,
-    [tenantId, next.slaMinutes, next.dailyInApp, next.dailyEmail],
+    `INSERT INTO report_settings(tenant_id,sla_minutes,daily_in_app,daily_email,task_escalation_hours) VALUES($1,$2,$3,$4,$5)
+     ON CONFLICT(tenant_id) DO UPDATE SET sla_minutes=EXCLUDED.sla_minutes,daily_in_app=EXCLUDED.daily_in_app,daily_email=EXCLUDED.daily_email,task_escalation_hours=EXCLUDED.task_escalation_hours,updated_at=now()`,
+    [tenantId, next.slaMinutes, next.dailyInApp, next.dailyEmail, next.taskEscalationHours],
   );
   if (body.teams !== undefined) {
     if (!body.teams || typeof body.teams !== "object" || Array.isArray(body.teams)) throw fail(400, "Teams must be an object of team to minutes");

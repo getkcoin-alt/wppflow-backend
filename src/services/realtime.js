@@ -85,3 +85,24 @@ export function emitForLead(io, tenantId, lead) {
     .then(send)
     .catch((e) => console.error("Realtime emit failed:", e.message));
 }
+
+// Somebody is typing a reply in a chat. Only the people who can open that chat hear about it (the managers, the
+// owner of the WhatsApp number and whoever the chat is assigned to), so two people do not answer the same customer
+// without knowing. Nothing is stored. Returns whether it was passed on.
+export async function relayCompose({ io, tenantId, userId, name, isManager, conversationId, typing }) {
+  if (!io || !userId || typeof conversationId !== "string" || !conversationId || conversationId.length > 64) return false;
+  const { rows } = await query(
+    `SELECT c.assigned_user_id,s.owner_user_id FROM conversations c LEFT JOIN whatsapp_sessions s
+     ON s.tenant_id=c.tenant_id AND s.session_name=c.session_name WHERE c.id=$1 AND c.tenant_id=$2`,
+    [conversationId, tenantId],
+  );
+  const row = rows[0];
+  if (!row || (!isManager && row.owner_user_id !== userId && row.assigned_user_id !== userId)) return false;
+  emitScoped(io, tenantId, [row.owner_user_id, row.assigned_user_id], "compose:update", {
+    conversationId,
+    userId,
+    name: String(name || "A teammate").slice(0, 80),
+    typing: Boolean(typing),
+  });
+  return true;
+}

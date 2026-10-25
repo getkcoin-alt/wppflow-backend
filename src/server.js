@@ -21,6 +21,7 @@ import labelRoutes from "./routes/labelRoutes.js";
 import billingRoutes from "./routes/billingRoutes.js";
 import reportRoutes from "./routes/reportRoutes.js";
 import { razorpayWebhook } from "./services/billingService.js";
+import { relayCompose } from "./services/realtime.js";
 import automationRoutes from "./routes/automationRoutes.js";
 import leadRoutes from "./routes/leadRoutes.js";
 import healthRoutes from "./routes/healthRoutes.js";
@@ -103,7 +104,7 @@ io.use(async (socket, next) => {
 
     // Verify user is active in database and resolve authorized tenant memberships
     const { rows: userRows } = await query(
-      "SELECT id, email, status, is_superadmin FROM users WHERE id = $1",
+      "SELECT id, email, name, status, is_superadmin FROM users WHERE id = $1",
       [userId],
     );
 
@@ -120,6 +121,7 @@ io.use(async (socket, next) => {
       ...decoded,
       isSuperAdmin: Boolean(userRows[0].is_superadmin),
     };
+    socket.userName = userRows[0].name;
 
     const requestedTenant =
       socket.handshake.auth?.tenantId ||
@@ -180,6 +182,23 @@ io.on("connection", (socket) => {
   }, 30000);
   membershipTimer.unref();
 
+  // "Sam is typing a reply": passed to the people who can open that chat, at most a few times a second
+  let lastCompose = 0;
+  socket.on("compose", (payload) => {
+    const now = Date.now();
+    if (payload?.typing && now - lastCompose < 700) return;
+    lastCompose = now;
+    relayCompose({
+      io,
+      tenantId,
+      userId,
+      name: socket.userName,
+      isManager: Boolean(socket.user?.isSuperAdmin) || ["owner", "admin"].includes(socket.membershipRole),
+      conversationId: payload?.conversationId,
+      typing: payload?.typing,
+    }).catch(() => {});
+  });
+
   socket.on("disconnect", () => {
     clearTimeout(expiryTimer);
     clearInterval(membershipTimer);
@@ -233,7 +252,7 @@ export async function startServer() {
     if (ENV.AUTO_MIGRATE) await runMigrations();
     else {
       const { rows } = await query(
-        "SELECT 1 FROM schema_migrations WHERE version='021_reply_analytics'",
+        "SELECT 1 FROM schema_migrations WHERE version='022_inbox_followups'",
       );
       if (!rows.length)
         throw new Error(

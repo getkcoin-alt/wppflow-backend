@@ -23,6 +23,8 @@ export function formatConversation(c) {
     assignedUserId: c.assigned_user_id ?? null,
     isClosed: Boolean(c.is_closed),
     isPinned: Boolean(c.is_pinned),
+    // epoch seconds of the customer's first message nobody on the team has answered yet, or null
+    awaitingSince: c.awaiting_since === null || c.awaiting_since === undefined ? null : Number(c.awaiting_since),
     isArchived: Boolean(c.is_archived),
     lastActiveEpoch: Number(c.last_active_epoch || 0),
     lastMessage: lastMsg,

@@ -24,6 +24,9 @@ import {
   settings,
   taskView,
   tasksOf,
+  patchTask,
+  chatTasks,
+  addChatTask,
   timeline,
   updateLead,
 } from "../services/leadService.js";
@@ -100,28 +103,22 @@ router.patch(
   "/tasks/:taskId",
   route(async (req, res) => {
     const task = await findTask(req, req.params.taskId);
-    const sets = [],
-      params = [];
-    const set = (col, v) => {
-      params.push(v);
-      sets.push(`${col}=$${params.length}`);
-    };
-    if (typeof req.body.done === "boolean") set("done_at", req.body.done ? new Date().toISOString() : null);
-    if (req.body.title !== undefined) {
-      const t = String(req.body.title).trim().slice(0, 255);
-      if (!t) throw fail(400, "Say what to follow up on");
-      set("title", t);
-    }
-    if (req.body.dueAt !== undefined) {
-      const due = new Date(req.body.dueAt);
-      if (!Number.isFinite(due.getTime())) throw fail(400, "Choose when it is due");
-      set("due_at", due.toISOString());
-      sets.push("notified_at=NULL"); // a follow-up moved to a new time reminds again
-    }
-    if (!sets.length) throw fail(400, "Nothing to update");
-    params.push(task.id, req.tenantId);
-    const { rows } = await query(`UPDATE lead_tasks SET ${sets.join(",")} WHERE id=$${params.length - 1} AND tenant_id=$${params.length} RETURNING *`, params);
-    res.json({ status: "success", task: taskView(rows[0]) });
+    const updated = await patchTask(req, task, req.body || {});
+    res.json({ status: "success", task: taskView(updated) });
+  }),
+);
+// Follow-ups on one chat (its own and its lead's), and a new one for a chat with no lead.
+router.get(
+  "/chat/:conversationId/tasks",
+  route(async (req, res) => {
+    res.json({ status: "success", tasks: await chatTasks(req, req.params.conversationId) });
+  }),
+);
+router.post(
+  "/chat/:conversationId/tasks",
+  route(async (req, res) => {
+    await addChatTask(req, { ...req.body, conversationId: req.params.conversationId });
+    res.status(201).json({ status: "success", tasks: await chatTasks(req, req.params.conversationId) });
   }),
 );
 router.delete(
