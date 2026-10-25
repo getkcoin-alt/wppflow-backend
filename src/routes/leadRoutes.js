@@ -14,6 +14,7 @@ import {
   dueTasks,
   findLead,
   findTask,
+  leadForChat,
   leadView,
   listLeads,
   moveLead,
@@ -192,6 +193,14 @@ router.post(
       made.existing ? skipped++ : created++;
     }
     res.status(201).json({ status: "success", created, skipped: skipped + (ids.length - contacts.length) });
+  }),
+);
+router.get(
+  "/chat/:conversationId",
+  route(async (req, res) => {
+    await assertConversationAccess(req, req.params.conversationId);
+    const lead = await leadForChat(req, req.params.conversationId);
+    res.json({ status: "success", lead: lead ? leadView(lead) : null });
   }),
 );
 router.get(

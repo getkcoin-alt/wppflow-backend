@@ -375,6 +375,17 @@ test("The sales pipeline: leads, steps, follow-ups, and who can see what", async
     assert.equal((await get(`/${lead.id}`)).status, 404);
   });
 
+  await t.test("a chat can ask whether its customer has an open lead", async () => {
+    const c = await customer("971500000070", "Asked About", "sam-line");
+    const none = await get(`/chat/${c.chat}`, sam);
+    assert.deepEqual([none.status, none.body.lead], [200, null]);
+    const made = (await post("", { conversationId: c.chat }, sam)).body.lead;
+    assert.equal((await get(`/chat/${c.chat}`, sam)).body.lead.id, made.id);
+    assert.equal((await get(`/chat/${c.chat}`, tina)).status, 404, "only for a chat the person can open");
+    await post(`/${made.id}/move`, { stageId: await stageId("Deal closed") }, sam);
+    assert.equal((await get(`/chat/${c.chat}`, sam)).body.lead, null, "a won lead is no longer open");
+  });
+
   await t.test("deleting a contact keeps the lead and what it was worth", async () => {
     const c = await customer("971500000060", "Soon Deleted", "front-desk");
     const lead = (await post("", { contactId: c.contact, value: 777 })).body.lead;

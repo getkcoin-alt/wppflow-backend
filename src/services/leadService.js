@@ -96,6 +96,15 @@ export const leadView = (r) => ({
   nextTask: r.next_task_id ? { id: r.next_task_id, title: r.next_task_title, dueAt: r.next_task_due } : null,
 });
 
+// The open lead for whoever this chat is with, if the person asking can see it.
+export async function leadForChat(req, conversationId) {
+  const conv = (await query("SELECT contact_id,session_name FROM conversations WHERE id=$1 AND tenant_id=$2", [conversationId, req.tenantId])).rows[0];
+  if (!conv?.contact_id) return null;
+  const params = [req.tenantId, conv.contact_id];
+  const { rows } = await query(`${SELECT} WHERE l.tenant_id=$1 AND l.contact_id=$2 AND l.status='open' AND ${visibleTo(req, params)} LIMIT 1`, params);
+  return rows[0] || null;
+}
+
 export async function findLead(req, id) {
   const params = [req.tenantId, id];
   const { rows } = await query(`${SELECT} WHERE l.tenant_id=$1 AND l.id=$2 AND ${visibleTo(req, params)}`, params);
