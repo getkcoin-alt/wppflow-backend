@@ -4,6 +4,7 @@ import { query } from "../db/index.js";
 import { route, fail, text } from "../middleware/http.js";
 import { createCompany, resendOwnerSetupLink } from "../services/adminService.js";
 import { choosePlan, planCatalogue, planOf } from "../services/plans.js";
+import { dailyLimitOf, defaultDailyLimit } from "../services/aiService.js";
 const router = express.Router();
 router.use(authenticateToken, requireSuperAdmin);
 const companyView = (r) => ({
@@ -20,11 +21,24 @@ const companyView = (r) => ({
   staffCount: r.staff_count,
   sessionsCount: r.sessions_count,
   connectedSessions: r.connected_sessions,
+  // The AI assistant (Riwo) as part of the subscription: what the company may use and what it has used.
+  ai: {
+    included: planOf(r.plan).features.includes("ai"),
+    enabled: r.ai_enabled !== false,
+    dailyLimit: dailyLimitOf(r),
+    customLimit: Number(r.ai_daily_limit) > 0,
+    usedToday: r.ai_today,
+    requestsThisMonth: r.ai_month,
+    tokensThisMonth: Number(r.ai_tokens),
+  },
 });
 const COMPANY_SQL = `SELECT t.*,u.name AS owner_name,u.email AS owner_email,u.must_change_password AS owner_pending,
   (SELECT count(*)::int FROM memberships WHERE tenant_id=t.id AND role<>'owner' AND status='active') AS staff_count,
   (SELECT count(*)::int FROM whatsapp_sessions WHERE tenant_id=t.id) AS sessions_count,
-  (SELECT count(*)::int FROM whatsapp_sessions WHERE tenant_id=t.id AND status='CONNECTED') AS connected_sessions
+  (SELECT count(*)::int FROM whatsapp_sessions WHERE tenant_id=t.id AND status='CONNECTED') AS connected_sessions,
+  COALESCE((SELECT requests FROM ai_usage WHERE tenant_id=t.id AND day=(now() AT TIME ZONE 'UTC')::date),0) AS ai_today,
+  COALESCE((SELECT sum(requests) FROM ai_usage WHERE tenant_id=t.id AND day>=date_trunc('month',(now() AT TIME ZONE 'UTC')::date)::date),0)::int AS ai_month,
+  COALESCE((SELECT sum(input_tokens+output_tokens) FROM ai_usage WHERE tenant_id=t.id AND day>=date_trunc('month',(now() AT TIME ZONE 'UTC')::date)::date),0)::bigint AS ai_tokens
   FROM tenants t LEFT JOIN LATERAL (SELECT u.* FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=t.id AND m.role='owner' ORDER BY m.id LIMIT 1) u ON true`;
 // Shown to the platform admin only, so they can fix the mail setup.
 const mailHint = (error) =>
@@ -41,7 +55,21 @@ const limitFor = (plan, typed) => {
   if (plan.numbers) return plan.numbers;
   throw fail(400, `${plan.name} has a custom number limit: enter how many WhatsApp numbers this company gets`);
 };
-router.get("/plans", (req, res) => res.json({ status: "success", plans: planCatalogue() }));
+// A company's daily AI allowance as typed by the platform admin: blank means the server's default.
+const aiLimitOf = (value) => {
+  if (value === null || value === "") return null;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1 || n > 100000)
+    throw fail(400, "The daily AI allowance must be a whole number from 1 to 100000, or left blank for the default");
+  return n;
+};
+router.get("/plans", (req, res) =>
+  res.json({
+    status: "success",
+    // `aiDaily` is what a company on the plan may ask Riwo each day unless the admin agrees another number
+    plans: planCatalogue().map((p) => ({ ...p, aiDaily: p.features.some((f) => f.key === "ai" && f.included) ? defaultDailyLimit() : null })),
+  }),
+);
 router.get(
   "/companies",
   route(async (req, res) => {
@@ -56,6 +84,7 @@ router.post(
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ownerEmail))
       throw fail(400, "Invalid owner email");
     const plan = choosePlan(req.body.plan);
+    const aiLimit = req.body.aiDailyLimit === undefined ? null : aiLimitOf(req.body.aiDailyLimit);
     const result = await createCompany({
       actorId: req.user.id,
       companyName: text(req.body.companyName, "Company name", 255),
@@ -64,6 +93,7 @@ router.post(
       sessionsLimit: limitFor(plan, req.body.sessionsLimit),
       plan: plan.name,
     });
+    if (aiLimit) await query("UPDATE tenants SET ai_daily_limit=$2 WHERE id=$1", [result.tenant.id, aiLimit]);
     const { rows } = await query(`${COMPANY_SQL} WHERE t.id=$1`, [result.tenant.id]);
     res.status(201).json({
       status: "success",
@@ -114,6 +144,7 @@ router.patch(
     if (req.body.sessionsLimit !== undefined) set("sessions_limit", limitOf(req.body.sessionsLimit));
     else if (plan?.numbers) set("sessions_limit", plan.numbers);
     if (req.body.name !== undefined) set("name", text(req.body.name, "Name", 255));
+    if (req.body.aiDailyLimit !== undefined) set("ai_daily_limit", aiLimitOf(req.body.aiDailyLimit));
     if (!fields.length) throw fail(400, "Nothing to update");
     params.push(req.params.id);
     await query(`UPDATE tenants SET ${fields.join(",")},updated_at=now() WHERE id=$${params.length}`, params);
@@ -121,7 +152,11 @@ router.patch(
       req.app.get("io")?.in(`tenant:${req.params.id}`).disconnectSockets();
     await query(
       "INSERT INTO audit_events(tenant_id,actor_id,event_type,metadata) VALUES($1,$2,'company.updated',$3)",
-      [req.params.id, req.user.id, JSON.stringify({ ...req.body, ...(plan ? { previousPlan: before.plan } : {}) })],
+      [req.params.id, req.user.id, JSON.stringify({
+        ...req.body,
+        ...(plan ? { previousPlan: before.plan } : {}),
+        ...(req.body.aiDailyLimit !== undefined ? { previousAiDailyLimit: before.ai_daily_limit ?? null } : {}),
+      })],
     );
     const { rows } = await query(`${COMPANY_SQL} WHERE t.id=$1`, [req.params.id]);
     const company = companyView(rows[0]);

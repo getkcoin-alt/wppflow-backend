@@ -149,6 +149,42 @@ test("The platform admin chooses a company's plan, and the plan decides what it 
     assert.equal((await request(app).post("/api/sessions/start").set(auth).send({ sessionName: "e" })).status, 403, "and no new number can be linked");
   });
 
+  await t.test("the AI assistant is part of the subscription: usage is shown, and the allowance can be agreed", async () => {
+    const plans = (await request(app).get("/api/admin/plans").set(admin)).body.plans;
+    assert.deepEqual(plans.map((p) => [p.id, p.aiDaily]), [["free", null], ["starter", null], ["growth", 300], ["business", 300], ["enterprise", 300]]);
+
+    const company = (await add({ plan: "Growth" })).body.company;
+    assert.deepEqual(company.ai, { included: true, enabled: true, dailyLimit: 300, customLimit: false, usedToday: 0, requestsThisMonth: 0, tokensThisMonth: 0 });
+    assert.equal((await add({ plan: "Starter" })).body.company.ai.included, false, "Starter does not include Riwo");
+
+    await query("INSERT INTO ai_usage(tenant_id,day,requests,input_tokens,output_tokens) VALUES($1,(now() AT TIME ZONE 'UTC')::date,12,1500,300)", [company.id]);
+    const listed = (await request(app).get("/api/admin/companies").set(admin)).body.companies.find((c) => c.id === company.id);
+    assert.deepEqual([listed.ai.usedToday, listed.ai.requestsThisMonth, listed.ai.tokensThisMonth], [12, 12, 1800]);
+
+    const agreed = await request(app).patch(`/api/admin/companies/${company.id}`).set(admin).send({ aiDailyLimit: 40 });
+    assert.equal(agreed.status, 200, JSON.stringify(agreed.body));
+    assert.deepEqual([agreed.body.company.ai.dailyLimit, agreed.body.company.ai.customLimit], [40, true]);
+    assert.equal((await query("SELECT ai_daily_limit FROM tenants WHERE id=$1", [company.id])).rows[0].ai_daily_limit, 40);
+    const audit = (await query("SELECT metadata FROM audit_events WHERE tenant_id=$1 AND event_type='company.updated' ORDER BY created_at DESC LIMIT 1", [company.id])).rows[0].metadata;
+    assert.deepEqual([audit.aiDailyLimit, audit.previousAiDailyLimit], [40, null], "who changed the allowance, and from what, is on record");
+
+    for (const bad of [0, -5, 100001, 2.5, "lots"]) assert.equal((await request(app).patch(`/api/admin/companies/${company.id}`).set(admin).send({ aiDailyLimit: bad })).status, 400, String(bad));
+    const back = await request(app).patch(`/api/admin/companies/${company.id}`).set(admin).send({ aiDailyLimit: null });
+    assert.deepEqual([back.body.company.ai.dailyLimit, back.body.company.ai.customLimit], [300, false], "blank goes back to the default");
+
+    const created = await add({ plan: "Business", aiDailyLimit: 1000 });
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    assert.deepEqual([created.body.company.ai.dailyLimit, created.body.company.ai.customLimit], [1000, true]);
+    const auth = await ownerOf(created.body.company); // ownerOf reads the most recently added company's owner
+    const before = (await query("SELECT count(*)::int AS n FROM tenants")).rows[0].n;
+    assert.equal((await add({ plan: "Growth", aiDailyLimit: 0 })).status, 400);
+    assert.equal((await query("SELECT count(*)::int AS n FROM tenants")).rows[0].n, before, "a bad allowance creates nothing");
+
+    // the company sees the same numbers on its own subscription screen
+    const caps = (await request(app).get("/api/workspace/capabilities").set(auth)).body;
+    assert.deepEqual([caps.ai.limit, caps.ai.custom, caps.ai.used, caps.ai.month.requests], [1000, true, 0, 0]);
+  });
+
   freshLimit();
   await t.test("someone who signs up on their own starts on the Free plan, not on everything", async () => {
     const res = await request(app).post("/api/auth/signup").send({ name: "Self Serve", email: "self@plans-admin.test", password: "Password@12345", companyName: "Self Serve Co" });

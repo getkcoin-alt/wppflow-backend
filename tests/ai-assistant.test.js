@@ -263,7 +263,29 @@ test("The AI assistant (Riwo) helps staff write, and never sends anything itself
     assert.equal(Number(row.output_tokens), 140);
     const s = (await status()).body;
     assert.deepEqual([s.used, s.limit, s.remaining], [2, 2, 0]);
+    // the subscription view: this month's total, when the allowance resets, and whether the limit was agreed
+    assert.deepEqual(s.month, { requests: 2, inputTokens: 1000, outputTokens: 140 });
+    assert.equal(s.custom, true);
+    const reset = new Date(s.resetsAt);
+    assert.equal(reset.getUTCHours() + reset.getUTCMinutes() + reset.getUTCSeconds(), 0, "resets at midnight UTC");
+    assert.ok(reset > new Date() && reset - new Date() <= 24 * 3600 * 1000);
     await query("UPDATE tenants SET ai_daily_limit=NULL WHERE id=$1", [tenantId]);
+    assert.equal((await status()).body.custom, false, "back to the server's default");
+  });
+
+  await t.test("the month adds up earlier days, and leaves out last month", async () => {
+    await query("DELETE FROM ai_usage WHERE tenant_id=$1", [tenantId]);
+    const firstOfMonth = new Date().getUTCDate() === 1;
+    const rows = [
+      "((now() AT TIME ZONE 'UTC')::date,3,300,30)",
+      // the first of the month is today on the 1st, and a day can only have one row
+      ...(firstOfMonth ? [] : ["(date_trunc('month',(now() AT TIME ZONE 'UTC')::date)::date,4,400,40)"]),
+      "((date_trunc('month',(now() AT TIME ZONE 'UTC')::date) - interval '1 day')::date,50,5000,500)",
+    ];
+    await query(`INSERT INTO ai_usage(tenant_id,day,requests,input_tokens,output_tokens) SELECT $1,v.* FROM (VALUES ${rows.join(",")}) AS v`, [tenantId]);
+    const s = (await status()).body;
+    assert.equal(s.used, 3);
+    assert.deepEqual(s.month, firstOfMonth ? { requests: 3, inputTokens: 300, outputTokens: 30 } : { requests: 7, inputTokens: 700, outputTokens: 70 });
   });
 
   await t.test("simultaneous requests can't run past the allowance", async () => {

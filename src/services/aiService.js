@@ -20,8 +20,11 @@ export function aiProvider() {
 }
 export const aiConfigured = () => aiProvider() !== null;
 export const aiModel = () => process.env.AI_MODEL || "claude-opus-5-5"; // Claude only
-const defaultDailyLimit = () =>
+export const defaultDailyLimit = () =>
   Number(process.env.AI_DAILY_LIMIT) > 0 ? Number(process.env.AI_DAILY_LIMIT) : 300;
+// A company's daily allowance: the one the platform admin agreed with it, or else the server's default.
+export const dailyLimitOf = (tenant) =>
+  Number(tenant.ai_daily_limit) > 0 ? Number(tenant.ai_daily_limit) : defaultDailyLimit();
 
 // ── The model client ─────────────────────────────────────────────────────────────────────────────
 let client;
@@ -115,14 +118,37 @@ function textOf(response) { // a Claude response
 // ── Allowance ────────────────────────────────────────────────────────────────────────────────────
 const today = "(now() AT TIME ZONE 'UTC')::date";
 
+// The allowance counts UTC days and months, whatever the company's own time zone is.
+const monthStart = `date_trunc('month', ${today})::date`;
+export const nextReset = () => {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toISOString();
+};
+
 export async function usageOf(tenant) {
   const { rows } = await query(
-    `SELECT requests FROM ai_usage WHERE tenant_id=$1 AND day=${today}`,
+    `SELECT COALESCE(sum(requests) FILTER (WHERE day=${today}),0)::int AS used,
+            COALESCE(sum(requests),0)::int AS month_requests,
+            COALESCE(sum(input_tokens),0)::bigint AS month_input,
+            COALESCE(sum(output_tokens),0)::bigint AS month_output
+       FROM ai_usage WHERE tenant_id=$1 AND day>=${monthStart}`,
     [tenant.id],
   );
-  const limit = Number(tenant.ai_daily_limit) > 0 ? Number(tenant.ai_daily_limit) : defaultDailyLimit();
-  const used = rows[0]?.requests || 0;
-  return { used, limit, remaining: Math.max(limit - used, 0) };
+  const limit = dailyLimitOf(tenant);
+  const used = rows[0].used;
+  return {
+    used,
+    limit,
+    remaining: Math.max(limit - used, 0),
+    // true when the platform admin set this company's allowance; false when it is the server's default
+    custom: Number(tenant.ai_daily_limit) > 0,
+    resetsAt: nextReset(),
+    month: {
+      requests: rows[0].month_requests,
+      inputTokens: Number(rows[0].month_input),
+      outputTokens: Number(rows[0].month_output),
+    },
+  };
 }
 
 // Why the assistant can't be used right now, or null when it can.
@@ -156,7 +182,7 @@ function assertAvailable(tenant) {
 // Takes one request from today's allowance before the model is asked, so a burst of requests can't
 // run past the limit; it is given back if the request fails.
 async function reserve(tenant) {
-  const limit = Number(tenant.ai_daily_limit) > 0 ? Number(tenant.ai_daily_limit) : defaultDailyLimit();
+  const limit = dailyLimitOf(tenant);
   const { rowCount } = await query(
     `INSERT INTO ai_usage(tenant_id,day,requests) VALUES($1::varchar,${today},1)
      ON CONFLICT (tenant_id,day) DO UPDATE SET requests=ai_usage.requests+1 WHERE ai_usage.requests<$2::int`,
