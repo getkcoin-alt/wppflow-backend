@@ -85,6 +85,22 @@ router.post(
       "SELECT owner_user_id FROM whatsapp_sessions WHERE tenant_id=$1 AND session_name=$2",
       [req.tenantId, name],
     );
+    // Linking a NEW number must never quietly start one that is already linked: it would come up
+    // from its saved login, with no QR code to scan, and look like a new number that connected
+    // by itself. Starting an existing one is what Reconnect does, and does not set newNumber.
+    if (req.body.newNumber === true) {
+      const same = await query(
+        "SELECT session_name FROM whatsapp_sessions WHERE tenant_id=$1 AND lower(session_name)=lower($2)",
+        [req.tenantId, name],
+      );
+      if (same.rows[0])
+        throw fail(
+          409,
+          manager(req)
+            ? `You already have a number called "${same.rows[0].session_name}". Choose another name for the new one, or use Reconnect on that one.`
+            : "You already have your WhatsApp number linked. Use Reconnect on it.",
+        );
+    }
     if (
       existing.rows[0] &&
       !manager(req) &&

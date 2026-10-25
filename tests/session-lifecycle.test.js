@@ -92,4 +92,28 @@ test("Unpaired sessions never restart themselves; failures keep their reason", a
     await restoreSessions(io);
     await until(() => starts.filter((n) => n === "line-d").length === before + 1);
   });
+
+  await t.test("linking a new number never starts one that is already linked", async () => {
+    await query("UPDATE tenants SET sessions_limit=10 WHERE id=$1", [o.tenant.id]);
+    paired = true;
+    behaviour = async (tenant, name, cb) => cb.onStatus("CONNECTED");
+    await start("Primary-WhatsApp");
+    await until(async () => (await row(o.tenant.id, "Primary-WhatsApp")).status === "CONNECTED");
+    const before = starts.length;
+    // the same name (in any capitals) as a NEW number is refused, and nothing is started
+    for (const again of ["Primary-WhatsApp", "primary-whatsapp"]) {
+      const res = await request(app).post("/api/sessions/start").set(auth).send({ sessionName: again, newNumber: true });
+      assert.equal(res.status, 409, again);
+      assert.match(res.body.message, /already have a number called "Primary-WhatsApp".*Reconnect/);
+    }
+    assert.equal(starts.length, before, "no start was attempted");
+    // Reconnect is the same call without the flag, and still works
+    const reconnect = await request(app).post("/api/sessions/start").set(auth).send({ sessionName: "Primary-WhatsApp" });
+    assert.equal(reconnect.status, 202);
+    // a different name is a new number
+    behaviour = async (tenant, name, cb) => cb.onStatus("QRCODE");
+    const fresh = await request(app).post("/api/sessions/start").set(auth).send({ sessionName: "sales-desk", newNumber: true });
+    assert.equal(fresh.status, 202);
+    await until(async () => (await row(o.tenant.id, "sales-desk")).status === "QRCODE");
+  });
 });
