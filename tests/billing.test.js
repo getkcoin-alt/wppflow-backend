@@ -210,7 +210,8 @@ test("Paying for a plan online: orders, verified checkout, signed webhooks, reco
     const [p] = await payments(first.tenantId);
     assert.deepEqual([p.source, Number(p.amount), p.currency, p.reference], ["razorpay", 8258.82, "INR", firstPayment.id]);
     const [inv] = await invoices(first.tenantId);
-    assert.match(inv.number, /^SCZ\/\d{4}-\d{2}\/00001$/);
+    assert.match(inv.number, /^SCZ\/\d{2}-\d{2}\/00001$/);
+    assert.ok(inv.number.length <= 16, "an invoice number can be at most 16 characters (CGST Rule 46)");
     assert.deepEqual([Number(inv.taxable_minor), Number(inv.cgst_minor), Number(inv.sgst_minor), Number(inv.igst_minor), Number(inv.total_minor)], [699900, 62991, 62991, 0, 825882]);
     assert.equal(inv.seller.gstin, "09ABICS9865M1Z8");
     assert.equal(inv.buyer.legalName, "Acme Traders Pvt Ltd");

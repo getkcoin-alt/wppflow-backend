@@ -213,6 +213,10 @@ export async function updatePlan(code, patch, actorId) {
   if (patch.seats !== undefined) next.seats = whole(patch.seats, "People", { min: 1, max: 1000, nullable: true });
   if (patch.maxContacts !== undefined) next.maxContacts = whole(patch.maxContacts, "Contacts", { min: 1, max: 100000000, nullable: true });
   if (patch.maxBroadcasts !== undefined) next.maxBroadcasts = whole(patch.maxBroadcasts, "Broadcasts a month", { min: 1, max: 100000, nullable: true });
+  if (patch.taxMode !== undefined) {
+    if (!["exclusive", "inclusive"].includes(patch.taxMode)) throw fail(400, "Tax is either added to the price (exclusive) or already in it (inclusive)");
+    next.taxMode = patch.taxMode;
+  }
   if (patch.trialDays !== undefined) next.trialDays = whole(patch.trialDays, "Trial days", { min: 0, max: 90 });
   if (patch.isActive !== undefined) {
     if (typeof patch.isActive !== "boolean") throw fail(400, "isActive must be true or false");
@@ -237,11 +241,11 @@ export async function updatePlan(code, patch, actorId) {
     });
     if (id === "free" && next.prices.some((p) => p.amountMinor > 0)) throw fail(400, "The Free plan has no price");
   }
-  const snapshot = (p) => ({ name: p.name, numbers: p.numbers, seats: p.seats, features: p.features, isActive: p.isActive, maxContacts: p.maxContacts, maxBroadcasts: p.maxBroadcasts, trialDays: p.trialDays, prices: p.prices });
+  const snapshot = (p) => ({ name: p.name, numbers: p.numbers, seats: p.seats, features: p.features, isActive: p.isActive, maxContacts: p.maxContacts, maxBroadcasts: p.maxBroadcasts, trialDays: p.trialDays, taxMode: p.taxMode, prices: p.prices });
   await withTransaction(async (client) => {
     await client.query(
-      `UPDATE plans SET name=$2,numbers=$3,seats=$4,features=$5,is_active=$6,max_contacts=$7,trial_days=$8,max_broadcasts_per_month=$9,updated_at=now() WHERE code=$1`,
-      [id, next.name, next.numbers, next.seats, JSON.stringify(next.features), next.isActive, next.maxContacts, next.trialDays, next.maxBroadcasts],
+      `UPDATE plans SET name=$2,numbers=$3,seats=$4,features=$5,is_active=$6,max_contacts=$7,trial_days=$8,max_broadcasts_per_month=$9,tax_mode=$10,updated_at=now() WHERE code=$1`,
+      [id, next.name, next.numbers, next.seats, JSON.stringify(next.features), next.isActive, next.maxContacts, next.trialDays, next.maxBroadcasts, next.taxMode],
     );
     if (patch.prices !== undefined) {
       await client.query("DELETE FROM plan_prices WHERE plan_code=$1", [id]);
@@ -252,4 +256,38 @@ export async function updatePlan(code, patch, actorId) {
   });
   await loadPlans();
   return planCatalogue({ all: true }).find((p) => p.id === id);
+}
+
+// Who changed which plan and when, newest first, with what the plan said before and after.
+const PLAN_FIELDS = { name: "Name", numbers: "WhatsApp numbers", seats: "People", maxContacts: "Contacts", maxBroadcasts: "Broadcasts a month", isActive: "On sale", taxMode: "Tax", trialDays: "Trial days" };
+const said = (v) => (v === null || v === undefined ? "no limit" : typeof v === "boolean" ? (v ? "yes" : "no") : String(v));
+export async function planChanges(limit = 100) {
+  const { rows } = await query(
+    `SELECT c.id,c.plan_code,c.before,c.after,c.created_at,u.name AS actor FROM plan_changes c LEFT JOIN users u ON u.id=c.actor_id ORDER BY c.id DESC LIMIT $1`,
+    [limit],
+  );
+  const minor = (p) => `${p.currency} ${(p.amountMinor / 100).toLocaleString("en-IN")} ${p.interval === "annual" ? "a year" : "a month"}`;
+  return rows.map((r) => {
+    const b = r.before || {},
+      a = r.after || {};
+    const changes = [];
+    for (const [k, label] of Object.entries(PLAN_FIELDS)) if (said(b[k]) !== said(a[k])) changes.push({ field: label, from: said(b[k]), to: said(a[k]) });
+    const was = new Set((b.features || []).map(String)),
+      is = new Set((a.features || []).map(String));
+    const nice = (f) => {
+      const bare = (FEATURE_LABELS[f] || f).replace(/^The /, "");
+      return bare.charAt(0).toUpperCase() + bare.slice(1);
+    };
+    for (const f of is) if (!was.has(f)) changes.push({ field: nice(f), from: "not included", to: "included" });
+    for (const f of was) if (!is.has(f)) changes.push({ field: nice(f), from: "included", to: "not included" });
+    const price = (list) => new Map((list || []).map((p) => [`${p.currency}:${p.interval}`, p]));
+    const pb = price(b.prices),
+      pa = price(a.prices);
+    for (const key of new Set([...pb.keys(), ...pa.keys()])) {
+      const x = pb.get(key),
+        y = pa.get(key);
+      if (x?.amountMinor !== y?.amountMinor) changes.push({ field: `Price, ${key.replace(":", " ")}`, from: x ? minor(x) : "none", to: y ? minor(y) : "none" });
+    }
+    return { id: r.id, plan: r.plan_code, name: a.name || b.name || r.plan_code, actor: r.actor, at: r.created_at, changes };
+  });
 }

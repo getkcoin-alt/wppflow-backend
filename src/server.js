@@ -37,6 +37,7 @@ import { restoreSessions, closeSessions } from "./services/sessionService.js";
 import { sweepOrphanBrowsers } from "./services/whatsapp/browserProcess.js";
 import { startDomainJobs, stopDomainJobs } from "./services/domainJobs.js";
 import { loadPlans, keepPlansFresh } from "./services/plans.js";
+import { loadBillingSettings, keepBillingSettingsFresh } from "./services/billingSettings.js";
 import { startReconcileLoop, stopReconcileLoop } from "./services/syncService.js";
 
 const app = express();
@@ -254,7 +255,7 @@ export async function startServer() {
     if (ENV.AUTO_MIGRATE) await runMigrations();
     else {
       const { rows } = await query(
-        "SELECT 1 FROM schema_migrations WHERE version='026_plan_limits'",
+        "SELECT 1 FROM schema_migrations WHERE version='027_billing_settings'",
       );
       if (!rows.length)
         throw new Error(
@@ -270,6 +271,8 @@ export async function startServer() {
   // The plans and their prices come from the database; a failed read keeps the built-in plans.
   await loadPlans().catch((e) => console.error("Could not read the plans:", e.message));
   keepPlansFresh();
+  await loadBillingSettings().catch((e) => console.error("Could not read the billing settings:", e.message));
+  keepBillingSettingsFresh();
 
   // 3. Initialize Message Queue
   await initMessageQueue(io);

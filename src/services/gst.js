@@ -1,5 +1,4 @@
 import { fail } from "../middleware/http.js";
-import { GST_RATE, SELLER } from "../config/billing.js";
 
 // GST state codes, as printed on a GSTIN's first two digits.
 export const STATES = {
@@ -28,7 +27,8 @@ export function validGstin(value) {
 
 // The tax on an amount, in paise. Rates apply to the taxable value; inside the seller's state the tax is split
 // between the centre and the state (CGST and SGST), elsewhere it is IGST. The parts always add up to the whole.
-export function computeTax({ amountMinor, taxMode = "exclusive", intraState, rate = GST_RATE }) {
+// The rate and the seller's state come from the billing settings; the defaults are the ones the product started with.
+export function computeTax({ amountMinor, taxMode = "exclusive", intraState, rate = 18 }) {
   const given = Math.round(Number(amountMinor));
   if (!Number.isFinite(given) || given < 0) throw fail(400, "The amount is not valid");
   let taxable = given,
@@ -47,7 +47,7 @@ export function computeTax({ amountMinor, taxMode = "exclusive", intraState, rat
   const igst = intraState ? 0 : tax;
   return { taxable, tax, total, cgst, sgst, igst, rate };
 }
-export const isIntraState = (buyerStateCode) => String(buyerStateCode) === SELLER.stateCode;
+export const isIntraState = (buyerStateCode, sellerStateCode = "09") => String(buyerStateCode) === String(sellerStateCode);
 
 // What the buyer's details have to be before an invoice can be made.
 export function cleanProfile(input = {}) {

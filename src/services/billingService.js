@@ -2,8 +2,13 @@ import crypto from "node:crypto";
 import { query, withTransaction } from "../db/index.js";
 import { fail, failWith } from "../middleware/http.js";
 import { ENV } from "../config/env.js";
-import { SELLER, sacCode, GST_RATE, prorateUpgrades, razorpayConfig } from "../config/billing.js";
-import { STATES, stateList, cleanProfile, computeTax, isIntraState } from "./gst.js";
+import { razorpayConfig } from "../config/billing.js";
+import { billingSettings, invoiceNumber, financialYearSeries } from "./billingSettings.js";
+import { STATES, stateList, cleanProfile, computeTax as computeTaxAt, isIntraState as isIntraAt } from "./gst.js";
+
+// Tax at the rate in the billing settings, and "inside the seller's state" as the settings say.
+const computeTax = (args) => computeTaxAt({ rate: billingSettings().gstRate, ...args });
+const isIntraState = (buyerStateCode) => isIntraAt(buyerStateCode, billingSettings().seller.stateCode);
 import * as gateway from "./razorpay.js";
 import { planOf, choosePlan, priceOf, planCatalogue, GRACE_DAYS } from "./plans.js";
 import { recordPayment, subscriptionView, addCycle, daysBetween, dateOnly, todayUtc, rankOf, audit, tell, logEvent, showDate, SOON_DAYS, scheduleChange, clearScheduledChange } from "./subscriptionService.js";
@@ -97,7 +102,7 @@ export function quoteFor(tenant, profile, { plan: planCode, interval }, now = to
 
   // Changing plan part-way through a paid period credits the days not used, unless that is switched off.
   let credit = 0;
-  if (kind === "change" && prorateUpgrades()) {
+  if (kind === "change" && billingSettings().prorateUpgrades) {
     const start = dateOnly(tenant.period_start);
     const total = start ? daysBetween(start, end) : 0;
     const unused = daysBetween(now, end);
@@ -123,7 +128,7 @@ export function quoteFor(tenant, profile, { plan: planCode, interval }, now = to
     igstMinor: tax.igst,
     totalMinor: tax.total,
     taxMode: entry?.taxMode || "exclusive",
-    gstRate: GST_RATE,
+    gstRate: billingSettings().gstRate,
     intraState: isIntraState(profile.stateCode),
     periodStart: period.start,
     periodEnd: period.end,
@@ -269,28 +274,24 @@ async function settleFromGateway(orderId, paymentId, io) {
 
 // ── Settling a payment ───────────────────────────────────────────────────────────────────────────
 
-const financialYear = (dateIso) => {
-  const [y, m] = dateIso.split("-").map(Number);
-  const start = m >= 4 ? y : y - 1;
-  return `${start}-${String((start + 1) % 100).padStart(2, "0")}`;
-};
 const todayIst = () => new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
 
-async function issueInvoice(client, { tenantId, orderId = null, subscriptionPaymentId = null, planName, interval, periodStart, periodEnd, lines, taxable, cgst, sgst, igst, total, buyer, paymentRef, paymentMethod }) {
+async function issueInvoice(client, { tenantId, orderId = null, subscriptionPaymentId = null, planName, interval, periodStart, periodEnd, lines, taxable, cgst, sgst, igst, total, buyer, paymentRef, paymentMethod, gstRate = billingSettings().gstRate }) {
   const issueDate = todayIst();
-  const series = financialYear(issueDate);
+  const settings = billingSettings();
+  const series = financialYearSeries(issueDate);
   const counter = await client.query(
     "INSERT INTO invoice_counters(series,last_seq) VALUES($1,1) ON CONFLICT(series) DO UPDATE SET last_seq=invoice_counters.last_seq+1 RETURNING last_seq",
     [series],
   );
   const seq = counter.rows[0].last_seq;
-  const number = `SCZ/${series}/${String(seq).padStart(5, "0")}`;
+  const number = invoiceNumber(settings.invoicePrefix, series, seq);
   const id = crypto.randomUUID();
   await client.query(
     `INSERT INTO invoices(id,tenant_id,number,series,seq,issue_date,order_id,subscription_payment_id,plan_name,billing_interval,period_start,period_end,currency,lines,
-       taxable_minor,cgst_minor,sgst_minor,igst_minor,total_minor,seller,buyer,sac_code,payment_ref,payment_method)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'INR',$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
-    [id, tenantId, number, series, seq, issueDate, orderId, subscriptionPaymentId, planName, interval, periodStart, periodEnd, JSON.stringify(lines), taxable, cgst, sgst, igst, total, JSON.stringify(SELLER), JSON.stringify(buyer), sacCode(), String(paymentRef || "").slice(0, 120), String(paymentMethod || "").slice(0, 30)],
+       taxable_minor,cgst_minor,sgst_minor,igst_minor,total_minor,seller,buyer,sac_code,payment_ref,payment_method,gst_rate)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'INR',$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)`,
+    [id, tenantId, number, series, seq, issueDate, orderId, subscriptionPaymentId, planName, interval, periodStart, periodEnd, JSON.stringify(lines), taxable, cgst, sgst, igst, total, JSON.stringify(settings.seller), JSON.stringify(buyer), settings.sacCode, String(paymentRef || "").slice(0, 120), String(paymentMethod || "").slice(0, 30), gstRate],
   );
   return { id, number };
 }
@@ -401,6 +402,7 @@ export async function settleOrder({ orderId, payment, source = "webhook", io = n
       buyer: quote.buyer,
       paymentRef: payment.id,
       paymentMethod: payment.method || "",
+      gstRate: quote.gstRate ?? billingSettings().gstRate,
     });
     const updated = await client.query(
       `UPDATE payment_orders SET status='paid',paid_at=now(),gateway_payment_id=$2,subscription_payment_id=$3,invoice_id=$4,failure_reason=NULL,updated_at=now() WHERE id=$1 RETURNING *`,
@@ -806,8 +808,8 @@ export async function billingOverview(tenantId) {
   return {
     payments: paymentsStatus(),
     currency: "INR",
-    gstRate: GST_RATE,
-    prorateUpgrades: prorateUpgrades(),
+    gstRate: billingSettings().gstRate,
+    prorateUpgrades: billingSettings().prorateUpgrades,
     subscription: subscriptionView(tenant),
     profile,
     states: stateList(),

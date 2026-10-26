@@ -7,6 +7,17 @@ const inr = (minor) => `INR ${(Number(minor) / 100).toLocaleString("en-IN", { mi
 const date = (iso) => new Date(`${String(iso).slice(0, 10)}T00:00:00Z`).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
 const dateOf = (v) => (v instanceof Date ? `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, "0")}-${String(v.getDate()).padStart(2, "0")}` : String(v).slice(0, 10));
 
+// The tax rows of an invoice, at the rate it was made at: half each for CGST and SGST, the whole for IGST.
+export function taxLines(invoice) {
+  const rate = Number(invoice.gst_rate ?? 18);
+  const half = `${rate / 2}%`;
+  return [
+    [`CGST @ ${half}`, invoice.cgst_minor],
+    [`SGST @ ${half}`, invoice.sgst_minor],
+    [`IGST @ ${rate}%`, invoice.igst_minor],
+  ].filter(([, amount]) => Number(amount));
+}
+
 export function invoiceFileName(number) {
   return `Scriwo-invoice-${String(number).replace(/[^A-Za-z0-9]+/g, "-")}.pdf`;
 }
@@ -73,15 +84,14 @@ export function renderInvoice(invoice) {
     doc.y = y + (bold ? 16 : 14);
   };
   row("Taxable value", invoice.taxable_minor);
-  if (Number(invoice.cgst_minor)) row("CGST @ 9%", invoice.cgst_minor);
-  if (Number(invoice.sgst_minor)) row("SGST @ 9%", invoice.sgst_minor);
-  if (Number(invoice.igst_minor)) row("IGST @ 18%", invoice.igst_minor);
+  for (const [label, amount] of taxLines(invoice)) row(label, amount);
   row("Total", invoice.total_minor, true);
   doc.moveDown(0.6).font("Helvetica-Oblique").fontSize(9).text(rupeesInWords(Number(invoice.total_minor)), 48, doc.y, { width: W });
 
   doc.moveDown(1.2).font("Helvetica").fontSize(9).fillColor(grey);
   const how = invoice.payment_method === "recorded" ? "Payment received and recorded by Scriwo" : `Paid online through Razorpay${invoice.payment_method ? ` (${invoice.payment_method})` : ""}`;
   doc.text(`${how}${invoice.payment_ref ? `. Reference: ${invoice.payment_ref}` : ""}.`, 48, doc.y, { width: W });
+  doc.text("Tax payable on reverse charge: No.", 48, doc.y, { width: W });
   doc.text("This is a computer-generated invoice and needs no signature.", 48, doc.y, { width: W });
   doc.end();
   return doc;

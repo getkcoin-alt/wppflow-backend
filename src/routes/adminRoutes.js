@@ -3,7 +3,8 @@ import { authenticateToken, requireSuperAdmin } from "../middleware/auth.js";
 import { query } from "../db/index.js";
 import { route, fail, text } from "../middleware/http.js";
 import { createCompany, resendOwnerSetupLink } from "../services/adminService.js";
-import { choosePlan, planCatalogue, planOf, updatePlan } from "../services/plans.js";
+import { choosePlan, planCatalogue, planOf, updatePlan, planChanges } from "../services/plans.js";
+import { view as billingSettingsView, saveBillingSettings, settingsHistory } from "../services/billingSettings.js";
 import { dailyLimitOf, defaultDailyLimit } from "../services/aiService.js";
 import { subscriptionView, recordPayment, scheduleChange, clearScheduledChange, paymentsOf } from "../services/subscriptionService.js";
 import { invoiceForRecordedPayment, adminPayments, getInvoice, billingAudit } from "../services/billingService.js";
@@ -262,6 +263,22 @@ router.delete(
 );
 // Enquiries from the public website's contact form, newest first.
 // ── Across every company: totals, the health of every number, and the books ────────────────────────────────
+// ── Subscriptions: what is sold and how it is invoiced ───────────────────────────────────────────────────────
+router.get(
+  "/plans/changes",
+  route(async (req, res) => res.json({ status: "success", changes: await planChanges(Math.min(Number(req.query.limit) || 100, 300)) })),
+);
+router.get(
+  "/billing/settings",
+  route(async (req, res) => res.json({ status: "success", settings: billingSettingsView(), history: await settingsHistory(30) })),
+);
+router.put(
+  "/billing/settings",
+  route(async (req, res) => {
+    const settings = await saveBillingSettings(req.body, req.user.id);
+    res.json({ status: "success", settings, history: await settingsHistory(30) });
+  }),
+);
 router.get(
   "/overview",
   route(async (req, res) => res.json({ status: "success", overview: await platformOverview({ fresh: req.query.fresh === "1" }) })),
