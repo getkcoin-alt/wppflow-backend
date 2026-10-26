@@ -69,6 +69,8 @@ test("Buying from the website: pay first, and the workspace is made only when th
     assert.ok(res.body.plans.every((p) => p.prices.length && p.prices.every((x) => x.currency === "INR")));
     assert.equal(res.body.gstRate, 18);
     assert.ok(res.body.states.some((s) => s.code === "09" && s.name === "Uttar Pradesh"));
+    const names = res.body.states.map((s) => s.name);
+    assert.deepEqual(names, [...names].sort((a, b) => a.localeCompare(b)), "states are listed alphabetically");
     assert.ok(!JSON.stringify(res.body).includes(fake.keySecret) && !JSON.stringify(res.body).includes(fake.keyId), "no key at all until an order is made");
     const saved = process.env.RAZORPAY_WEBHOOK_SECRET;
     delete process.env.RAZORPAY_WEBHOOK_SECRET;

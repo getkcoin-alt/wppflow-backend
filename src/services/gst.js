@@ -9,7 +9,8 @@ export const STATES = {
   "27": "Maharashtra", "29": "Karnataka", "30": "Goa", "31": "Lakshadweep", "32": "Kerala", "33": "Tamil Nadu", "34": "Puducherry",
   "35": "Andaman and Nicobar Islands", "36": "Telangana", "37": "Andhra Pradesh", "38": "Ladakh", "97": "Other Territory",
 };
-export const stateList = () => Object.entries(STATES).map(([code, name]) => ({ code, name }));
+// In alphabetical order: the object's own order puts "10" before "01" (a quirk of numeric-looking keys), which reads oddly in a list.
+export const stateList = () => Object.entries(STATES).map(([code, name]) => ({ code, name })).sort((a, b) => a.name.localeCompare(b.name));
 
 const CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 // A GSTIN is 15 characters: state, PAN, entity number, Z, and a check character.
