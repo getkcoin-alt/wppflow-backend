@@ -4,6 +4,7 @@ import { query } from "../db/index.js";
 import { route, fail, text } from "../middleware/http.js";
 import { createCompany, resendOwnerSetupLink } from "../services/adminService.js";
 import { choosePlan, planCatalogue, planOf, updatePlan, planChanges } from "../services/plans.js";
+import { announceFeatureChange } from "../services/planNotices.js";
 import { view as billingSettingsView, saveBillingSettings, settingsHistory } from "../services/billingSettings.js";
 import { dailyLimitOf, defaultDailyLimit } from "../services/aiService.js";
 import { subscriptionView, recordPayment, scheduleChange, clearScheduledChange, paymentsOf } from "../services/subscriptionService.js";
@@ -93,8 +94,13 @@ router.get("/plans", (req, res) =>
 router.put(
   "/plans/:code",
   route(async (req, res) => {
+    const included = (p) => (p?.features || []).filter((f) => f.included).map((f) => f.key);
+    const before = included(planCatalogue({ all: true }).find((p) => p.id === String(req.params.code).toLowerCase()));
     const plan = await updatePlan(req.params.code, req.body || {}, req.user.id);
-    res.json({ status: "success", plan: { ...plan, aiDaily: plan.features.some((f) => f.key === "ai" && f.included) ? defaultDailyLimit() : null } });
+    // Modules switched on or off reach the companies on the plan: their screens lock or unlock at once, and their
+    // owners and administrators are told what changed.
+    const notified = await announceFeatureChange({ io: req.app.get("io"), planId: plan.id, planName: plan.name, before, after: included(plan) });
+    res.json({ status: "success", plan: { ...plan, aiDaily: plan.features.some((f) => f.key === "ai" && f.included) ? defaultDailyLimit() : null }, notified });
   }),
 );
 router.get(
