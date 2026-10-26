@@ -13,6 +13,8 @@ import * as gateway from "./razorpay.js";
 import { planOf, choosePlan, priceOf, planCatalogue, GRACE_DAYS } from "./plans.js";
 import { recordPayment, subscriptionView, addCycle, daysBetween, dateOnly, todayUtc, rankOf, audit, tell, logEvent, showDate, SOON_DAYS, scheduleChange, clearScheduledChange } from "./subscriptionService.js";
 import { sendEmail } from "./emailService.js";
+import { createCompanyIn } from "./adminService.js";
+import { sendOwnerSetup, sendPurchaseReceipt } from "./mailer.js";
 
 // Paying online. The browser opens Razorpay's checkout for an order this file made, with a price this file worked
 // out. What counts as paid is decided here, in settleOrder(), from what Razorpay says to the server (a signed
@@ -27,7 +29,7 @@ export const paymentsStatus = () => {
   const c = razorpayConfig();
   return { configured: c.configured, mode: c.mode };
 };
-const requirePayments = () => {
+export const requirePayments = () => {
   if (!razorpayConfig().configured) throw failWith(503, "Online payment is not switched on yet. Message the Scriwo team and they will set you up.", { code: "payments_off" });
 };
 
@@ -138,7 +140,7 @@ export function quoteFor(tenant, profile, { plan: planCode, interval }, now = to
   };
 }
 
-const orderView = (o) => ({
+export const orderView = (o) => ({
   id: o.id,
   plan: planOf(o.plan_code).name,
   planId: o.plan_code,
@@ -263,10 +265,10 @@ export async function verifyCheckout({ tenantId, userId, body, io = null }) {
     return { status: "processing", order: orderView(await orderById(order.id)) };
   }
 }
-const orderById = async (id) => (await query("SELECT * FROM payment_orders WHERE id=$1", [id])).rows[0];
+export const orderById = async (id) => (await query("SELECT * FROM payment_orders WHERE id=$1", [id])).rows[0];
 
 // Asks Razorpay about a payment (capturing it if it was only authorised) and settles the order on the answer.
-async function settleFromGateway(orderId, paymentId, io) {
+export async function settleFromGateway(orderId, paymentId, io) {
   let payment = await gateway.fetchPayment(paymentId);
   if (payment.status === "authorized") payment = await gateway.capturePayment(paymentId, payment.amount, payment.currency).catch(() => payment);
   return settleOrder({ orderId, payment, source: "gateway-check", io });
@@ -323,6 +325,28 @@ async function savePayment(client, order, payment) {
   );
 }
 
+// A website purchase has no company until its payment is confirmed. This makes the company, its owner and its billing
+// details in the same transaction that records the payment, so nothing exists for a payment that never arrived. If the
+// owner's email has an account by now, nothing is made and the order is left for a person to sort out.
+async function createWorkspaceForOrder(client, order) {
+  const guest = order.guest || {};
+  const email = String(guest.ownerEmail || "").trim().toLowerCase();
+  if ((await client.query("SELECT 1 FROM users WHERE lower(email)=$1", [email])).rowCount)
+    return { refused: `${email} has a Scriwo account already, so the workspace was not created by itself` };
+  const plan = planOf(order.plan_code);
+  const made = await createCompanyIn(client, { actorId: null, companyName: guest.companyName, ownerName: guest.ownerName, ownerEmail: email, sessionsLimit: plan.numbers || 1, plan: plan.name });
+  const b = guest.billing || {};
+  await client.query(
+    `INSERT INTO billing_profiles(tenant_id,legal_name,address_line1,address_line2,city,state_code,postal_code,country,gstin,billing_email,updated_by)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+    [made.tenant.id, b.legalName, b.addressLine1, b.addressLine2 || "", b.city, b.stateCode, b.postalCode, b.country || "IN", b.gstin || null, b.billingEmail || email, made.tenant.owner_id],
+  );
+  await client.query("UPDATE payment_orders SET tenant_id=$2,created_by=$3,updated_at=now() WHERE id=$1", [order.id, made.tenant.id, made.tenant.owner_id]);
+  await client.query("UPDATE payments SET tenant_id=$2 WHERE order_id=$1", [order.id, made.tenant.id]);
+  await audit(client, made.tenant.id, made.tenant.owner_id, "company.bought_online", { orderId: order.id, plan: plan.name, ownerEmail: email });
+  return { tenant: made.tenant, link: made.link, email, name: guest.ownerName, company: guest.companyName };
+}
+
 // Records a captured payment against its order, exactly once. Safe to call again for the same payment, from the
 // webhook, the browser check and the reconciliation job at the same moment: the order row is locked, and the
 // second caller finds it paid.
@@ -358,9 +382,23 @@ export async function settleOrder({ orderId, payment, source = "webhook", io = n
     if (problems.length) {
       const reason = `Payment ${payment.id} did not match: ${problems.join("; ")}`.slice(0, 500);
       const updated = await client.query("UPDATE payment_orders SET status='mismatch',failure_reason=$2,gateway_payment_id=$3,updated_at=now() WHERE id=$1 RETURNING *", [order.id, reason, payment.id]);
-      await audit(client, order.tenant_id, null, "payment.mismatch", { orderId: order.id, paymentId: payment.id, problems });
-      after = () => alertPlatform("a payment did not match its order", { orderId: order.id, tenantId: order.tenant_id, problems });
+      if (order.tenant_id) await audit(client, order.tenant_id, null, "payment.mismatch", { orderId: order.id, paymentId: payment.id, problems });
+      after = () => alertPlatform("a payment did not match its order", { orderId: order.id, tenantId: order.tenant_id, buyer: order.guest_email, problems });
       return { status: "mismatch", order: updated.rows[0] };
+    }
+
+    // A website purchase: the money is confirmed, so the company and its owner are made now, in this transaction.
+    let created = null;
+    if (!order.tenant_id) {
+      created = await createWorkspaceForOrder(client, order);
+      if (created.refused) {
+        const reason = `Payment ${payment.id} was received but ${created.refused}. Refund it or create the workspace by hand.`.slice(0, 500);
+        const updated = await client.query("UPDATE payment_orders SET status='mismatch',failure_reason=$2,gateway_payment_id=$3,updated_at=now() WHERE id=$1 RETURNING *", [order.id, reason, payment.id]);
+        after = () => alertPlatform("a website purchase was paid but could not create the workspace", { orderId: order.id, paymentId: payment.id, buyer: order.guest_email, reason: created.refused });
+        return { status: "mismatch", order: updated.rows[0] };
+      }
+      order.tenant_id = created.tenant.id;
+      order.created_by = created.tenant.owner_id;
     }
 
     const tenant = (await client.query("SELECT * FROM tenants WHERE id=$1 FOR UPDATE", [order.tenant_id])).rows[0];
@@ -417,6 +455,12 @@ export async function settleOrder({ orderId, payment, source = "webhook", io = n
         `Payment received: ${money(Number(order.total_minor))}`,
         `Your ${planName} plan now runs until ${showDate(period.end)}. The invoice ${invoice.number} is in Plans & Billing.`,
       ).catch((e) => console.error("Payment notice failed:", e.message));
+      if (created) {
+        // the buyer is not signed in anywhere: the emails are how they get in
+        const setup = await sendOwnerSetup({ to: created.email, name: created.name, company: created.company, link: created.link });
+        if (!setup.sent) alertPlatform("a website buyer's setup email was not delivered", { orderId: order.id, tenantId: order.tenant_id, buyer: created.email, detail: setup.detail || setup.reason });
+        await sendPurchaseReceipt({ to: created.email, name: created.name, company: created.company, plan: planName, period: `${showDate(period.start)} to ${showDate(period.end)}`, total: money(Number(order.total_minor)), invoice: invoice.number }).catch(() => {});
+      }
       // paying for another plan or period ends autopay for the old one, so it cannot charge twice
       await stopAutopayAfterManualPayment(order, io).catch((e) => console.error("Autopay stop failed:", e.message));
     };
@@ -559,7 +603,7 @@ async function handleRefund(refund, name) {
 export async function reconcileOrders({ io = null } = {}) {
   if (!razorpayConfig().configured) return 0;
   const { rows } = await query(
-    `SELECT * FROM payment_orders WHERE status IN ('created','attempted','failed') AND source='checkout' AND gateway_order_id IS NOT NULL
+    `SELECT * FROM payment_orders WHERE status IN ('created','attempted','failed') AND source IN ('checkout','website') AND gateway_order_id IS NOT NULL
        AND created_at < now() - interval '10 minutes' AND created_at > now() - interval '3 days'
        AND (last_checked_at IS NULL OR last_checked_at < now() - interval '5 minutes') ORDER BY created_at LIMIT 20`,
   );
@@ -843,13 +887,13 @@ export const keepSubscription = ({ tenantId, userId }) => clearScheduledChange({
 // The platform admin's view of online payments, including what needs a look.
 export async function adminPayments({ status = "" } = {}) {
   const { rows } = await query(
-    `SELECT o.*,t.name AS company FROM payment_orders o JOIN tenants t ON t.id=o.tenant_id
-     WHERE o.source IN ('checkout','autopay') AND NOT (o.status='created' AND o.gateway_order_id IS NULL) AND ($1='' OR o.status=$1)
+    `SELECT o.*,COALESCE(t.name,o.guest->>'companyName') AS company FROM payment_orders o LEFT JOIN tenants t ON t.id=o.tenant_id
+     WHERE o.source IN ('checkout','autopay','website') AND NOT (o.status='created' AND o.gateway_order_id IS NULL) AND ($1='' OR o.status=$1)
      ORDER BY o.created_at DESC LIMIT 100`,
     [status],
   );
   const refunds = await query("SELECT r.*,t.name AS company FROM payment_refunds r LEFT JOIN tenants t ON t.id=r.tenant_id ORDER BY r.created_at DESC LIMIT 50");
-  const counts = (await query("SELECT status,count(*)::int AS n FROM payment_orders WHERE source IN ('checkout','autopay') GROUP BY status")).rows;
+  const counts = (await query("SELECT status,count(*)::int AS n FROM payment_orders WHERE source IN ('checkout','autopay','website') GROUP BY status")).rows;
   return {
     payments: paymentsStatus(),
     counts: Object.fromEntries(counts.map((c) => [c.status, c.n])),
@@ -874,18 +918,20 @@ export async function billingAudit({ days = 30, nowMs = Date.now() } = {}) {
        FROM invoices WHERE created_at >= $1 GROUP BY currency ORDER BY currency`,
       [since],
     ),
-    query("SELECT status,count(*)::int AS n FROM payment_orders WHERE source IN ('checkout','autopay') AND created_at >= $1 GROUP BY status", [since]),
+    query("SELECT status,count(*)::int AS n FROM payment_orders WHERE source IN ('checkout','autopay','website') AND created_at >= $1 GROUP BY status", [since]),
     query("SELECT currency,count(*)::int AS n,COALESCE(sum(amount_minor),0)::bigint AS amount FROM payment_refunds WHERE created_at >= $1 GROUP BY currency", [since]),
   ]);
   const company = (alias = "t") => `${alias}.name AS company`;
+  // an order from the website may have no company yet: it is shown under the name the buyer gave
+  const orderCompany = "COALESCE(t.name,o.guest->>'companyName') AS company";
   const [mismatch, unsettled, paidNoPayment, noInvoice, stuckHooks, gaps, badSignatures] = await Promise.all([
-    query(`SELECT o.id,o.tenant_id,${company()},o.total_minor,o.currency,o.gateway_payment_id,o.failure_reason,o.updated_at FROM payment_orders o JOIN tenants t ON t.id=o.tenant_id WHERE o.status='mismatch' ORDER BY o.updated_at DESC LIMIT 50`),
+    query(`SELECT o.id,o.tenant_id,${orderCompany},o.total_minor,o.currency,o.gateway_payment_id,o.failure_reason,o.updated_at FROM payment_orders o LEFT JOIN tenants t ON t.id=o.tenant_id WHERE o.status='mismatch' ORDER BY o.updated_at DESC LIMIT 50`),
     query(
-      `SELECT o.id,o.tenant_id,${company()},o.total_minor,o.currency,o.gateway_payment_id,o.status,o.updated_at FROM payment_orders o JOIN tenants t ON t.id=o.tenant_id
+      `SELECT o.id,o.tenant_id,${orderCompany},o.total_minor,o.currency,o.gateway_payment_id,o.status,o.updated_at FROM payment_orders o LEFT JOIN tenants t ON t.id=o.tenant_id
        WHERE o.gateway_payment_id IS NOT NULL AND o.status IN ('created','attempted') AND o.updated_at < now()-interval '1 hour' ORDER BY o.updated_at DESC LIMIT 50`,
     ),
     query(
-      `SELECT o.id,o.tenant_id,${company()},o.total_minor,o.currency,o.gateway_payment_id,o.paid_at FROM payment_orders o JOIN tenants t ON t.id=o.tenant_id
+      `SELECT o.id,o.tenant_id,${orderCompany},o.total_minor,o.currency,o.gateway_payment_id,o.paid_at FROM payment_orders o LEFT JOIN tenants t ON t.id=o.tenant_id
        WHERE o.status='paid' AND o.subscription_payment_id IS NULL ORDER BY o.paid_at DESC LIMIT 50`,
     ),
     query(

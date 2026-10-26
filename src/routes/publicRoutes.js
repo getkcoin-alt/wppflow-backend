@@ -3,10 +3,11 @@ import crypto from "node:crypto";
 import { query } from "../db/index.js";
 import { ENV } from "../config/env.js";
 import { route, fail, text } from "../middleware/http.js";
-import { contactFormLimiter, contactFormCeiling } from "../middleware/rateLimiter.js";
+import { contactFormLimiter, contactFormCeiling, checkoutOrderLimiter, checkoutReadLimiter, checkoutOrderCeiling } from "../middleware/rateLimiter.js";
 import { sendLeadNotification } from "../services/mailer.js";
 import { publicPlans } from "../services/plans.js";
 import { billingSettings } from "../services/billingSettings.js";
+import { websiteCheckoutOptions, websiteQuote, createWebsiteOrder, verifyWebsiteCheckout, websiteCheckoutStatus } from "../services/websiteCheckout.js";
 
 // Endpoints the public website calls without signing in.
 const router = express.Router();
@@ -26,6 +27,43 @@ router.get("/plans", (req, res) => {
   res.set("Cache-Control", "public, max-age=60");
   res.json({ status: "success", plans: publicPlans(), gstRate: billingSettings().gstRate });
 });
+
+// ── Buying a plan from the website, before there is an account ────────────────────────────────────────────
+// What the checkout page needs: whether buying works, the plans, the states and the tax rate.
+router.get("/checkout/options", checkoutReadLimiter, (req, res) => {
+  res.set("Cache-Control", "public, max-age=60");
+  res.json({ status: "success", ...websiteCheckoutOptions() });
+});
+// The exact price, with the tax split, for a plan, billing period and the buyer's state.
+router.post("/checkout/quote", checkoutReadLimiter, route(async (req, res) => {
+  res.json({ status: "success", quote: websiteQuote({ plan: req.body?.plan, interval: req.body?.interval, stateCode: req.body?.stateCode }) });
+}));
+router.post(
+  "/checkout/order",
+  checkoutOrderCeiling,
+  checkoutOrderLimiter,
+  route(async (req, res) => {
+    // Hidden field only bots fill in.
+    if (req.body?.website) throw fail(400, "We could not start the payment. Please try again.");
+    const visitor = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.ip;
+    res.status(201).json({ status: "success", ...(await createWebsiteOrder({ body: req.body, ip: visitor })) });
+  }),
+);
+router.post(
+  "/checkout/verify",
+  checkoutOrderLimiter,
+  route(async (req, res) => {
+    res.json({ status: "success", ...(await verifyWebsiteCheckout({ body: req.body, io: req.app.get("io") })) });
+  }),
+);
+router.get(
+  "/checkout/status",
+  checkoutReadLimiter,
+  route(async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    res.json({ status: "success", ...(await websiteCheckoutStatus({ orderRef: req.query.order, token: req.query.token })) });
+  }),
+);
 
 router.post(
   "/contact",

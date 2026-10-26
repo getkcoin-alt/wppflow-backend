@@ -41,53 +41,42 @@ async function issueOwnerSetupLink(c, { tenantId, email, name }) {
   return `${ENV.APP_URL}/?invite=${token}`;
 }
 
-export async function createCompany({
-  actorId,
-  companyName,
-  ownerName,
-  ownerEmail,
-  sessionsLimit,
-  plan,
-}) {
+// Creates the company, its owner (who gets an unusable password until the setup link is followed) and the link, inside
+// a transaction the caller already has open. The caller sends the email after committing.
+export async function createCompanyIn(c, { actorId, companyName, ownerName, ownerEmail, sessionsLimit, plan }) {
+  const tenantId = `tenant_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+  const slug = `${companyName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "company"}-${Date.now().toString(36)}`;
+  // Brand-new owners get an unusable random password until they follow the link.
+  const placeholderHash = await hashPassword(crypto.randomBytes(32).toString("hex"));
+  const t = await c.query(
+    "INSERT INTO tenants(id,name,slug,plan,sessions_limit) VALUES($1,$2,$3,$4,$5) RETURNING *",
+    [tenantId, companyName, slug, plan || "Workspace", sessionsLimit],
+  );
+  let ownerId = (await c.query("SELECT id FROM users WHERE email=$1 FOR UPDATE", [ownerEmail])).rows[0]?.id;
+  if (!ownerId)
+    ownerId = (
+      await c.query(
+        "INSERT INTO users(email,password_hash,name,status,must_change_password) VALUES($1,$2,$3,'active',true) RETURNING id",
+        [ownerEmail, placeholderHash, ownerName],
+      )
+    ).rows[0].id;
+  await c.query("INSERT INTO memberships(tenant_id,user_id,role) VALUES($1,$2,'owner')", [tenantId, ownerId]);
+  await c.query("INSERT INTO audit_events(tenant_id,actor_id,event_type,metadata) VALUES($1,$2,'company.created',$3)", [
+    tenantId,
+    actorId,
+    JSON.stringify({ companyName, ownerEmail }),
+  ]);
+  const link = await issueOwnerSetupLink(c, { tenantId, email: ownerEmail, name: ownerName });
+  return { tenant: { ...t.rows[0], owner_id: ownerId }, link };
+}
+
+export async function createCompany({ actorId, companyName, ownerName, ownerEmail, sessionsLimit, plan }) {
   if (!mailEnabled())
     throw fail(
       503,
       "Email delivery is not configured (RESEND_API_KEY), so the owner's setup link cannot be sent. Nothing was created.",
     );
-  const tenantId = `tenant_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
-  const slug = `${companyName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "company"}-${Date.now().toString(36)}`;
-  // Brand-new owners get an unusable random password until they follow the link.
-  const placeholderHash = await hashPassword(crypto.randomBytes(32).toString("hex"));
-  const { tenant, link } = await withTransaction(async (c) => {
-    const t = await c.query(
-      "INSERT INTO tenants(id,name,slug,plan,sessions_limit) VALUES($1,$2,$3,$4,$5) RETURNING *",
-      [tenantId, companyName, slug, plan || "Workspace", sessionsLimit],
-    );
-    let ownerId = (
-      await c.query("SELECT id FROM users WHERE email=$1 FOR UPDATE", [ownerEmail])
-    ).rows[0]?.id;
-    if (!ownerId)
-      ownerId = (
-        await c.query(
-          "INSERT INTO users(email,password_hash,name,status,must_change_password) VALUES($1,$2,$3,'active',true) RETURNING id",
-          [ownerEmail, placeholderHash, ownerName],
-        )
-      ).rows[0].id;
-    await c.query(
-      "INSERT INTO memberships(tenant_id,user_id,role) VALUES($1,$2,'owner')",
-      [tenantId, ownerId],
-    );
-    await c.query(
-      "INSERT INTO audit_events(tenant_id,actor_id,event_type,metadata) VALUES($1,$2,'company.created',$3)",
-      [tenantId, actorId, JSON.stringify({ companyName, ownerEmail })],
-    );
-    const link = await issueOwnerSetupLink(c, {
-      tenantId,
-      email: ownerEmail,
-      name: ownerName,
-    });
-    return { tenant: { ...t.rows[0], owner_id: ownerId }, link };
-  });
+  const { tenant, link } = await withTransaction((c) => createCompanyIn(c, { actorId, companyName, ownerName, ownerEmail, sessionsLimit, plan }));
   const mail = await sendOwnerSetup({
     to: ownerEmail,
     name: ownerName,

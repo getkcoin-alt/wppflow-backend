@@ -1,5 +1,5 @@
 import { query } from "../db/index.js";
-import { FEATURE_LABELS, planCatalogue, isLapsed } from "./plans.js";
+import { FEATURE_LABELS, planCatalogue, planOf, isLapsed } from "./plans.js";
 import { tell } from "./subscriptionService.js";
 
 // When the platform admin switches a module on or off for a plan, every company on that plan has to find out:
@@ -59,8 +59,9 @@ export function noticeFor({ planName, added, removed }) {
 // The companies this change reaches: active, on this plan, and not switched back to Free by a late payment (their
 // access did not change, so there is nothing to tell them).
 export async function companiesOnPlan(planId) {
-  const { rows } = await query("SELECT * FROM tenants WHERE status='active' AND lower(plan)=$1", [planId]);
-  return rows.filter((t) => !isLapsed(t));
+  const { rows } = await query("SELECT * FROM tenants WHERE status='active'");
+  // a company holds its plan's name, which may be an older name of the plan: ask which plan that is
+  return rows.filter((t) => planOf(t.plan).id === planId && !isLapsed(t));
 }
 
 // Tells the companies on a plan that its modules changed. A failure for one company never stops the others, and

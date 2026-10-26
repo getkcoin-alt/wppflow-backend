@@ -51,3 +51,36 @@ export const contactFormCeiling = rateLimit({
   validate: false,
   message: { status: 'error', message: 'We are receiving a lot of messages right now. Please try again shortly.' }
 });
+
+// Buying from the website. An order is only made for a buyer who is about to pay, so a few attempts per visitor are
+// plenty; reading the price and the status is cheaper and allowed more often. The global ceiling stops a flood from
+// filling the orders table with unpaid rows.
+export const checkoutOrderLimiter = rateLimit({
+  windowMs: 30 * 60 * 1000,
+  max: 12,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: visitorOf,
+  validate: false,
+  message: { status: 'error', message: 'You have tried several times. Please wait a few minutes and try again, or message the Scriwo team.' }
+});
+
+export const checkoutReadLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 150,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: visitorOf,
+  validate: false,
+  message: { status: 'error', message: 'Too many requests. Please wait a moment.' }
+});
+
+export const checkoutOrderCeiling = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: () => 'all',
+  validate: false,
+  message: { status: 'error', message: 'We are very busy right now. Please try again shortly.' }
+});

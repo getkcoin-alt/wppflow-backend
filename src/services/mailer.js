@@ -90,6 +90,20 @@ export const sendOwnerSetup = ({ to, name, company, link }) =>
       note: `The link works once and expires in 72 hours. Your login email is ${esc(to)}.`,
     }),
   });
+// After paying on the website: what was bought, what was paid, and where to sign in. The setup link comes in its own email.
+export const sendPurchaseReceipt = ({ to, name, company, plan, period, total, invoice }) =>
+  sendMail({
+    to,
+    subject: `Your Scriwo receipt: ${plan} plan`,
+    text: `Hello ${name},\n\nThank you. We received ${total} for the ${plan} plan for "${company}", which runs ${period}.\n\nYour tax invoice ${invoice} is in the app under Team, Plans & Billing once you sign in.\n\nA separate email has the link to choose your password. If it does not arrive, open ${ENV.APP_URL} and use "Forgot password" with ${to}.`,
+    html: layout({
+      heading: "Thank you for your purchase",
+      intro: `Hello ${esc(name)}, we received <b>${esc(total)}</b> for the <b>${esc(plan)}</b> plan for <b>${esc(company)}</b>. It runs ${esc(period)}.`,
+      cta: "Open Scriwo",
+      link: ENV.APP_URL,
+      note: `Your tax invoice ${esc(invoice)} is under Team, Plans & Billing. A separate email has the link to choose your password; if it does not arrive, use Forgot password with ${esc(to)}.`,
+    }),
+  });
 export const sendStaffInvite = ({ to, name, company, link }) =>
   sendMail({
     to,

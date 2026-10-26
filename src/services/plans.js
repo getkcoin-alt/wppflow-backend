@@ -84,9 +84,12 @@ export function keepPlansFresh(everyMs = 60000) {
 const sorted = (all = false) => [...plans.values()].filter((p) => all || p.isActive).sort((a, b) => a.sortOrder - b.sortOrder);
 const planShape = (p) => ({ id: p.code, name: p.name, features: p.features, seats: p.seats, numbers: p.numbers, maxContacts: p.maxContacts ?? null, maxBroadcasts: p.maxBroadcasts ?? null, restricted: true });
 
+// A company keeps the plan it pays for by name ("Growth"), and the platform admin may rename a plan, so a plan is found by
+// its code or by its name as it stands now. A name that was never a code or a current name is the original "Workspace" plan.
+const findPlan = (id) => plans.get(id) || [...plans.values()].find((p) => p.name.trim().toLowerCase() === id);
 export function planOf(value) {
   const id = String(value || "").trim().toLowerCase();
-  const found = plans.get(id);
+  const found = findPlan(id);
   if (found) return planShape(found);
   return {
     id: null,
@@ -143,9 +146,8 @@ export function priceOf(code, interval, currency) {
 // Validates a plan chosen by the platform admin and returns it. Only plans for sale can be chosen: the original
 // "Workspace" plan is kept for companies that already have it, but nobody new is put on it.
 export function choosePlan(value) {
-  const id = String(value || "").trim().toLowerCase();
   const plan = planOf(value);
-  if (!plan.id || !plans.get(id)?.isActive)
+  if (!plan.id || !plans.get(plan.id)?.isActive)
     throw fail(400, `Choose a plan: ${sorted().map((p) => p.name).join(", ")}`);
   return plan;
 }
@@ -207,6 +209,9 @@ export async function updatePlan(code, patch, actorId) {
   if (patch.name !== undefined) {
     const name = String(patch.name).trim();
     if (!name || name.length > 60) throw fail(400, "A plan needs a name of up to 60 characters");
+    // two plans with one name, or a name that is another plan's code, would make a company's plan ambiguous
+    const clash = [...plans.values()].find((p) => p.code !== id && (p.name.trim().toLowerCase() === name.toLowerCase() || p.code === name.toLowerCase()));
+    if (clash) throw fail(400, `Another plan is already called ${clash.name}. Choose a different name.`);
     next.name = name;
   }
   if (patch.numbers !== undefined) next.numbers = whole(patch.numbers, "WhatsApp numbers", { min: 1, max: 500, nullable: true });
