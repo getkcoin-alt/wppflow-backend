@@ -75,6 +75,7 @@ test("Billing settings: the service code, the rate, the seller and the invoice p
     assert.equal(s.prorateUpgrades, true);
     assert.match(s.nextInvoiceExample, /^SCZ\/\d{2}-\d{2}\/00001$/);
     assert.equal(s.invoiceNumberLimit, 16);
+    assert.equal((await request(app).get("/api/public/plans")).body.gstRate, 18, "the price list says which rate it is quoted at");
   });
 
   await t.test("what is wrong with a change is said, and nothing is saved", async () => {
@@ -126,6 +127,7 @@ test("Billing settings: the service code, the rate, the seller and the invoice p
     assert.equal(saved.body.settings.seller.state, "Maharashtra");
     assert.equal(saved.body.settings.invoicePrefix, "SZ", "capitals");
     assert.equal(billingSettings().gstRate, 12, "in force at once");
+    assert.equal((await request(app).get("/api/public/plans")).body.gstRate, 12, "and on the public price list");
 
     // a restart reads the same thing back
     await loadBillingSettings();

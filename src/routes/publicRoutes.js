@@ -6,6 +6,7 @@ import { route, fail, text } from "../middleware/http.js";
 import { contactFormLimiter, contactFormCeiling } from "../middleware/rateLimiter.js";
 import { sendLeadNotification } from "../services/mailer.js";
 import { publicPlans } from "../services/plans.js";
+import { billingSettings } from "../services/billingSettings.js";
 
 // Endpoints the public website calls without signing in.
 const router = express.Router();
@@ -20,9 +21,10 @@ const optional = (value, name, max) => {
 };
 
 // The plans for sale and their prices, as the server holds them: the website and the app read the same numbers.
+// The GST rate comes with them so a price list never says "18%" after the rate has been changed.
 router.get("/plans", (req, res) => {
   res.set("Cache-Control", "public, max-age=60");
-  res.json({ status: "success", plans: publicPlans() });
+  res.json({ status: "success", plans: publicPlans(), gstRate: billingSettings().gstRate });
 });
 
 router.post(
