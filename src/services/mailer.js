@@ -95,13 +95,40 @@ export const sendPurchaseReceipt = ({ to, name, company, plan, period, total, in
   sendMail({
     to,
     subject: `Your Scriwo receipt: ${plan} plan`,
-    text: `Hello ${name},\n\nThank you. We received ${total} for the ${plan} plan for "${company}", which runs ${period}.\n\nYour tax invoice ${invoice} is in the app under Team, Plans & Billing once you sign in.\n\nA separate email has the link to choose your password. If it does not arrive, open ${ENV.APP_URL} and use "Forgot password" with ${to}.`,
+    text: `Hello ${name},\n\nThank you. We received ${total} for the ${plan} plan for "${company}", which runs ${period}.\n\nYour tax invoice ${invoice} is in the app under Team, Plans & Billing once you sign in.\n\nA separate email has the link to choose your password. If it does not arrive, open ${ENV.APP_URL}, choose "Forgot password?" on the sign-in page and enter ${to}; we will email a new link.`,
     html: layout({
       heading: "Thank you for your purchase",
       intro: `Hello ${esc(name)}, we received <b>${esc(total)}</b> for the <b>${esc(plan)}</b> plan for <b>${esc(company)}</b>. It runs ${esc(period)}.`,
       cta: "Open Scriwo",
       link: ENV.APP_URL,
-      note: `Your tax invoice ${esc(invoice)} is under Team, Plans & Billing. A separate email has the link to choose your password; if it does not arrive, use Forgot password with ${esc(to)}.`,
+      note: `Your tax invoice ${esc(invoice)} is under Team, Plans & Billing. A separate email has the link to choose your password; if it does not arrive, choose Forgot password? on the sign-in page and enter ${esc(to)}.`,
+    }),
+  });
+export const sendPasswordReset = ({ to, name, link }) =>
+  sendMail({
+    to,
+    subject: "Reset your Scriwo password",
+    text: `Hello ${name},\n\nWe received a request to reset the password for ${to}. Choose a new password here (single use, expires in 1 hour):\n${link}\n\nIf you did not ask for this, you can ignore this email; your password stays as it is.`,
+    html: layout({
+      heading: "Reset your password",
+      intro: `Hello ${esc(name)}, we received a request to reset the password for <b>${esc(to)}</b>. Choose a new password to sign in again.`,
+      cta: "Choose a new password",
+      link,
+      note: "The link works once and expires in 1 hour. If you did not ask for this, ignore this email; your password stays as it is.",
+    }),
+  });
+// Sent after a reset so that a reset nobody at the company asked for is noticed.
+export const sendPasswordChanged = ({ to, name }) =>
+  sendMail({
+    to,
+    subject: "Your Scriwo password was changed",
+    text: `Hello ${name},\n\nThe password for ${to} was just changed using a reset link, and every signed-in device was signed out.\n\nIf this was you, no action is needed. If it was not, reset your password again from ${ENV.APP_URL} and tell us at once.`,
+    html: layout({
+      heading: "Your password was changed",
+      intro: `Hello ${esc(name)}, the password for <b>${esc(to)}</b> was just changed using a reset link, and every signed-in device was signed out.`,
+      cta: "Open Scriwo",
+      link: ENV.APP_URL,
+      note: "If this was you, no action is needed. If it was not, reset your password again from the sign-in page and tell us at once.",
     }),
   });
 export const sendStaffInvite = ({ to, name, company, link }) =>

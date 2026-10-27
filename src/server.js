@@ -255,7 +255,7 @@ export async function startServer() {
     if (ENV.AUTO_MIGRATE) await runMigrations();
     else {
       const { rows } = await query(
-        "SELECT 1 FROM schema_migrations WHERE version='028_website_checkout'",
+        "SELECT 1 FROM schema_migrations WHERE version='029_password_resets'",
       );
       if (!rows.length)
         throw new Error(

@@ -22,6 +22,11 @@ import { route, fail, text } from "../middleware/http.js";
 import { sendWelcomeEmail } from "../services/emailService.js";
 import { sendStaffInvite } from "../services/mailer.js";
 import {
+  requestPasswordReset,
+  resetInfo,
+  resetPassword,
+} from "../services/passwordReset.js";
+import {
   categoryOf,
   roleOf,
   hashToken,
@@ -405,6 +410,44 @@ router.delete(
       [req.tenantId, req.user.id, JSON.stringify({ email: inv.email })],
     );
     res.json({ status: "success" });
+  }),
+);
+// Forgot password. The answer never says whether the address has an account.
+router.post(
+  "/forgot-password",
+  authRateLimiter,
+  route(async (req, res) => {
+    const email = emailOf(req.body.email);
+    // answered first and worked on after, so a slow mail server or a missing account cannot be told apart by timing
+    res.json({
+      status: "success",
+      message:
+        "If that address has an account, we have emailed a link to choose a new password. It works for one hour.",
+    });
+    await requestPasswordReset(email).catch((err) =>
+      console.error("Password reset request failed:", err.message),
+    );
+  }),
+);
+router.get(
+  "/reset-info",
+  authRateLimiter,
+  route(async (req, res) => {
+    const token = text(String(req.query.token || ""), "Reset link", 128);
+    res.json({ status: "success", ...(await resetInfo(token)) });
+  }),
+);
+router.post(
+  "/reset-password",
+  authRateLimiter,
+  route(async (req, res) => {
+    const token = text(req.body.token, "Reset link", 128),
+      password = text(req.body.password, "Password", 128);
+    await resetPassword(token, password);
+    res.json({
+      status: "success",
+      message: "Password changed. Sign in with your new password.",
+    });
   }),
 );
 router.get(
