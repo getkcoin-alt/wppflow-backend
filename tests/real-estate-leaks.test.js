@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { io } from "../src/server.js";
 import { query } from "../src/db/index.js";
 import { closeSessions } from "../src/services/sessionService.js";
-import { pumpRealEstate, scanTenant, detect, KINDS } from "../src/solutions/real-estate/leaks.js";
+import { pumpRealEstate, scanTenant, detect, reconcile, notifyNew, KINDS } from "../src/solutions/real-estate/leaks.js";
 import { setSolution } from "../src/solutions/entitlements.js";
 import { company, property } from "./helpers/realEstate.js";
 
@@ -204,8 +204,17 @@ test("Real estate: the Revenue Leak Detector", async (t) => {
     await backdate(x.id, 3 * HOUR);
     const runs = await Promise.all([scan(), scan(), scan()]);
     assert.equal(runs.reduce((n, r) => n + r.opened, 0), 1, "one alert");
-    const told = (await query("SELECT count(*)::int AS n FROM notifications WHERE tenant_id=$1 AND title LIKE '%Zara Race%' AND user_id=$2", [A.tenantId, A.owner.id])).rows[0].n;
-    assert.equal(told, 1, "and one notice");
+    const count = async () => (await query("SELECT count(*)::int AS n FROM notifications WHERE tenant_id=$1 AND title LIKE '%Zara Race%' AND user_id=$2", [A.tenantId, A.owner.id])).rows[0].n;
+    assert.equal(await count(), 1, "and one notice");
+  });
+
+  await t.test("even when several servers reach the notice step together, each alert is announced once", async () => {
+    const x = await make("Yusuf Race", "971500007002", { owner: null });
+    await backdate(x.id, 3 * HOUR);
+    await reconcile(A.tenantId, await detect(A.tenantId, new Date()), new Date());
+    const told = await Promise.all([notifyNew(A.tenantId), notifyNew(A.tenantId), notifyNew(A.tenantId), notifyNew(A.tenantId)]);
+    assert.equal(told.reduce((n, v) => n + v, 0), 1);
+    assert.equal((await query("SELECT count(*)::int AS n FROM notifications WHERE tenant_id=$1 AND title LIKE '%Yusuf Race%' AND user_id=$2", [A.tenantId, A.owner.id])).rows[0].n, 1);
   });
 
   await t.test("a long list is one notice, not a flood", async () => {
@@ -239,7 +248,7 @@ test("Real estate: the Revenue Leak Detector", async (t) => {
     assert.equal(o.values.atRisk.amount, [...risk.values()].reduce((s, v) => s + v, 0), "a lead with two alerts counts once");
     assert.equal(o.values.atRisk.leads, risk.size);
     assert.equal(o.alerts.open, (await alerts()).length);
-    assert.equal(o.alerts.byKind.unassigned_lead, 13);
+    assert.equal(o.alerts.byKind.unassigned_lead, 14);
     assert.deepEqual(Object.keys(o.alerts.byKind), KINDS);
     assert.equal(o.funnel.won, 1);
     assert.ok(o.funnel.enquiries >= 20);
