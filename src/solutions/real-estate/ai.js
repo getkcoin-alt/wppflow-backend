@@ -4,7 +4,7 @@ import { askAboutConversation } from "../../services/aiService.js";
 import { assertConversationAccess } from "../../services/access.js";
 import { findLead } from "../../services/leadService.js";
 import { normalizeText, amountsIn, money } from "./text.js";
-import { FIELDS, validateProfile, missingForQualified, profileView, BLANK_PROFILE } from "./profile.js";
+import { FIELDS, INTENT_OF, validateProfile, missingForQualified, profileView, BLANK_PROFILE } from "./profile.js";
 import { matchesForLead, listingLine } from "./properties.js";
 
 // Riwo for real estate. It reads a chat and proposes; a person decides. Nothing here saves, sends or books anything, and
@@ -87,7 +87,8 @@ export function validateExtraction(raw, lines, current = null) {
       if (!kept.length) continue;
       clean = kept;
     } else if (key === "currency") {
-      if (!(CURRENCY_WORDS[clean] || []).some((w) => q.includes(normalizeText(w)) || quote.includes(w))) {
+      // a currency is named by a word or by a symbol; the symbols have no letters, so they are looked for as written
+      if (!(CURRENCY_WORDS[clean] || []).some((w) => (normalizeText(w) && has(q, w)) || quote.includes(w))) {
         reject(key, "The quote doesn't mention that currency");
         continue;
       }
@@ -103,6 +104,7 @@ export function validateExtraction(raw, lines, current = null) {
     conflict = e.message;
   }
   const merged = { ...BLANK_PROFILE, ...(current || {}), ...(conflict ? {} : accepted) };
+  if (merged.leadType && !merged.intent) merged.intent = INTENT_OF[merged.leadType];
   const changes = Object.keys(accepted).filter((k) => JSON.stringify(current ? current[k] : BLANK_PROFILE[k]) !== JSON.stringify(accepted[k]));
   const notes = (Array.isArray(raw?.uncertain) ? raw.uncertain : []).map((n) => String(n?.note ?? n ?? "").trim().slice(0, 200)).filter(Boolean).slice(0, 8);
   return {
@@ -160,12 +162,13 @@ export function composeDraft(text, allowed) {
   });
   const bare = body.replace(MARKER, " ");
   if (!bad && /https?:\/\/|www\./i.test(bare)) bad = "It included a web address of its own.";
-  if (!bad && (bare.match(/\d[\d,.\s]*\d|\d/g) || []).some((n) => n.replace(/\D/g, "").length >= 4)) bad = "It stated a price or figure of its own.";
+  // "1,350,000", "1.350.000", "1 350 000" and "1400000" are prices; "12" and "24 hours" are not
+  if (!bad && (bare.match(/\d{1,3}(?:[ \u00a0,.]\d{3})+|\d[\d,.]*\d|\d/g) || []).some((n) => n.replace(/\D/g, "").length >= 4)) bad = "It stated a price or figure of its own.";
   if (!bad && !used.size) bad = "It didn't offer any of the approved listings.";
   if (bad) return { ok: false, reason: bad };
   const filled = body.replace(MARKER, (_, ref) => {
     const a = refs.get(ref.trim());
-    return `${a.reference} (${a.summary})${a.listingUrl ? `\n${a.listingUrl}\n` : ""}`;
+    return `${a.reference} (${a.summary})${a.listingUrl ? ` ${a.listingUrl}` : ""}`;
   });
   return { ok: true, text: filled.replace(/\n{3,}/g, "\n\n").trim(), references: [...used] };
 }

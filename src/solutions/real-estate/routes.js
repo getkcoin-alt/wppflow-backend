@@ -68,7 +68,11 @@ router.get("/leads/:id/profile", route(async (req, res) => {
   const { profile, missing, lead } = await getProfile(req, req.params.id);
   res.json({ status: "success", profile, missing, lead: leadView(lead) });
 }));
-router.put("/leads/:id/profile", route(async (req, res) => res.json({ status: "success", ...(await saveProfile(req, req.params.id, req.body || {}, { assisted: req.body?.assisted === true && Object.keys(req.body).length > 1 })) })));
+// `assisted: true` says the details came from a Riwo proposal that a person reviewed; it is written to the lead's history.
+router.put("/leads/:id/profile", route(async (req, res) => {
+  const { assisted, ...fields } = req.body || {};
+  res.json({ status: "success", ...(await saveProfile(req, req.params.id, fields, { assisted: assisted === true })) });
+}));
 router.get("/leads/:id/matches", route(async (req, res) => res.json({ status: "success", ...(await matchesForLead(req, req.params.id)) })));
 router.get("/leads/:id/next-actions", route(async (req, res) => res.json({ status: "success", actions: await nextActions(req, req.params.id) })));
 router.get(

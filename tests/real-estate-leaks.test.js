@@ -39,7 +39,7 @@ test("Real estate: the Revenue Leak Detector", async (t) => {
 
   const L = {};
   L.unassigned = await make("Una Unassigned", "971500001001", { owner: null, value: 900_000 });
-  await backdate(L.unassigned.id, 2 * HOUR);
+  await backdate(L.unassigned.id, 6 * HOUR);
   L.overdue = await make("Omar Overdue", "971500001002", { value: 1_200_000 });
   await task(L.overdue.id, -3 * HOUR, "Send the brochure");
   L.noPlan = await make("Nora NoPlan", "971500001003", { value: 700_000 });
@@ -72,7 +72,7 @@ test("Real estate: the Revenue Leak Detector", async (t) => {
     assert.deepEqual(byLead(open, L.tina.id), ["missing_next_action"]);
     assert.deepEqual(open.filter((x) => x.kind === "failed_automation").map((x) => x.title), ["Automation “Welcome reply” is failing"]);
     const why = (id) => open.find((x) => x.leadId === id).reason;
-    assert.match(why(L.unassigned.id), /Nobody is responsible for this lead, and it came in 2 hours ago\. The target is 15 minutes\./);
+    assert.match(why(L.unassigned.id), /Nobody is responsible for this lead, and it came in 6 hours ago\. The target is 15 minutes\./);
     assert.match(why(L.overdue.id), /“Send the brochure” was due 3 hours ago\./);
     assert.match(why(L.noPlan.id), /no follow-up and no viewing planned, and has been like that for 6 hours/);
     assert.match(why(L.stalled.id), /Nothing has happened on this lead for 10 days and nothing is planned\. The limit is 7 days\./);
@@ -132,17 +132,24 @@ test("Real estate: the Revenue Leak Detector", async (t) => {
     assert.equal((await alerts("open", B)).length, 0);
   });
 
-  await t.test("fixing the cause closes the alert by itself; a different cause opens a different alert", async () => {
-    await a().post("/alerts/scan");
+  await t.test("fixing the cause closes the alert by itself; what was hidden behind it then shows", async () => {
     await A.core(A.owner).patch(`/${L.unassigned.id}`, { ownerUserId: A.sam.id });
     const stats = await scan();
     assert.equal(stats.closed, 1);
+    assert.equal(stats.opened, 0, "the assignment itself counts as activity: the new owner gets their own four hours");
     const closed = await alerts("resolved");
     assert.equal(closed.length, 1);
     assert.equal(closed[0].resolution, "auto");
+    assert.equal(closed[0].kind, "unassigned_lead");
     assert.equal(closed[0].leadId, L.unassigned.id);
     assert.ok(closed[0].resolvedAt);
-    assert.deepEqual(byLead(await alerts(), L.unassigned.id), [], "it is owned now, and only two hours old");
+    assert.deepEqual(byLead(await alerts(), L.unassigned.id), []);
+    await backdate(L.unassigned.id, 6 * HOUR);
+    await scan();
+    assert.deepEqual(byLead(await alerts(), L.unassigned.id), ["missing_next_action"], "owned for hours with nothing planned: the next cause shows");
+    await task(L.unassigned.id, 2 * DAY, "Call Una");
+    await scan();
+    assert.deepEqual(byLead(await alerts(), L.unassigned.id), [], "with a follow-up it is fine");
     await task(L.overdue.id, -3 * HOUR + 1, "second");
     await query("UPDATE lead_tasks SET done_at=now() WHERE lead_id=$1", [L.overdue.id]);
     await scan();
@@ -192,6 +199,15 @@ test("Real estate: the Revenue Leak Detector", async (t) => {
     assert.equal((await alerts("resolved")).find((x) => x.id === mine.id).resolution, "fixed");
   });
 
+  await t.test("two scans at the same moment tell people once", async () => {
+    const x = await make("Zara Race", "971500007001", { owner: null });
+    await backdate(x.id, 3 * HOUR);
+    const runs = await Promise.all([scan(), scan(), scan()]);
+    assert.equal(runs.reduce((n, r) => n + r.opened, 0), 1, "one alert");
+    const told = (await query("SELECT count(*)::int AS n FROM notifications WHERE tenant_id=$1 AND title LIKE '%Zara Race%' AND user_id=$2", [A.tenantId, A.owner.id])).rows[0].n;
+    assert.equal(told, 1, "and one notice");
+  });
+
   await t.test("a long list is one notice, not a flood", async () => {
     for (let i = 0; i < 12; i++) {
       const l = await make(`Flood ${i}`, `9715000030${String(i).padStart(2, "0")}`, { owner: null });
@@ -223,7 +239,7 @@ test("Real estate: the Revenue Leak Detector", async (t) => {
     assert.equal(o.values.atRisk.amount, [...risk.values()].reduce((s, v) => s + v, 0), "a lead with two alerts counts once");
     assert.equal(o.values.atRisk.leads, risk.size);
     assert.equal(o.alerts.open, (await alerts()).length);
-    assert.equal(o.alerts.byKind.unassigned_lead, 12);
+    assert.equal(o.alerts.byKind.unassigned_lead, 13);
     assert.deepEqual(Object.keys(o.alerts.byKind), KINDS);
     assert.equal(o.funnel.won, 1);
     assert.ok(o.funnel.enquiries >= 20);
