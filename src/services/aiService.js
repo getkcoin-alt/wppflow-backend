@@ -397,6 +397,26 @@ Follow up in: a whole number of days from 1 to 14`,
   return { ...parseLeadSuggestion(text), model };
 }
 
+// For features that other modules build on Riwo (the industry solutions): one request about one chat, under the company's
+// daily allowance and with the same ground rules as every other Riwo feature. `task` says what to produce; `data` is
+// anything the module wants the model to rely on (and nothing else). The answer is text for the module to check.
+export async function askAboutConversation({ tenant, conversationId, task, data = "", maxTokens = 4096 }) {
+  assertAvailable(tenant);
+  const context = await conversationContext(tenant, conversationId);
+  if (!hasCustomerMessage(context)) throw fail(422, "There's nothing from the customer in this chat yet.");
+  const user = [
+    `Customer name: ${context.contact}`,
+    context.notes.length ? `<internal_notes>\n${context.notes.map((n) => `- ${n}`).join("\n")}\n</internal_notes>` : "",
+    `<conversation>\n${context.lines.join("\n")}\n</conversation>`,
+    data,
+    task,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  const { text, model } = await run(tenant, { system: systemFor(tenant.name), user, maxTokens });
+  return { text, model, lines: context.lines, contact: context.contact };
+}
+
 export async function improveText({ tenant, text, style = "polish" }) {
   const draft = cleanText(text, "Your message");
   const instruction = STYLES[style] || STYLES.polish;

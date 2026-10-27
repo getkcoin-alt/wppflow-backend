@@ -26,6 +26,7 @@ import assignmentRoutes from "./routes/assignmentRoutes.js";
 import automationRoutes from "./routes/automationRoutes.js";
 import leadRoutes from "./routes/leadRoutes.js";
 import solutionRoutes from "./routes/solutionRoutes.js";
+import realEstateRoutes from "./solutions/real-estate/routes.js";
 import healthRoutes from "./routes/healthRoutes.js";
 import workspaceRoutes from "./routes/workspaceRoutes.js";
 import mediaRoutes from "./routes/mediaRoutes.js";
@@ -222,6 +223,8 @@ app.use("/api/reports", reportRoutes);
 app.use("/api/automations", automationRoutes);
 app.use("/api/assignment", assignmentRoutes);
 app.use("/api/leads", leadRoutes);
+// A solution's own routes come first, so they authenticate once; the generic solution routes handle the rest.
+app.use("/api/solutions/real_estate", realEstateRoutes);
 app.use("/api/solutions", solutionRoutes);
 app.use("/api/workspace", workspaceRoutes);
 app.use("/api/attachments", mediaRoutes);
@@ -257,7 +260,7 @@ export async function startServer() {
     if (ENV.AUTO_MIGRATE) await runMigrations();
     else {
       const { rows } = await query(
-        "SELECT 1 FROM schema_migrations WHERE version='030_industry_solutions'",
+        "SELECT 1 FROM schema_migrations WHERE version='031_real_estate'",
       );
       if (!rows.length)
         throw new Error(
