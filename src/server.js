@@ -25,6 +25,7 @@ import { relayCompose } from "./services/realtime.js";
 import assignmentRoutes from "./routes/assignmentRoutes.js";
 import automationRoutes from "./routes/automationRoutes.js";
 import leadRoutes from "./routes/leadRoutes.js";
+import solutionRoutes from "./routes/solutionRoutes.js";
 import healthRoutes from "./routes/healthRoutes.js";
 import workspaceRoutes from "./routes/workspaceRoutes.js";
 import mediaRoutes from "./routes/mediaRoutes.js";
@@ -221,6 +222,7 @@ app.use("/api/reports", reportRoutes);
 app.use("/api/automations", automationRoutes);
 app.use("/api/assignment", assignmentRoutes);
 app.use("/api/leads", leadRoutes);
+app.use("/api/solutions", solutionRoutes);
 app.use("/api/workspace", workspaceRoutes);
 app.use("/api/attachments", mediaRoutes);
 app.use("/api/ai", aiRoutes);
@@ -255,7 +257,7 @@ export async function startServer() {
     if (ENV.AUTO_MIGRATE) await runMigrations();
     else {
       const { rows } = await query(
-        "SELECT 1 FROM schema_migrations WHERE version='029_password_resets'",
+        "SELECT 1 FROM schema_migrations WHERE version='030_industry_solutions'",
       );
       if (!rows.length)
         throw new Error(

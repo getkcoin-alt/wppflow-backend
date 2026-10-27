@@ -16,6 +16,7 @@ import {
   finishUploadCheck,
 } from "../services/mediaService.js";
 import { requireFeature, planView } from "../services/plans.js";
+import { activeSolutions } from "../solutions/entitlements.js";
 import { aiStatus } from "../services/aiService.js";
 import { isManager } from "../services/access.js";
 import { subscriptionView } from "../services/subscriptionService.js";
@@ -39,6 +40,8 @@ router.get(
       store: false,
       queue: queueHealth().connected,
       plan: planView(req.tenant),
+      // The industry solutions this company has been given (none, unless the platform admin switched one on)
+      solutions: await activeSolutions(req.tenantId),
       numbersLimit: req.tenant?.sessionsLimit ?? null,
       ai: await aiStatus(req.tenant),
       // How fast a reply should come, and the teams people are in: the inbox shows who has waited too long

@@ -5,6 +5,8 @@ import { route, fail, text } from "../middleware/http.js";
 import { createCompany, resendOwnerSetupLink } from "../services/adminService.js";
 import { choosePlan, planCatalogue, planOf, updatePlan, planChanges } from "../services/plans.js";
 import { announceFeatureChange } from "../services/planNotices.js";
+import { SOLUTIONS } from "../solutions/registry.js";
+import { setSolution, solutionsFor, solutionKeysByTenant } from "../solutions/entitlements.js";
 import { view as billingSettingsView, saveBillingSettings, settingsHistory } from "../services/billingSettings.js";
 import { dailyLimitOf, defaultDailyLimit } from "../services/aiService.js";
 import { subscriptionView, recordPayment, scheduleChange, clearScheduledChange, paymentsOf } from "../services/subscriptionService.js";
@@ -107,7 +109,26 @@ router.get(
   "/companies",
   route(async (req, res) => {
     const { rows } = await query(`${COMPANY_SQL} ORDER BY t.created_at DESC`);
-    res.json({ status: "success", companies: rows.map(companyView) });
+    const solutions = await solutionKeysByTenant();
+    res.json({ status: "success", companies: rows.map((r) => ({ ...companyView(r), solutions: solutions[r.id] || [] })) });
+  }),
+);
+// Industry solutions: what exists, and what one company has. Switching one on or off tells the company and is audited.
+router.get("/solutions", (req, res) =>
+  res.json({ status: "success", solutions: Object.values(SOLUTIONS).map((s) => ({ key: s.key, name: s.name, version: s.version, summary: s.summary, requires: s.requires })) }),
+);
+router.get(
+  "/companies/:id/solutions",
+  route(async (req, res) => {
+    if (!(await query("SELECT 1 FROM tenants WHERE id=$1", [req.params.id])).rowCount) throw fail(404, "Company not found");
+    res.json({ status: "success", solutions: await solutionsFor(req.params.id) });
+  }),
+);
+router.put(
+  "/companies/:id/solutions/:key",
+  route(async (req, res) => {
+    const result = await setSolution({ tenantId: req.params.id, key: req.params.key, enabled: req.body?.enabled, actor: req.user, io: req.app.get("io") });
+    res.json({ status: "success", changed: result.changed, solutions: await solutionsFor(req.params.id) });
   }),
 );
 router.post(
