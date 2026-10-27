@@ -3,7 +3,8 @@
 // where the words are common, and can be changed.
 //
 // `needs` lists what must be filled in before the rule can be saved: "reply" (the text to send), "teammate"
-// (who gets the chat) and "hours" (when the company is open).
+// (who gets the chat), "hours" (when the company is open), "country" (the company's own country, so numbers from there are
+// not treated as foreign) and "about" (what the company says about itself, for Riwo to answer from).
 const keyword = (triggerCondition, match = "contains", extra = {}) => ({
   triggerType: "keyword",
   triggerCondition,
@@ -11,6 +12,49 @@ const keyword = (triggerCondition, match = "contains", extra = {}) => ({
 });
 
 export const AUTOMATION_TEMPLATES = [
+  // ── People from other countries ────────────────────────────────────────────────────────────────
+  {
+    id: "foreign-welcome-riwo",
+    group: "People from other countries",
+    recommended: true,
+    name: "Welcome people from abroad, and let Riwo chat until your team replies",
+    description:
+      "When a number from another country writes to you for the first time, it gets a warm welcome, a question about where they found you, and your promise that a person will be in touch. Riwo then answers their short questions from what you write about your business, and stops as soon as a teammate replies. Each Riwo answer uses one of your daily Riwo requests.",
+    hint: "Choose your own country, so numbers from there are left alone. Then write a few sentences about your business: what you do and offer, where you are. Riwo answers only from these, and passes anything else to your team.",
+    rule: {
+      triggerType: "foreign_number",
+      triggerCondition: "",
+      actionType: "ai_chat",
+      actionSummary: "",
+      config: {
+        homeCodes: [],
+        onlyNew: true,
+        reply:
+          "Hi {{first_name}}, welcome to {{company}}! 👋 Thanks for getting in touch.\n\nBefore we begin: how did you find us? AI, our website, social media or word of mouth?\n\nOur team will be in touch with you soon. Until then, you can ask me anything about {{company}}.",
+        knowledge: "",
+        handoff: "Thanks! I've passed this to our team and someone will get back to you soon.",
+        maxReplies: 5,
+        sourceOptions: ["AI", "Website", "Social media", "Word of mouth"],
+      },
+    },
+    needs: ["country", "about"],
+  },
+  {
+    id: "foreign-welcome",
+    group: "People from other countries",
+    name: "Welcome people from abroad (message only)",
+    description: "Sends one welcome message the first time a number from another country writes to you. Nothing else; Riwo is not involved.",
+    hint: "Choose your own country, so numbers from there are left alone.",
+    rule: {
+      triggerType: "foreign_number",
+      triggerCondition: "",
+      actionType: "reply_text",
+      actionSummary:
+        "Hi {{first_name}}, welcome to {{company}}! 👋 Thanks for getting in touch. How did you find us? Our team will be in touch with you soon.",
+      config: { homeCodes: [], onlyNew: true },
+    },
+    needs: ["country"],
+  },
   // ── Start here ─────────────────────────────────────────────────────────────────────────────────
   {
     id: "welcome",

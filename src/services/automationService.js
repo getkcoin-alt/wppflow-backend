@@ -7,6 +7,8 @@ import { assignConversation, autoAssignNewChat } from "./assignmentService.js";
 import { personalise } from "./templating.js";
 import { createLeadFromChat } from "./leadService.js";
 import { matchesKeywords, withinHours, sendsReply } from "./automationRules.js";
+import { isForeignNumber } from "./countries.js";
+import { autoChatMode, runAutoChatTurn, startAutoChat, Skipped } from "./autoChat.js";
 
 export const automationView = (a) => ({
   ...a,
@@ -25,8 +27,10 @@ const REPLIES_PER_HOUR = 6;
 
 // Permission and withdrawal first, then questions, then the "away" and "welcome" messages, so a customer who
 // writes "price" after hours gets the price, and a new customer writing at night is told you are closed.
+// A rule for people from abroad is more specific than "someone writes for the first time" or "we are closed", so it goes
+// before them: a stranger from another country is greeted for who they are.
 const order = (rule) =>
-  rule.action_type === "opt_in" || rule.action_type === "opt_out" ? 0 : rule.trigger_type === "keyword" ? 1 : rule.trigger_type === "after_hours" ? 2 : 3;
+  rule.action_type === "opt_in" || rule.action_type === "opt_out" ? 0 : rule.trigger_type === "keyword" ? 1 : rule.trigger_type === "foreign_number" ? 1.5 : rule.trigger_type === "after_hours" ? 2 : 3;
 
 async function isFirstMessage(message) {
   const { rows } = await query(
@@ -37,7 +41,12 @@ async function isFirstMessage(message) {
   return rows.length === 0;
 }
 
-async function triggered(rule, message) {
+// Returns what the rule should do with this message: false for nothing, true to run it, or (for a rule that lets Riwo chat)
+// "start" for the first message of a chat and "continue" for the later ones.
+async function triggered(rule, message, conv) {
+  if (rule.action_type === "ai_chat") return (await autoChatMode(rule, message, conv, await isFirstMessage(message))) || false;
+  if (rule.trigger_type === "foreign_number")
+    return isForeignNumber(conv.phone, rule.config?.homeCodes || []) && (rule.config?.onlyNew === false || (await isFirstMessage(message)));
   if (rule.trigger_type === "keyword") return matchesKeywords(rule.trigger_condition, message.text, rule.config?.match);
   if (rule.trigger_type === "first_message") return isFirstMessage(message);
   if (rule.trigger_type === "after_hours") return Boolean(rule.config?.hours) && !withinHours(rule.config.hours, Number(message.timestamp_epoch) || Math.floor(Date.now() / 1000));
@@ -47,7 +56,7 @@ async function triggered(rule, message) {
 // Has this rule already done its job for this customer recently?
 async function coolingDown(rule, message) {
   const hours = Number(rule.config?.cooldownHours) || 0;
-  if (!hours) return false;
+  if (!hours || rule.action_type === "ai_chat") return false;
   const { rows } = await query(
     `SELECT 1 FROM automation_executions e JOIN messages m ON m.id=e.message_id
      WHERE e.tenant_id=$1 AND e.automation_id=$2 AND e.status='completed' AND m.conversation_id=$3 AND m.id<>$4
@@ -66,7 +75,7 @@ async function tooManyReplies(message) {
 }
 
 // Does the action. Every step can safely run twice, because a failed rule is tried again.
-async function perform(rule, { message, conv, contact, company, execution, io }) {
+async function perform(rule, { message, conv, contact, company, tenant, mode, execution, io }) {
   const tenantId = message.tenant_id;
   const vars = { name: contact?.name || conv.contact_name, company };
   const say = (text, suffix = "") =>
@@ -112,6 +121,14 @@ async function perform(rule, { message, conv, contact, company, execution, io })
       // a person who already has an open lead keeps it: nothing is duplicated
       await createLeadFromChat({ tenantId, conversation: conv, source: "automation", io });
       break;
+    case "ai_chat":
+      if (mode === "continue") {
+        await runAutoChatTurn({ rule, message, conv, contact, tenant, execution, io });
+        return; // the welcome is only for the first message
+      }
+      // the chat is marked as held before the welcome goes out, so a customer's quick answer is not missed
+      await startAutoChat({ tenantId, conversationId: conv.id, automationId: rule.id, messageId: message.id });
+      break;
     default:
       throw new Error("Unsupported automation action");
   }
@@ -139,7 +156,7 @@ export async function pumpAutomations(io) {
         });
         if (auto?.assigned) conv = (await query("SELECT * FROM conversations WHERE id=$1 AND tenant_id=$2", [conv.id, event.tenant_id])).rows[0];
       }
-      const tenant = (await query("SELECT plan,name,period_end,scheduled_plan FROM tenants WHERE id=$1", [event.tenant_id])).rows[0];
+      const tenant = (await query("SELECT * FROM tenants WHERE id=$1", [event.tenant_id])).rows[0];
       // A company whose plan doesn't include automations keeps its rules but they don't run. A group chat is
       // never answered automatically: one reply would go to everyone in it.
       const rules =
@@ -152,7 +169,8 @@ export async function pumpAutomations(io) {
         : null;
       let replied = false;
       for (const rule of rules) {
-        if (!(await triggered(rule, message)) || (await coolingDown(rule, message))) continue;
+        const mode = await triggered(rule, message, conv);
+        if (!mode || (await coolingDown(rule, message))) continue;
         const id = crypto.randomUUID();
         await query(
           "INSERT INTO automation_executions(id,tenant_id,automation_id,message_id,status) VALUES($1,$2,$3,$4,'pending') ON CONFLICT DO NOTHING",
@@ -176,7 +194,7 @@ export async function pumpAutomations(io) {
             ]);
             continue;
           }
-          await perform(rule, { message, conv, contact, company: tenant.name, execution, io });
+          await perform(rule, { message, conv, contact, company: tenant.name, tenant, mode, execution, io });
           replied ||= sendsReply(rule);
           const done = await query(
             "UPDATE automation_executions SET status='completed',error=NULL WHERE id=$1 AND status<>'completed' RETURNING id",
@@ -185,6 +203,11 @@ export async function pumpAutomations(io) {
           if (done.rowCount)
             await query("UPDATE automations SET executions_count=executions_count+1 WHERE id=$1 AND tenant_id=$2", [rule.id, event.tenant_id]);
         } catch (error) {
+          if (error instanceof Skipped) {
+            // a rule that decided not to speak is not a failure to retry
+            await query("UPDATE automation_executions SET status='skipped',error=$1 WHERE id=$2 AND status<>'completed'", [error.message, execution.id]);
+            continue;
+          }
           await query("UPDATE automation_executions SET status='failed',error=$1 WHERE id=$2 AND status<>'completed'", [error.message, execution.id]);
           failure = error.message;
         }

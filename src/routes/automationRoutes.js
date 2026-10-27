@@ -11,6 +11,9 @@ import { automationView } from "../services/automationService.js";
 import { cleanRule } from "../services/automationRules.js";
 import { AUTOMATION_TEMPLATES } from "../services/automationTemplates.js";
 import { requireFeature } from "../services/plans.js";
+import { callingCodeOf, COUNTRIES } from "../services/countries.js";
+import { unavailableReason } from "../services/aiService.js";
+import { AUTO_CHAT, DEFAULT_SOURCES } from "../services/automationRules.js";
 const router = express.Router();
 router.use(
   authenticateToken,
@@ -30,6 +33,32 @@ router.get(
 );
 // The ready-made rules, so the screen doesn't carry its own copy.
 router.get("/templates", (req, res) => res.json({ status: "success", templates: AUTOMATION_TEMPLATES }));
+
+// What the "other countries" recipe needs to be easy: the countries to choose from, a guess at the company's own (from the
+// WhatsApp numbers it has linked), and whether Riwo can answer for it.
+router.get(
+  "/context",
+  route(async (req, res) => {
+    const { rows } = await query(
+      "SELECT phone FROM whatsapp_sessions WHERE tenant_id=$1 AND phone IS NOT NULL AND phone<>'' ORDER BY (status='CONNECTED') DESC, created_at LIMIT 10",
+      [req.tenantId],
+    );
+    const counts = new Map();
+    for (const { phone } of rows) {
+      const code = callingCodeOf(phone);
+      if (code) counts.set(code, (counts.get(code) || 0) + 1);
+    }
+    const suggested = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([code]) => code).slice(0, 1);
+    res.json({
+      status: "success",
+      countries: COUNTRIES,
+      homeCodes: suggested,
+      homeFrom: suggested.length ? "the WhatsApp number you linked" : "",
+      riwo: { available: unavailableReason(req.tenant) === null, reason: unavailableReason(req.tenant) },
+      chat: { defaultReplies: AUTO_CHAT.defaultReplies, maxReplies: AUTO_CHAT.maxReplies, sources: DEFAULT_SOURCES, handoff: AUTO_CHAT.handoff },
+    });
+  }),
+);
 
 const teammateOf = (tenantId) => async (name) =>
   (

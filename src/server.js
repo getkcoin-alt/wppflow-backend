@@ -260,7 +260,7 @@ export async function startServer() {
     if (ENV.AUTO_MIGRATE) await runMigrations();
     else {
       const { rows } = await query(
-        "SELECT 1 FROM schema_migrations WHERE version='031_real_estate'",
+        "SELECT 1 FROM schema_migrations WHERE version='032_automation_chats'",
       );
       if (!rows.length)
         throw new Error(

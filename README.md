@@ -32,6 +32,7 @@ The runner creates uniquely named local PostgreSQL databases, applies migrations
 - Transactional outgoing outbox, provider-ID deduplication, monotonic receipts, early-ACK and outgoing-echo reconciliation.
 - Campaign recipient persistence, scheduling, opt-in/suppression enforcement, actual dispatch pacing and pause/stop checks.
 - Keyword reply/assignment automations, unique executions and bounded failure retries.
+- Automations can also start on a number from another country, and "Let Riwo chat" holds a short, checked conversation (answers only from text the company wrote, stops when a person replies); state lives in `automation_chats` (migration 032).
 - Measured workspace aggregates, audit records, scoped hashed API keys, signed public-HTTPS webhook deliveries and retry logs.
 - Private object-storage uploads/downloads, tenant-owned attachments and supported incoming media capture.
 - Industry solutions (`src/solutions/`): optional, off by default, switched on per company by a platform admin. Scriwo Real Estate adds lead qualification, property inventory with rule-based matching, viewings and a revenue-leak detector under `/api/solutions/real_estate`. It needs the `leads` plan feature, adds tables only (migrations 030 and 031) and sends nothing to WhatsApp by itself. How it works, how to add another industry and what is not built: `docs/industry-solutions-progress.md` in the app repository.

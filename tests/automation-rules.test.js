@@ -42,10 +42,12 @@ test("every ready-made rule is valid once its blanks are filled in", async () =>
     const rule = { ...t.rule, config: { ...t.rule.config } };
     if (t.needs.includes("reply")) rule.actionSummary = "Our prices start at AED 50.";
     if (t.needs.includes("teammate")) rule.actionSummary = "Sam";
+    if (t.needs.includes("country")) rule.config.homeCodes = ["971"];
+    if (t.needs.includes("about")) rule.config.knowledge = "We are a property brokerage in Dubai Marina. We help people buy, sell and rent apartments.";
     const clean = await cleanRule({ name: t.name, templateId: t.id, ...rule }, { teammate: yes });
     assert.equal(clean.templateId, t.id);
     // What a person must fill in is exactly what would stop the rule being saved.
-    if (t.needs.includes("reply") || t.needs.includes("teammate"))
+    if (["reply", "teammate", "country", "about"].some((n) => t.needs.includes(n)))
       await assert.rejects(cleanRule({ name: t.name, ...t.rule }, { teammate: yes }), (e) => e.status === 400, `${t.id} needs a blank filled`);
   }
   for (const id of ["welcome", "after-hours", "stop", "subscribe"]) assert.equal(AUTOMATION_TEMPLATES.find((t) => t.id === id).recommended, true);
@@ -95,7 +97,7 @@ test("Automation rules: what they can start on, what they do, and the limits tha
     const res = await request(app).get("/api/automations/templates").set(owner);
     assert.equal(res.status, 200);
     assert.deepEqual(res.body.templates.map((x) => x.id), AUTOMATION_TEMPLATES.map((x) => x.id));
-    assert.deepEqual([...new Set(res.body.templates.map((x) => x.group))], ["Start here", "Answer common questions", "Send to your team", "Organise leads"]);
+    assert.deepEqual([...new Set(res.body.templates.map((x) => x.group))], ["People from other countries", "Start here", "Answer common questions", "Send to your team", "Organise leads"]);
   });
 
   await t.test("a rule is checked before it is saved, and says what is wrong", async () => {

@@ -1,9 +1,24 @@
 import { fail } from "../middleware/http.js";
 import { unknownVariables, VARIABLES } from "./templating.js";
+import { cleanHomeCodes } from "./countries.js";
 
 // What a rule is made of. A rule starts on a TRIGGER and does one ACTION; it can also send a confirmation reply.
-export const TRIGGERS = ["keyword", "first_message", "after_hours"];
-export const ACTIONS = ["reply_text", "assign_agent", "add_tag", "opt_in", "opt_out", "create_lead"];
+export const TRIGGERS = ["keyword", "first_message", "after_hours", "foreign_number"];
+export const ACTIONS = ["reply_text", "assign_agent", "add_tag", "opt_in", "opt_out", "create_lead", "ai_chat"];
+
+// "Let Riwo chat": a fixed welcome, then short answers from text the company wrote, until a person replies. These are the
+// limits the rule is saved within, and the words used when the company has not written its own.
+export const AUTO_CHAT = {
+  defaultReplies: 5,
+  maxReplies: 10,
+  knowledgeMin: 20,
+  knowledgeMax: 3000,
+  maxOptions: 6,
+  maxOptionLength: 30,
+  handoff: "Thanks! I've passed this to our team and someone will get back to you soon.",
+  triggers: ["first_message", "foreign_number"],
+};
+export const DEFAULT_SOURCES = ["AI", "Website", "Social media", "Word of mouth"];
 export const MATCHES = ["contains", "word", "exact"];
 
 // ── Keywords ─────────────────────────────────────────────────────────────────────────────────────
@@ -106,6 +121,13 @@ export async function cleanRule(body, { teammate }) {
     config.match = MATCHES.includes(input.match) ? input.match : "contains";
   }
   if (triggerType === "after_hours") config.hours = cleanHours(input.hours);
+  if (triggerType === "foreign_number") {
+    const home = cleanHomeCodes(input.homeCodes);
+    if (home.error) throw fail(400, home.error);
+    config.homeCodes = home.codes;
+    // by default only a first message counts: a customer who has been chatting for months is not greeted as a stranger
+    config.onlyNew = input.onlyNew !== false;
+  }
 
   let actionSummary;
   if (actionType === "reply_text") actionSummary = checkText(body.actionSummary, "The reply", 4000);
@@ -117,14 +139,42 @@ export async function cleanRule(body, { teammate }) {
     if (/[,;]/.test(actionSummary)) throw fail(400, "A tag can't contain commas");
   } else actionSummary = "";
 
+  if (actionType === "ai_chat") {
+    if (!AUTO_CHAT.triggers.includes(triggerType))
+      throw fail(400, "Riwo can chat when someone writes for the first time, or when a number from another country writes");
+    config.reply = checkText(input.reply, "The welcome message", 1000);
+    const knowledge = words(input.knowledge, "What Riwo may talk about", AUTO_CHAT.knowledgeMax);
+    if (knowledge.length < AUTO_CHAT.knowledgeMin)
+      throw fail(400, "Write a few sentences about your business for Riwo to answer from. It will not answer anything that is not in them.");
+    config.knowledge = knowledge;
+    config.handoff = String(input.handoff ?? "").trim() ? checkText(input.handoff, "The hand-over message", 500) : AUTO_CHAT.handoff;
+    const replies = input.maxReplies === undefined || input.maxReplies === "" ? AUTO_CHAT.defaultReplies : Number(input.maxReplies);
+    if (!Number.isInteger(replies) || replies < 1 || replies > AUTO_CHAT.maxReplies)
+      throw fail(400, `Riwo can reply 1 to ${AUTO_CHAT.maxReplies} times in a chat`);
+    config.maxReplies = replies;
+    const options = [];
+    for (const raw of Array.isArray(input.sourceOptions) ? input.sourceOptions : []) {
+      const option = String(raw ?? "").trim();
+      if (!option) continue;
+      if (option.length > AUTO_CHAT.maxOptionLength || /[\n,;]/.test(option))
+        throw fail(400, `Each answer to “where did you find us” must be under ${AUTO_CHAT.maxOptionLength} characters, with no commas`);
+      if (!options.some((o) => o.toLowerCase() === option.toLowerCase())) options.push(option);
+    }
+    if (options.length > AUTO_CHAT.maxOptions) throw fail(400, `Use up to ${AUTO_CHAT.maxOptions} answers to “where did you find us”`);
+    config.sourceOptions = options;
+  }
+
   // A confirmation sent in addition to the action ("You're unsubscribed", "A manager will call you").
-  if (actionType !== "reply_text" && String(input.reply ?? "").trim())
+  if (actionType !== "reply_text" && actionType !== "ai_chat" && String(input.reply ?? "").trim())
     config.reply = checkText(input.reply, "The confirmation", 4000);
-  if (input.cooldownHours !== undefined && input.cooldownHours !== null && input.cooldownHours !== "") {
+  if (actionType === "ai_chat") {
+    // the chat itself says when it starts and ends, so there is nothing to wait for
+  } else if (input.cooldownHours !== undefined && input.cooldownHours !== null && input.cooldownHours !== "") {
     const hours = Number(input.cooldownHours);
     if (!Number.isFinite(hours) || hours < 0 || hours > 168) throw fail(400, "Wait between repeats must be 0 to 168 hours");
     config.cooldownHours = hours;
   } else if (triggerType === "after_hours") config.cooldownHours = 12; // once per evening, not once per message
+  else if (triggerType === "foreign_number" && !config.onlyNew) config.cooldownHours = 24; // not a greeting for every message
 
   return {
     name: words(body.name, "Rule name", 255),
@@ -138,4 +188,4 @@ export async function cleanRule(body, { teammate }) {
 }
 
 // Does this rule send something to the customer?
-export const sendsReply = (rule) => rule.action_type === "reply_text" || Boolean(rule.config?.reply);
+export const sendsReply = (rule) => rule.action_type === "reply_text" || rule.action_type === "ai_chat" || Boolean(rule.config?.reply);
