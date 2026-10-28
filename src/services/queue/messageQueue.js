@@ -103,7 +103,9 @@ export async function dispatchMessage(payload, io) {
           type,
           text,
         )
-      : await provider.sendTextMessage(tenantId, sessionName, to, text);
+      : await provider.sendTextMessage(tenantId, sessionName, to, text, {
+          quotedMsg: payload.quotedMsg,
+        });
     if (!result?.providerMessageId) {
       const e = new Error("Provider did not confirm delivery");
       e.code = "DELIVERY_UNCERTAIN";
@@ -129,6 +131,20 @@ export async function dispatchMessage(payload, io) {
       await c.query(
         "UPDATE messages SET provider_message_id=$1,ack=$2,status=CASE WHEN $2>=3 THEN 'read' WHEN $2=2 THEN 'delivered' WHEN $2=1 THEN 'sent' ELSE 'sending' END,updated_at=now() WHERE id=$3 AND tenant_id=$4",
         [result.providerMessageId, ack, messageId, tenantId],
+      );
+      await c.query(
+        `UPDATE conversations
+         SET last_message = jsonb_set(
+           jsonb_set(
+             jsonb_set(coalesce(last_message, '{}'::jsonb), '{status}', to_jsonb(CASE WHEN $2>=3 THEN 'read' WHEN $2=2 THEN 'delivered' WHEN $2=1 THEN 'sent' ELSE 'sending' END)),
+             '{ack}', to_jsonb($2::int)
+           ),
+           '{providerMessageId}', to_jsonb($1::text)
+         ),
+         updated_at = now()
+         WHERE id = $3 AND tenant_id = $4
+           AND (last_message->>'id' = $5 OR last_message->>'id' IS NULL OR last_message->>'status' = 'sending')`,
+        [result.providerMessageId, ack, conversationId, tenantId, messageId],
       );
       await c.query(
         "UPDATE outbox_events SET status='processed',processed_at=now() WHERE aggregate_id=$1 AND tenant_id=$2",

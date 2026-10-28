@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { query, withTransaction } from "../db/index.js";
 import { fail, text as validateText } from "../middleware/http.js";
 import { recordWebhook } from "./webhookService.js";
+import { defaultWhatsAppProvider as provider } from "./whatsapp/WhatsAppProvider.js";
 import {
   mediaEnabled,
   mediaTypes,
@@ -31,6 +32,12 @@ export function formatMessage(m) {
         audioDuration: m.audio_duration,
         timestampEpoch: Number(m.timestamp_epoch),
         isNote: m.type === "internal_note",
+        quoted:
+          typeof m.quoted === "string"
+            ? JSON.parse(m.quoted)
+            : m.quoted || null,
+        quotedMessageId: m.quoted_message_id || null,
+        isDeleted: Boolean(m.is_deleted),
       }
     : null;
 }
@@ -66,6 +73,7 @@ export async function sendTextMessage({
   type = "text",
   attachment = null,
   campaignId = null,
+  quotedMessageId = null,
 }) {
   text = validateText(text, "Message", 10000);
   idempotencyKey = validateText(idempotencyKey, "Idempotency key", 128);
@@ -124,13 +132,34 @@ export async function sendTextMessage({
       );
       if (!a.rowCount) throw fail(400, "Attachment is not ready");
     }
+    let quoted = null;
+    let quotedProviderMessageId = null;
+    if (quotedMessageId) {
+      const qTarget = await c.query(
+        "SELECT id, provider_message_id, sender, agent_name, text, type FROM messages WHERE id=$1 AND tenant_id=$2",
+        [quotedMessageId, tenantId],
+      );
+      if (qTarget.rows[0]) {
+        const qm = qTarget.rows[0];
+        quoted = {
+          id: qm.id,
+          providerMessageId: qm.provider_message_id,
+          sender: qm.sender,
+          agentName:
+            qm.agent_name || (qm.sender === "agent" ? "Agent" : "Customer"),
+          text: qm.text || "",
+          type: qm.type || "text",
+        };
+        quotedProviderMessageId = qm.provider_message_id || null;
+      }
+    }
     const id = crypto.randomUUID(),
       epoch = Math.floor(Date.now() / 1000),
       stamp = new Date().toISOString(),
       note = type === "internal_note";
     const saved = await c.query(
-      `INSERT INTO messages(id,tenant_id,conversation_id,idempotency_key,sender,agent_name,text,type,status,ack,timestamp,timestamp_epoch,sent_by_user_id)
-      VALUES($1,$2,$3,$4,'agent',$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+      `INSERT INTO messages(id,tenant_id,conversation_id,idempotency_key,sender,agent_name,text,type,status,ack,timestamp,timestamp_epoch,sent_by_user_id,quoted,quoted_message_id)
+      VALUES($1,$2,$3,$4,'agent',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
       [
         id,
         tenantId,
@@ -144,6 +173,8 @@ export async function sendTextMessage({
         stamp,
         epoch,
         sentByUserId,
+        quoted ? JSON.stringify(quoted) : null,
+        quoted ? quoted.id : null,
       ],
     );
     if (!note) {
@@ -162,6 +193,7 @@ export async function sendTextMessage({
             type,
             attachmentId: attachment?.id,
             campaignId,
+            quotedMsg: quotedProviderMessageId,
           }),
         ],
       );
@@ -171,6 +203,7 @@ export async function sendTextMessage({
         [
           epoch,
           JSON.stringify({
+            id,
             text,
             timestamp: stamp,
             status: "sending",
@@ -235,6 +268,28 @@ export async function handleIncomingMessage({
   if (IGNORED_TYPES.has(msg.rawType)) return null;
   const isGroup = Boolean(msg.isGroup) || msg.remoteId.endsWith("@g.us");
   const inserted = await withTransaction(async (c) => {
+    if (msg.rawType === "revoked" || msg.type === "revoked") {
+      const revoked = await c.query(
+        `UPDATE messages SET type='revoked', status='deleted', text='🚫 This message was deleted', media_url='', file_name='', updated_at=now()
+         WHERE tenant_id=$1 AND provider_message_id=$2 RETURNING *`,
+        [tenantId, msg.providerMessageId],
+      );
+      if (revoked.rowCount) {
+        await c.query(
+          `UPDATE conversations
+           SET last_message = jsonb_set(coalesce(last_message, '{}'::jsonb), '{text}', to_jsonb('🚫 This message was deleted'::text)),
+               updated_at = now()
+           WHERE id=$1 AND tenant_id=$2 AND (last_message->>'id'=$3 OR last_message->>'providerMessageId'=$4)`,
+          [
+            revoked.rows[0].conversation_id,
+            tenantId,
+            revoked.rows[0].id,
+            msg.providerMessageId,
+          ],
+        );
+        return revoked.rows[0];
+      }
+    }
     const old = await c.query(
       "SELECT id FROM messages WHERE tenant_id=$1 AND provider_message_id=$2",
       [tenantId, msg.providerMessageId],
@@ -281,9 +336,19 @@ export async function handleIncomingMessage({
       ],
     );
     const id = conv.rows[0].id;
+
+    let quotedMessageId = null;
+    if (msg.quoted?.providerMessageId) {
+      const qm = await c.query(
+        "SELECT id FROM messages WHERE tenant_id=$1 AND provider_message_id=$2",
+        [tenantId, msg.quoted.providerMessageId],
+      );
+      quotedMessageId = qm.rows[0]?.id || null;
+    }
+
     const saved = await c.query(
-      `INSERT INTO messages(id,tenant_id,conversation_id,provider_message_id,sender,agent_name,text,type,status,ack,media_url,file_name,file_size,timestamp,timestamp_epoch)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT(tenant_id,provider_message_id) DO NOTHING RETURNING *`,
+      `INSERT INTO messages(id,tenant_id,conversation_id,provider_message_id,sender,agent_name,text,type,status,ack,media_url,file_name,file_size,timestamp,timestamp_epoch,quoted,quoted_message_id)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) ON CONFLICT(tenant_id,provider_message_id) DO NOTHING RETURNING *`,
       [
         crypto.randomUUID(),
         tenantId,
@@ -308,6 +373,8 @@ export async function handleIncomingMessage({
         msg.fileSize || "",
         stamp,
         epoch,
+        msg.quoted ? JSON.stringify(msg.quoted) : null,
+        quotedMessageId,
       ],
     );
     if (!saved.rowCount) return null;
@@ -340,6 +407,7 @@ export async function handleIncomingMessage({
         !history && !msg.fromMe ? 1 : 0,
         epoch,
         JSON.stringify({
+          id: saved.rows[0].id,
           text: msg.text || "",
           timestamp: stamp,
           status: msg.fromMe ? "sent" : "delivered",
@@ -354,6 +422,10 @@ export async function handleIncomingMessage({
     return saved.rows[0];
   });
   if (inserted) {
+    if (inserted.type === "revoked") {
+      emitMessage(io, tenantId, "message:updated", inserted);
+      return inserted;
+    }
     if (
       msg.downloadMedia &&
       mediaEnabled() &&
@@ -434,6 +506,17 @@ export async function handleAckEvent({ tenantId, ackData, io = null }) {
       "INSERT INTO message_receipts(tenant_id,message_id,provider_message_id,ack) VALUES($1,$2,$3,$4)",
       [tenantId, row.id, providerMessageId, ack],
     );
+    await c.query(
+      `UPDATE conversations
+       SET last_message = jsonb_set(
+         jsonb_set(coalesce(last_message, '{}'::jsonb), '{status}', to_jsonb(row.status)),
+         '{ack}', to_jsonb(row.ack::int)
+       ),
+       updated_at = now()
+       WHERE id = $1 AND tenant_id = $2
+         AND (last_message->>'id' = $3 OR last_message->>'providerMessageId' = $4 OR last_message->>'id' IS NULL)`,
+      [row.conversation_id, tenantId, row.id, providerMessageId],
+    );
     await recordWebhook(
       tenantId,
       "message.status",
@@ -447,7 +530,7 @@ export async function handleAckEvent({ tenantId, ackData, io = null }) {
     );
     return row;
   });
-  if (m)
+  if (m) {
     emitForConversation(io, tenantId, m.conversation_id, "message:ack", {
       conversationId: m.conversation_id,
       messageId: m.id,
@@ -455,6 +538,18 @@ export async function handleAckEvent({ tenantId, ackData, io = null }) {
       ack: m.ack,
       status: m.status,
     });
+    emitForConversation(
+      io,
+      tenantId,
+      m.conversation_id,
+      "conversation:updated",
+      {
+        conversationId: m.conversation_id,
+        chatId: m.conversation_id,
+      },
+      { snapshot: true },
+    );
+  }
   return m ? { messageId: m.id, ack: m.ack, status: m.status } : null;
 }
 export const MEDIA_MESSAGE_TYPES = new Set([
@@ -517,7 +612,7 @@ export async function getConversationMessages({
     filter = " AND (timestamp_epoch,id)<($3,$4)";
   }
   const { rows } = await query(
-    `SELECT * FROM messages WHERE tenant_id=$1 AND conversation_id=$2${filter} ORDER BY timestamp_epoch DESC,id DESC LIMIT $${params.length + 1}`,
+    `SELECT * FROM messages WHERE tenant_id=$1 AND conversation_id=$2 AND (is_deleted IS NOT TRUE)${filter} ORDER BY timestamp_epoch DESC,id DESC LIMIT $${params.length + 1}`,
     [...params, count + 1],
   );
   const hasMore = rows.length > count,
@@ -555,4 +650,132 @@ export async function getConversationMessages({
     ...(mediaPending !== undefined ? { mediaPending } : {}),
     ...(previewsPending ? { previewsPending } : {}),
   };
+}
+
+export async function deleteMessage({
+  tenantId,
+  conversationId,
+  messageId,
+  forEveryone = false,
+  userId = null,
+  io = null,
+}) {
+  const mRes = await query(
+    `SELECT m.*, c.session_name, c.provider_chat_id, c.phone
+     FROM messages m
+     JOIN conversations c ON c.id = m.conversation_id AND c.tenant_id = m.tenant_id
+     WHERE m.id = $1 AND m.tenant_id = $2 AND m.conversation_id = $3`,
+    [messageId, tenantId, conversationId],
+  );
+  if (!mRes.rows[0]) throw fail(404, "Message not found");
+  const msg = mRes.rows[0];
+
+  if (forEveryone) {
+    if (msg.sender !== "agent") {
+      throw fail(400, "Only messages sent by your team can be deleted for everyone");
+    }
+  }
+
+  const providerChatId = msg.provider_chat_id || msg.phone;
+  if (msg.provider_message_id && providerChatId) {
+    try {
+      await provider.deleteMessage(
+        tenantId,
+        msg.session_name,
+        providerChatId,
+        msg.provider_message_id,
+        !forEveryone,
+      );
+    } catch (err) {
+      console.warn(`WhatsApp deleteMessage: ${err.message}`);
+    }
+  }
+
+  if (forEveryone) {
+    await query(
+      `UPDATE messages
+       SET type = 'revoked', status = 'deleted', text = '🚫 This message was deleted', media_url = '', file_name = '', updated_at = now()
+       WHERE id = $1 AND tenant_id = $2`,
+      [messageId, tenantId],
+    );
+
+    await query(
+      `UPDATE conversations
+       SET last_message = jsonb_set(coalesce(last_message, '{}'::jsonb), '{text}', to_jsonb('🚫 This message was deleted'::text)),
+           updated_at = now()
+       WHERE id = $1 AND tenant_id = $2 AND (last_message->>'id' = $3 OR last_message->>'providerMessageId' = $4)`,
+      [conversationId, tenantId, messageId, msg.provider_message_id],
+    );
+
+    const updated = await query(
+      "SELECT * FROM messages WHERE id = $1 AND tenant_id = $2",
+      [messageId, tenantId],
+    );
+    const formatted = formatMessage(updated.rows[0]);
+    if (io) {
+      emitForConversation(io, tenantId, conversationId, "message:updated", {
+        conversationId,
+        chatId: conversationId,
+        messageId,
+        message: formatted,
+      });
+      emitForConversation(
+        io,
+        tenantId,
+        conversationId,
+        "conversation:updated",
+        { conversationId, chatId: conversationId },
+        { snapshot: true },
+      );
+    }
+    return { message: formatted, deleted: true, forEveryone: true };
+  } else {
+    await query(
+      `UPDATE messages SET is_deleted = TRUE, updated_at = now() WHERE id = $1 AND tenant_id = $2`,
+      [messageId, tenantId],
+    );
+
+    const latest = await query(
+      `SELECT * FROM messages WHERE tenant_id = $1 AND conversation_id = $2 AND (is_deleted IS NOT TRUE)
+       ORDER BY timestamp_epoch DESC, id DESC LIMIT 1`,
+      [tenantId, conversationId],
+    );
+    if (latest.rows[0]) {
+      const lm = latest.rows[0];
+      await query(
+        `UPDATE conversations
+         SET last_message = $1, last_active_epoch = $2, updated_at = now()
+         WHERE id = $3 AND tenant_id = $4`,
+        [
+          JSON.stringify({
+            id: lm.id,
+            text: lm.text,
+            timestamp: lm.timestamp,
+            status: lm.status,
+            fromMe: lm.sender === "agent",
+          }),
+          lm.timestamp_epoch,
+          conversationId,
+          tenantId,
+        ],
+      );
+    }
+
+    if (io) {
+      emitForConversation(io, tenantId, conversationId, "message:deleted", {
+        conversationId,
+        chatId: conversationId,
+        messageId,
+      });
+      emitForConversation(
+        io,
+        tenantId,
+        conversationId,
+        "conversation:updated",
+        { conversationId, chatId: conversationId },
+        { snapshot: true },
+      );
+    }
+    return { messageId, deleted: true, forEveryone: false };
+  }
 }

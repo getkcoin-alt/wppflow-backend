@@ -34,6 +34,7 @@ import {
   getConversationMessages,
   adoptMisfiledMessages,
   sendTextMessage,
+  deleteMessage,
 } from "../services/messageService.js";
 
 const router = express.Router();
@@ -398,7 +399,7 @@ router.post("/:id/messages", sendMessageRateLimiter, async (req, res) => {
     await assertConversationAccess(req, req.params.id);
     if (req.body.isNote || (req.body.type && req.body.type !== "text"))
       throw fail(400, "Use the dedicated notes or attachments endpoint");
-    const { text, idempotencyKey } = req.body;
+    const { text, idempotencyKey, quotedMessageId } = req.body;
     const io = req.app.get("io");
 
     const result = await sendTextMessage({
@@ -408,10 +409,46 @@ router.post("/:id/messages", sendMessageRateLimiter, async (req, res) => {
       idempotencyKey,
       agentName: req.user.name || "Agent",
       sentByUserId: req.user.id ?? null,
+      quotedMessageId,
       io,
     });
 
     res.status(result.duplicate ? 200 : 201).json({
+      status: "success",
+      ...result,
+    });
+  } catch (err) {
+    res
+      .status(err.status || (err.message.includes("not found") ? 404 : 400))
+      .json({
+        status: "error",
+        message: err.message,
+      });
+  }
+});
+
+/**
+ * DELETE /api/conversations/:id/messages/:messageId
+ * Delete a message (for me or for everyone)
+ * Query param: ?forEveryone=true|false
+ */
+router.delete("/:id/messages/:messageId", async (req, res) => {
+  try {
+    await assertConversationAccess(req, req.params.id);
+    const forEveryone =
+      req.query.forEveryone === "true" || req.body?.forEveryone === true;
+    const io = req.app.get("io");
+
+    const result = await deleteMessage({
+      tenantId: req.tenantId,
+      conversationId: req.params.id,
+      messageId: req.params.messageId,
+      forEveryone,
+      userId: req.user.id ?? null,
+      io,
+    });
+
+    res.json({
       status: "success",
       ...result,
     });

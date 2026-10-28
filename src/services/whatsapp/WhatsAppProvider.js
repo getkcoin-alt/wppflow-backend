@@ -294,7 +294,7 @@ export class WhatsAppProvider {
     await this.releaseProfile(tenantId, sessionName);
   }
 
-  async sendTextMessage(tenantId, sessionName, to, text) {
+  async sendTextMessage(tenantId, sessionName, to, text, options = {}) {
     const key = this.sessionKey(tenantId, sessionName);
     const session = this.sessions.get(key);
     if (!session?.client) {
@@ -310,11 +310,13 @@ export class WhatsAppProvider {
     // Use the supported provider API once. Never fall back to a second send.
     let result, timer;
     try {
+      const sendOpts = {
+        createChat: true,
+        waitForAck: true,
+        ...(options?.quotedMsg ? { quotedMsg: options.quotedMsg } : {}),
+      };
       result = await Promise.race([
-        session.client.sendText(cleanTarget, text, {
-          createChat: true,
-          waitForAck: true,
-        }),
+        session.client.sendText(cleanTarget, text, sendOpts),
         new Promise((_, reject) => {
           timer = setTimeout(
             () => reject(new Error("Delivery confirmation timed out")),
@@ -346,6 +348,27 @@ export class WhatsAppProvider {
       ack: result?.ack ?? ACK_STATUS.PENDING,
       raw: result,
     };
+  }
+
+  async deleteMessage(
+    tenantId,
+    sessionName,
+    chatId,
+    providerMessageId,
+    onlyLocal = false,
+  ) {
+    const session = this.getSession(tenantId, sessionName);
+    if (!session?.client) throw new Error("WhatsApp session is offline");
+    const rawStr = String(chatId).trim();
+    const cleanTarget = rawStr.includes("@")
+      ? rawStr
+      : `${rawStr.replace(/\D/g, "")}@c.us`;
+    return await session.client.deleteMessage(
+      cleanTarget,
+      providerMessageId,
+      Boolean(onlyLocal),
+      true,
+    );
   }
 
   async syncConversations(tenantId, sessionName) {
@@ -469,6 +492,33 @@ export class WhatsAppProvider {
     const timestampEpoch =
       Number(raw.timestamp || raw.t) || Math.floor(Date.now() / 1000);
 
+    let quoted = null;
+    const q = raw.quotedMsg || raw.quotedMsgObj;
+    if (q) {
+      const qFromMe = Boolean(q.fromMe);
+      const qRawType = String(q.type || "chat");
+      const qType =
+        qRawType === "chat" ? "text" : qRawType === "ptt" ? "audio" : qRawType;
+      const qLabel = MEDIA_LABELS[qRawType] || "";
+      const qText =
+        qRawType === "chat"
+          ? q.body || ""
+          : q.caption || qLabel || q.body || "";
+      const qId = String(q.id?._serialized || q.id?.id || q.id || "");
+      if (qId || qText) {
+        quoted = {
+          id: qId,
+          providerMessageId: qId,
+          sender: qFromMe ? "agent" : "customer",
+          agentName: qFromMe
+            ? "You"
+            : q.sender?.name || q.sender?.pushname || "Customer",
+          text: qText,
+          type: qType,
+        };
+      }
+    }
+
     return {
       providerMessageId: id,
       fromMe,
@@ -490,6 +540,7 @@ export class WhatsAppProvider {
       mediaUrl: "", // Never persist expiring provider URLs as durable media.
       fileName: raw.filename || "",
       fileSize: raw.size ? `${Math.round(raw.size / 1024)} KB` : "",
+      quoted,
     };
   }
 
