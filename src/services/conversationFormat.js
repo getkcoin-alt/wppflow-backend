@@ -1,4 +1,5 @@
 import { avatarUrl } from "./avatarService.js";
+import { chatTitle, mobileText } from "./personName.js";
 
 export function formatConversation(c) {
   if (!c) return null;
@@ -7,6 +8,8 @@ export function formatConversation(c) {
       ? JSON.parse(c.last_message)
       : c.last_message || {};
 
+  // WhatsApp ids are never shown as names: the person's name, else their mobile number
+  const title = chatTitle(c.contact_name, c.phone, { isGroup: Boolean(c.is_group) });
   return {
     id: c.id,
     tenantId: c.tenant_id,
@@ -16,7 +19,9 @@ export function formatConversation(c) {
     providerChatId: c.provider_chat_id || c.phone,
     contactId: c.contact_id || "",
     phone: c.phone,
-    contactName: c.contact_name,
+    // the number to show: empty when WhatsApp only gave a hidden id for this person
+    displayPhone: c.is_group ? "" : mobileText(c.phone),
+    contactName: title,
     // our own address for the picture: the one WhatsApp attached to the chat expires, and is usually empty
     avatar: avatarUrl("chat", c) || c.avatar || "",
     unreadCount: Number(c.unread_count || 0),
@@ -38,7 +43,7 @@ export function formatConversation(c) {
     tenant_id: c.tenant_id,
     session_name: c.session_name,
     provider_chat_id: c.provider_chat_id || c.phone,
-    contact_name: c.contact_name,
+    contact_name: title,
     unread_count: Number(c.unread_count || 0),
     is_group: Boolean(c.is_group),
     last_active_epoch: Number(c.last_active_epoch || 0),

@@ -5,6 +5,8 @@ import { fail } from "../middleware/http.js";
 import { emitForConversation, emitForSession } from "./realtime.js";
 
 import { formatConversation } from "./conversationFormat.js";
+import { chatMatch } from "./chatMatch.js";
+import { scheduleLidResolution } from "./lidService.js";
 export { formatConversation };
 
 // The labels of the person each chat is with, so the list can show and filter by them. Groups have no contact.
@@ -66,8 +68,7 @@ export async function getConversations({
   }
 
   if (search && search.trim()) {
-    params.push(`%${search.trim()}%`);
-    sql += ` AND (contact_name ILIKE $${params.length} OR phone ILIKE $${params.length})`;
+    sql += ` AND ${chatMatch(params, search.trim().slice(0, 100))}`;
   }
 
   // Filters that combine: labels (any, or all of them), who the chat is with, and how recently it was active.
@@ -130,6 +131,8 @@ export async function getConversations({
   const pinned = cursor ? [] : (await query(`${base.sql} AND is_pinned ORDER BY last_active_epoch DESC, id DESC LIMIT 20`, base.params)).rows;
   const hasMore = rows.length > parsedLimit;
   const items = hasMore ? rows.slice(0, parsedLimit) : rows;
+  // chats WhatsApp only gave a hidden id for are asked about their real number, without making this answer wait
+  scheduleLidResolution([...pinned, ...items]);
 
   const nextCursor =
     items.length > 0

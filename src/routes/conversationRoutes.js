@@ -13,6 +13,7 @@ import { defaultWhatsAppProvider as provider } from "../services/whatsapp/WhatsA
 import { formatConversation, withLabels } from "../services/conversationService.js";
 import { normalizePhone, displayPhone, PHONE_HELP } from "../services/phone.js";
 import { handleIncomingMessage } from "../services/messageService.js";
+import { searchInbox } from "../services/searchService.js";
 import { fetchMessageMedia, fetchPendingMedia } from "../services/mediaFetchService.js";
 import {
   isManager,
@@ -222,6 +223,24 @@ router.get("/", async (req, res) => {
     res.status(err.status||500).json({ status: "error", message: err.status?err.message:"This operation is currently unavailable" });
   }
 });
+
+/**
+ * GET /api/conversations/search?q=
+ * Chats by name or number, and messages by their words with the words around the match
+ */
+router.get(
+  "/search",
+  route(async (req, res) => {
+    const result = await searchInbox({
+      tenantId: req.tenantId,
+      ownerUserId: isManager(req) ? null : req.user.id,
+      text: String(req.query.q ?? ""),
+      sessionName: req.query.sessionName ? String(req.query.sessionName) : null,
+      limit: req.query.limit,
+    });
+    res.json({ status: "success", ...result });
+  }),
+);
 
 /**
  * GET /api/conversations/changes?since=ISO

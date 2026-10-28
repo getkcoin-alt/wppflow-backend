@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { chatTitle, mobileText } from "../services/personName.js";
 import { assertRoomForContacts, assertImportFits, contactCount, roomForContacts } from "../services/limitsService.js";
 import express from "express";
 import {
@@ -24,6 +25,8 @@ const LABELS_OF = `COALESCE((SELECT jsonb_agg(jsonb_build_object('id',l.id,'name
 const CONSENT_OF = "(SELECT opt_in_status FROM consents WHERE tenant_id=contacts.tenant_id AND phone=contacts.phone) AS opt_in_status";
 export const contactView = (c) => ({
   ...c,
+  name: chatTitle(c.name, c.phone),
+  displayPhone: mobileText(c.phone),
   avatar: (/^\d{6,20}$/.test(c.phone || "") && avatarUrl("contact", c)) || c.avatar || "",
   tags: Array.isArray(c.tags) ? c.tags : [],
   labels: Array.isArray(c.labels) ? c.labels : [],

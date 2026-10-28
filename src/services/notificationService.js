@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { query } from "../db/index.js";
+import { chatTitle } from "./personName.js";
 
 // In-app notifications for the team: who needs to know, stored so nothing is lost while
 // someone is offline, and pushed live to their open browsers.
@@ -27,7 +28,7 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // someone who couldn't open it.
 async function audience(tenantId, conversationId) {
   const { rows } = await query(
-    `SELECT c.contact_name,c.assigned_user_id,s.owner_user_id FROM conversations c
+    `SELECT c.contact_name,c.phone,c.assigned_user_id,s.owner_user_id FROM conversations c
      LEFT JOIN whatsapp_sessions s ON s.tenant_id=c.tenant_id AND s.session_name=c.session_name
      WHERE c.id=$1 AND c.tenant_id=$2`,
     [conversationId, tenantId],
@@ -100,7 +101,7 @@ export async function notifyInternalNote({ io, tenantId, conversationId, message
     { userId: a.conversation.assigned_user_id, type: "note" },
     { userId: a.conversation.owner_user_id, type: "note" },
   ];
-  const chat = a.conversation.contact_name || "a chat";
+  const chat = chatTitle(a.conversation.contact_name, a.conversation.phone) || "a chat";
   return createNotifications({
     io,
     tenantId,
@@ -123,7 +124,7 @@ export async function notifyAssignment({ io, tenantId, conversationId, actor, as
     actor,
     conversationId,
     title: `${actor?.name || "A teammate"} assigned you a chat`,
-    body: a.conversation.contact_name || "",
+    body: chatTitle(a.conversation.contact_name, a.conversation.phone),
   });
 }
 

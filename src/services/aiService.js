@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { chatTitle } from "./personName.js";
 import { query } from "../db/index.js";
 import { fail } from "../middleware/http.js";
 import { planAllows, notIncluded } from "./plans.js";
@@ -258,7 +259,7 @@ const CONTEXT_CHARS = 8000;
 
 async function conversationContext(tenant, conversationId) {
   const chat = (
-    await query("SELECT contact_name,is_group FROM conversations WHERE id=$1 AND tenant_id=$2", [conversationId, tenant.id])
+    await query("SELECT contact_name,phone,is_group FROM conversations WHERE id=$1 AND tenant_id=$2", [conversationId, tenant.id])
   ).rows[0];
   if (!chat) throw fail(404, "Conversation not found");
   const { rows } = await query(
@@ -288,7 +289,7 @@ async function conversationContext(tenant, conversationId) {
     lines.push(line);
   }
   lines.reverse();
-  return { contact: chat.contact_name || "the customer", isGroup: Boolean(chat.is_group), lines, notes };
+  return { contact: chatTitle(chat.contact_name, chat.phone, { isGroup: chat.is_group }).replace(/^Unknown contact$/, "the customer"), isGroup: Boolean(chat.is_group), lines, notes };
 }
 const hasCustomerMessage = (context) => context.lines.some((l) => l.startsWith("Customer:"));
 

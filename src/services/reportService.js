@@ -1,4 +1,5 @@
 import { query } from "../db/index.js";
+import { chatTitle } from "./personName.js";
 import { fail } from "../middleware/http.js";
 import { createNotifications } from "./notificationService.js";
 import { sendEmail } from "./emailService.js";
@@ -187,7 +188,7 @@ export async function teamResponse(tenantId, { from, to, team = "", sessionName 
       if (team && (owner?.team || "general") !== team) continue;
       waiting.push({
         conversationId: r.conversation_id,
-        contact: r.contact_name,
+        contact: chatTitle(r.contact_name, r.phone),
         session: r.session_name,
         assignedTo: r.assigned_to || owner?.name || "",
         since: new Date(Number(r.asked) * 1000).toISOString(),
@@ -257,7 +258,7 @@ export async function agentEpisodes(tenantId, { userId, from, to, sessionName = 
     if (String(p.id) !== String(userId)) continue;
     out.push({
       conversationId: r.conversation_id,
-      contact: r.contact_name,
+      contact: chatTitle(r.contact_name, r.phone),
       session: r.session_name,
       asked: new Date(Number(r.asked) * 1000).toISOString(),
       replied: new Date(Number(r.replied) * 1000).toISOString(),
@@ -340,7 +341,7 @@ export async function dailyChats(tenantId, { date, sessionName = "", team = "", 
   const [people, rows] = await Promise.all([
     directory(tenantId),
     query(
-      `SELECT c.id,c.contact_name,c.session_name,c.assigned_to,c.assigned_user_id,
+      `SELECT c.id,c.contact_name,c.phone,c.session_name,c.assigned_to,c.assigned_user_id,
               count(*) FILTER (WHERE m.sender='customer')::int AS received,
               count(*) FILTER (WHERE m.sender='agent' AND m.type<>'internal_note' AND m.agent_name<>ALL($5::text[]))::int AS replied,
               max(m.timestamp_epoch) AS last_at,
@@ -355,7 +356,7 @@ export async function dailyChats(tenantId, { date, sessionName = "", team = "", 
   return rows.rows
     .map((r) => ({ r, p: r.replied ? people.who({ userId: r.by_user, name: r.by_name, session: r.session_name }) : null }))
     .filter(({ r, p }) => (!team || (p ? p.team === team : (people.byId.get(r.assigned_user_id) || people.byId.get(people.owners.get(r.session_name)) || {}).team === team)) && (!userId || String(p?.id) === String(userId)))
-    .map(({ r, p }) => ({ id: r.id, contact: r.contact_name, session: r.session_name, assignedTo: r.assigned_to || "", received: r.received, replied: r.replied, repliedBy: p?.name || null, lastAt: new Date(Number(r.last_at) * 1000).toISOString() }));
+    .map(({ r, p }) => ({ id: r.id, contact: chatTitle(r.contact_name, r.phone), session: r.session_name, assignedTo: r.assigned_to || "", received: r.received, replied: r.replied, repliedBy: p?.name || null, lastAt: new Date(Number(r.last_at) * 1000).toISOString() }));
 }
 
 const minutesText = (s) => (s === null ? "no reply times yet" : s < 90 ? `${s} seconds` : s < 5400 ? `${Math.round(s / 60)} minutes` : `${(s / 3600).toFixed(1)} hours`);

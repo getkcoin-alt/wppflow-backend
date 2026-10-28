@@ -4,6 +4,7 @@ import { fail } from "../middleware/http.js";
 import { isManager, assertConversationAccess } from "./access.js";
 import { createNotifications } from "./notificationService.js";
 import { emitForLead } from "./realtime.js";
+import { chatTitle, hideId } from "./personName.js";
 
 // ── The pipeline ─────────────────────────────────────────────────────────────────────────────────
 // Every preset has five open steps and then the two that end a lead, so switching preset only renames steps.
@@ -69,9 +70,9 @@ const SELECT = `SELECT l.*,s.name AS stage_name,s.kind AS stage_kind,u.name AS o
 
 export const leadView = (r) => ({
   id: r.id,
-  title: r.title || r.display_name,
+  title: hideId(r.title, r.phone) || chatTitle(r.display_name, r.phone),
   contactId: r.contact_id,
-  contactName: r.display_name,
+  contactName: chatTitle(r.display_name, r.phone),
   phone: r.phone,
   email: r.contact_email || "",
   tags: Array.isArray(r.contact_tags) ? r.contact_tags : [],
@@ -410,7 +411,7 @@ export const taskView = (r) => ({
   assignedName: r.assigned_name || "",
   done: Boolean(r.done_at),
   doneAt: r.done_at,
-  ...(r.lead_title !== undefined ? { leadTitle: r.lead_title, contactName: r.contact_name, stageName: r.stage_name, conversationId: r.conversation_id || null } : {}),
+  ...(r.lead_title !== undefined ? { leadTitle: hideId(r.lead_title, r.phone), contactName: chatTitle(r.contact_name, r.phone), stageName: r.stage_name, conversationId: r.conversation_id || null } : {}),
 });
 
 export async function tasksOf(leadId, tenantId) {

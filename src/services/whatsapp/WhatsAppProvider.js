@@ -641,6 +641,18 @@ export class WhatsAppProvider {
     const pic = await client.getProfilePicFromServer(chatId);
     return [pic?.eurl, pic?.img, pic?.imgFull].find((u) => typeof u === "string" && u.startsWith("https://")) || "";
   }
+  // WhatsApp hides some people's numbers behind a "…@lid" id. When the phone has learned the real number, this returns its
+  // digits; otherwise "".
+  async resolveLidPhone(tenantId, sessionName, lidId) {
+    const client = this.getSession(tenantId, sessionName)?.client;
+    if (!client) throw new Error("WhatsApp session is offline");
+    const found = await client.page.evaluate(async (id) => {
+      if (!window.WPP?.contact?.getPnLidEntry) return "";
+      const entry = await window.WPP.contact.getPnLidEntry(id);
+      return String(entry?.phoneNumber?._serialized || entry?.phoneNumber?.id || "");
+    }, lidId);
+    return String(found).replace(/(?::\d+)?@c\.us$/, "").replace(/\D/g, "");
+  }
   async markRead(tenantId, sessionName, chatId) {
     const client = this.getSession(tenantId, sessionName)?.client;
     if (!client) throw new Error("WhatsApp session is offline");
