@@ -371,6 +371,83 @@ export class WhatsAppProvider {
     );
   }
 
+  async createGroup(tenantId, sessionName, title, participants) {
+    const session = this.getSession(tenantId, sessionName);
+    if (!session?.client) {
+      const error = new Error(`WhatsApp session '${sessionName}' is offline.`);
+      error.code = "SESSION_OFFLINE";
+      throw error;
+    }
+
+    const cleanTitle = String(title || "").trim();
+    if (!cleanTitle) {
+      const error = new Error("Group title is required.");
+      error.code = "INVALID_TITLE";
+      throw error;
+    }
+
+    const formattedParticipants = [
+      ...new Set(
+        (Array.isArray(participants) ? participants : [participants])
+          .map((p) => {
+            const raw = String(p || "").trim();
+            if (raw.endsWith("@c.us")) return raw;
+            const digits = raw.replace(/\D/g, "");
+            return digits ? `${digits}@c.us` : null;
+          })
+          .filter(Boolean),
+      ),
+    ];
+
+    if (formattedParticipants.length === 0) {
+      const error = new Error("At least one participant phone number is required.");
+      error.code = "INVALID_PARTICIPANTS";
+      throw error;
+    }
+
+    let result, timer;
+    try {
+      result = await Promise.race([
+        session.client.createGroup(cleanTitle, formattedParticipants),
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("WhatsApp group creation timed out.")),
+            25000,
+          );
+        }),
+      ]);
+    } catch (err) {
+      const error = new Error(err?.message || "WhatsApp group creation failed.");
+      error.code = "GROUP_CREATION_FAILED";
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const gid = result?.gid;
+    const groupId =
+      typeof gid === "string"
+        ? gid
+        : gid?._serialized ||
+          (gid?.user ? `${gid.user}@g.us` : null) ||
+          result?.id?._serialized ||
+          result?.id ||
+          null;
+
+    if (!groupId) {
+      const error = new Error("WhatsApp did not return a valid group ID.");
+      error.code = "GROUP_CREATION_FAILED";
+      throw error;
+    }
+
+    return {
+      groupId,
+      title: cleanTitle,
+      participants: formattedParticipants,
+      raw: result,
+    };
+  }
+
   async syncConversations(tenantId, sessionName) {
     const session = this.getSession(tenantId, sessionName);
     if (!session?.client) throw new Error("WhatsApp session is offline");

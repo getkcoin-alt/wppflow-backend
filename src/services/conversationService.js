@@ -300,3 +300,76 @@ export async function getConversationChanges({
     conversations: await withLabels(tenantId, rows.slice(0, cap).map(formatConversation)),
   };
 }
+
+export async function createGroupConversation({
+  tenantId,
+  sessionName,
+  title,
+  participants,
+  io = null,
+}) {
+  const result = await defaultWhatsAppProvider.createGroup(
+    tenantId,
+    sessionName,
+    title,
+    participants,
+  );
+  const groupId = result.groupId;
+  const convId = crypto.randomUUID();
+  const epoch = Math.floor(Date.now() / 1000);
+  const initialMsg = {
+    text: "Group created",
+    status: "sent",
+    fromMe: true,
+    timestamp: new Date().toISOString(),
+  };
+
+  const { rows } = await query(
+    `
+    INSERT INTO conversations (
+      id, tenant_id, session_name, provider_chat_id, phone, contact_name, avatar,
+      unread_count, is_group, group_members_count, last_active_epoch,
+      last_message
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    ON CONFLICT (tenant_id, session_name, provider_chat_id) DO UPDATE SET
+      contact_name = EXCLUDED.contact_name,
+      is_group = true,
+      group_members_count = EXCLUDED.group_members_count,
+      last_active_epoch = GREATEST(conversations.last_active_epoch, EXCLUDED.last_active_epoch),
+      updated_at = CURRENT_TIMESTAMP
+    RETURNING *
+  `,
+    [
+      convId,
+      tenantId,
+      sessionName,
+      groupId,
+      groupId,
+      result.title,
+      "",
+      0,
+      true,
+      result.participants.length + 1,
+      epoch,
+      JSON.stringify(initialMsg),
+    ],
+  );
+
+  const [chat] = await withLabels(tenantId, [formatConversation(rows[0])]);
+
+  if (io) {
+    emitForConversation(io, tenantId, chat.id, "conversation:updated", {
+      conversation: chat,
+    });
+    io.to(`tenant:${tenantId}`).emit("conversation:updated", {
+      conversation: chat,
+    });
+  }
+
+  return {
+    status: "success",
+    conversation: chat,
+    groupId,
+  };
+}

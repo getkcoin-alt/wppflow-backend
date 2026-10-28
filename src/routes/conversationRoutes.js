@@ -29,6 +29,7 @@ import {
   getConversationChanges,
   markConversationRead,
   syncConversations,
+  createGroupConversation,
 } from "../services/conversationService.js";
 import {
   getConversationMessages,
@@ -100,6 +101,57 @@ router.post(
     });
   }),
 );
+
+router.post(
+  "/group",
+  route(async (req, res) => {
+    let { title, participants, sessionName, channel } = req.body;
+    let name = sessionName || channel;
+    if (!name) {
+      const line = await query(
+        "SELECT session_name FROM whatsapp_sessions WHERE tenant_id=$1 AND status='CONNECTED' ORDER BY created_at ASC LIMIT 1",
+        [req.tenantId],
+      );
+      name = line.rows[0]?.session_name;
+    }
+    if (!name)
+      throw fail(400, "A connected WhatsApp session is required to create a group");
+
+    await assertSessionAccess(req, name);
+
+    const cleanTitle = typeof title === "string" ? title.trim() : "";
+    if (!cleanTitle) throw fail(400, "Group subject / title is required");
+    if (cleanTitle.length > 100)
+      throw fail(400, "Group subject must be 100 characters or less");
+
+    if (!Array.isArray(participants) || participants.length === 0) {
+      throw fail(400, "At least one participant is required to create a group");
+    }
+
+    const line = await query(
+      "SELECT status FROM whatsapp_sessions WHERE tenant_id=$1 AND session_name=$2",
+      [req.tenantId, name],
+    );
+    if (line.rows[0]?.status !== "CONNECTED") {
+      throw fail(
+        409,
+        "That WhatsApp number is not connected right now. Reconnect it under Numbers, or choose another number.",
+      );
+    }
+
+    const io = req.app.get("io");
+    const result = await createGroupConversation({
+      tenantId: req.tenantId,
+      sessionName: name,
+      title: cleanTitle,
+      participants,
+      io,
+    });
+
+    res.status(201).json(result);
+  }),
+);
+
 router.patch(
   "/:id",
   route(async (req, res) => {
