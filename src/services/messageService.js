@@ -509,13 +509,20 @@ export async function handleAckEvent({ tenantId, ackData, io = null }) {
     await c.query(
       `UPDATE conversations
        SET last_message = jsonb_set(
-         jsonb_set(coalesce(last_message, '{}'::jsonb), '{status}', to_jsonb(row.status)),
-         '{ack}', to_jsonb(row.ack::int)
+         jsonb_set(coalesce(last_message, '{}'::jsonb), '{status}', to_jsonb($3::text)),
+         '{ack}', to_jsonb($4::int)
        ),
        updated_at = now()
        WHERE id = $1 AND tenant_id = $2
-         AND (last_message->>'id' = $3 OR last_message->>'providerMessageId' = $4 OR last_message->>'id' IS NULL)`,
-      [row.conversation_id, tenantId, row.id, providerMessageId],
+         AND (last_message->>'id' = $5 OR last_message->>'providerMessageId' = $6 OR last_message->>'id' IS NULL)`,
+      [
+        row.conversation_id,
+        tenantId,
+        row.status,
+        row.ack,
+        row.id,
+        providerMessageId,
+      ],
     );
     await recordWebhook(
       tenantId,
