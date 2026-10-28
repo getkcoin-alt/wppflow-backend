@@ -430,8 +430,21 @@ export async function addTask(req, lead, { title, dueAt, assignedUserId }) {
   const who = assignedUserId ? await activeMember(req.tenantId, assignedUserId) : null;
   if (assignedUserId && !who) throw fail(400, "The follow-up can only go to an active teammate");
   const id = crypto.randomUUID();
-  await query("INSERT INTO lead_tasks(id,tenant_id,lead_id,title,due_at,assigned_user_id,created_by) VALUES($1,$2,$3,$4,$5,$6,$7)", [id, req.tenantId, lead.id, text, due.toISOString(), who?.id ?? lead.owner_user_id ?? req.user.id, req.user.id]);
+  const assigneeId = who?.id ?? lead.owner_user_id ?? req.user.id;
+  await query("INSERT INTO lead_tasks(id,tenant_id,lead_id,title,due_at,assigned_user_id,created_by) VALUES($1,$2,$3,$4,$5,$6,$7)", [id, req.tenantId, lead.id, text, due.toISOString(), assigneeId, req.user.id]);
   await announce(req.app.get("io"), req.tenantId, lead.id);
+  if (who && who.id !== req.user.id) {
+    await createNotifications({
+      io: req.app.get("io"),
+      tenantId: req.tenantId,
+      actor: req.user,
+      conversationId: null,
+      dedupeKey: `task-assigned:${id}:${who.id}`,
+      recipients: [{ userId: who.id, type: "lead_task" }],
+      title: `New follow-up assigned: ${text}`,
+      body: `${req.user.name || "A teammate"} assigned you a follow-up for ${lead.contact_name || lead.phone || "a lead"}.`,
+    }).catch((e) => console.error("Task assignment notice failed:", e.message));
+  }
   return id;
 }
 
@@ -448,7 +461,7 @@ export async function findTask(req, taskId) {
 // A follow-up from a chat that has no lead behind it: "call back on Thursday", without putting the person in the pipeline.
 export async function addChatTask(req, { conversationId, title, dueAt, assignedUserId }) {
   const convo = await assertConversationAccess(req, conversationId);
-  const chat = (await query("SELECT id,is_group,contact_id,assigned_user_id FROM conversations WHERE id=$1 AND tenant_id=$2", [conversationId, req.tenantId])).rows[0];
+  const chat = (await query("SELECT id,is_group,contact_id,contact_name,phone,assigned_user_id FROM conversations WHERE id=$1 AND tenant_id=$2", [conversationId, req.tenantId])).rows[0];
   if (!chat) throw fail(404, "Conversation not found");
   if (chat.is_group) throw fail(400, "A follow-up is for a person, not a group");
   const text = String(title || "").trim().slice(0, 255);
@@ -460,6 +473,18 @@ export async function addChatTask(req, { conversationId, title, dueAt, assignedU
   const id = crypto.randomUUID();
   const assignee = who?.id ?? chat.assigned_user_id ?? convo.owner_user_id ?? req.user.id;
   await query("INSERT INTO lead_tasks(id,tenant_id,lead_id,conversation_id,title,due_at,assigned_user_id,created_by) VALUES($1,$2,NULL,$3,$4,$5,$6,$7)", [id, req.tenantId, conversationId, text, due.toISOString(), assignee, req.user.id]);
+  if (assignee && assignee !== req.user.id) {
+    await createNotifications({
+      io: req.app.get("io"),
+      tenantId: req.tenantId,
+      actor: req.user,
+      conversationId,
+      dedupeKey: `task-assigned:${id}:${assignee}`,
+      recipients: [{ userId: assignee, type: "lead_task" }],
+      title: `New follow-up assigned: ${text}`,
+      body: `${req.user.name || "A teammate"} assigned you a follow-up for ${chat.contact_name || chat.phone || "this chat"}.`,
+    }).catch((e) => console.error("Chat task assignment notice failed:", e.message));
+  }
   return id;
 }
 
@@ -495,7 +520,7 @@ export async function patchTask(req, task, body) {
     const due = new Date(body.dueAt);
     if (!Number.isFinite(due.getTime())) throw fail(400, "Choose when it is due");
     set("due_at", due.toISOString());
-    sets.push("notified_at=NULL", "escalated_at=NULL");
+    sets.push("notified_at=NULL", "upcoming_notified_at=NULL", "escalated_at=NULL");
   }
   let reassigned = null;
   if (body.assignedUserId !== undefined) {
@@ -503,7 +528,7 @@ export async function patchTask(req, task, body) {
     if (!who) throw fail(400, "The follow-up can only go to an active teammate");
     if (who.id !== task.assigned_user_id) {
       set("assigned_user_id", who.id);
-      sets.push("notified_at=NULL", "escalated_at=NULL");
+      sets.push("notified_at=NULL", "upcoming_notified_at=NULL", "escalated_at=NULL");
       reassigned = who;
     }
   }
@@ -569,10 +594,36 @@ export async function dueTasks(req, { when = "today", everyone = false, until } 
   return rows.map(taskView);
 }
 
-// Tells the person a follow-up is for once it is due, one time.
+// Tells the person a follow-up is for in advance (~15 mins) and once it is due.
 export async function pumpLeadReminders(io) {
+  // 1. Advance warning for follow-ups coming up in the next 15 minutes
+  const upcoming = await query(
+    `SELECT t.id,t.tenant_id,t.title,t.due_at,t.assigned_user_id,t.conversation_id,l.owner_user_id,COALESCE(l.contact_id,cv.contact_id) AS contact_id,COALESCE(l.session_name,cv.session_name) AS session_name,
+            COALESCE(NULLIF(ct.name,''),l.contact_name,l.phone,NULLIF(cv.contact_name,''),cv.phone) AS who
+     FROM lead_tasks t LEFT JOIN leads l ON l.id=t.lead_id LEFT JOIN contacts ct ON ct.id=l.contact_id LEFT JOIN conversations cv ON cv.id=t.conversation_id
+     WHERE t.done_at IS NULL AND t.upcoming_notified_at IS NULL AND t.due_at > now() AND t.due_at <= now() + interval '15 minutes' AND (l.id IS NULL OR l.status='open') ORDER BY t.due_at LIMIT 50`,
+  );
+  for (const t of upcoming.rows) {
+    const claimed = await query("UPDATE lead_tasks SET upcoming_notified_at=now() WHERE id=$1 AND upcoming_notified_at IS NULL RETURNING id", [t.id]);
+    if (!claimed.rowCount) continue;
+    const recipient = t.assigned_user_id || t.owner_user_id || (await query("SELECT owner_user_id FROM whatsapp_sessions WHERE tenant_id=$1 AND session_name=$2", [t.tenant_id, t.session_name])).rows[0]?.owner_user_id;
+    const chat = t.conversation_id
+      ? { id: t.conversation_id }
+      : t.contact_id
+        ? (await query("SELECT id FROM conversations WHERE tenant_id=$1 AND contact_id=$2 AND ($3::varchar IS NULL OR session_name=$3::varchar) ORDER BY last_active_epoch DESC LIMIT 1", [t.tenant_id, t.contact_id, t.session_name])).rows[0]
+        : null;
+    const minutesLeft = Math.max(1, Math.round((new Date(t.due_at).getTime() - Date.now()) / 60000));
+    await createNotifications({
+      io, tenantId: t.tenant_id, actor: null, conversationId: chat?.id || null, dedupeKey: `task-upcoming:${t.id}`,
+      recipients: [{ userId: recipient, type: "lead_task" }],
+      title: `⏰ Upcoming follow-up in ~${minutesLeft}m: ${t.title}`,
+      body: `${t.who ? `${t.who} • ` : ""}Scheduled for ${new Date(t.due_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
+    }).catch((e) => console.error("Upcoming task notice failed:", e.message));
+  }
+
+  // 2. Due now notification
   const { rows } = await query(
-    `SELECT t.id,t.tenant_id,t.title,t.assigned_user_id,t.conversation_id,l.owner_user_id,COALESCE(l.contact_id,cv.contact_id) AS contact_id,COALESCE(l.session_name,cv.session_name) AS session_name,
+    `SELECT t.id,t.tenant_id,t.title,t.due_at,t.assigned_user_id,t.conversation_id,l.owner_user_id,COALESCE(l.contact_id,cv.contact_id) AS contact_id,COALESCE(l.session_name,cv.session_name) AS session_name,
             COALESCE(NULLIF(ct.name,''),l.contact_name,l.phone,NULLIF(cv.contact_name,''),cv.phone) AS who
      FROM lead_tasks t LEFT JOIN leads l ON l.id=t.lead_id LEFT JOIN contacts ct ON ct.id=l.contact_id LEFT JOIN conversations cv ON cv.id=t.conversation_id
      WHERE t.done_at IS NULL AND t.notified_at IS NULL AND t.due_at <= now() AND (l.id IS NULL OR l.status='open') ORDER BY t.due_at LIMIT 50`,
@@ -590,9 +641,9 @@ export async function pumpLeadReminders(io) {
     await createNotifications({
       io, tenantId: t.tenant_id, actor: null, conversationId: chat?.id || null, dedupeKey: `task:${t.id}`,
       recipients: [{ userId: recipient, type: "lead_task" }],
-      title: `Follow-up due: ${t.title}`,
-      body: t.who || "",
-    });
+      title: `🔔 Follow-up due now: ${t.title}`,
+      body: t.who ? `${t.who} • Due now` : "Due now",
+    }).catch((e) => console.error("Due task notice failed:", e.message));
   }
   await escalateOverdueTasks(io);
 }

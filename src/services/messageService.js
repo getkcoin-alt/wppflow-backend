@@ -49,7 +49,8 @@ const IGNORED_TYPES = new Set([
   "broadcast_notification",
   "ciphertext",
 ]);
-const emitMessage = (io, tenant, event, message) =>
+const emitMessage = (io, tenant, event, message) => {
+  const formatted = formatMessage(message);
   emitForConversation(
     io,
     tenant,
@@ -58,10 +59,22 @@ const emitMessage = (io, tenant, event, message) =>
     {
       conversationId: message.conversation_id,
       chatId: message.conversation_id,
-      message: formatMessage(message),
+      message: formatted,
     },
     { snapshot: true },
   );
+  if (io && tenant) {
+    io.to(`tenant:${tenant}`).emit(event, {
+      conversationId: message.conversation_id,
+      chatId: message.conversation_id,
+      message: formatted,
+    });
+    io.to(`tenant:${tenant}`).emit("conversation:updated", {
+      conversationId: message.conversation_id,
+      chatId: message.conversation_id,
+    });
+  }
+};
 export async function sendTextMessage({
   tenantId,
   conversationId,
@@ -559,6 +572,69 @@ export async function handleAckEvent({ tenantId, ackData, io = null }) {
   }
   return m ? { messageId: m.id, ack: m.ack, status: m.status } : null;
 }
+
+export async function handleRevokedMessage({ tenantId, sessionName, revokedData, io = null }) {
+  const providerMessageId = String(
+    revokedData?.providerMessageId || revokedData?.refId || revokedData?.id || "",
+  );
+  if (!tenantId || !providerMessageId) return null;
+
+  const found = await query(
+    `SELECT * FROM messages WHERE tenant_id = $1 AND provider_message_id = $2`,
+    [tenantId, providerMessageId],
+  );
+  if (!found.rows[0]) return null;
+  const msg = found.rows[0];
+
+  await query(
+    `UPDATE messages
+     SET type = 'revoked', status = 'deleted', text = '🚫 This message was deleted', media_url = '', file_name = '', updated_at = now()
+     WHERE id = $1 AND tenant_id = $2`,
+    [msg.id, tenantId],
+  );
+
+  await query(
+    `UPDATE conversations
+     SET last_message = jsonb_set(coalesce(last_message, '{}'::jsonb), '{text}', to_jsonb('🚫 This message was deleted'::text)),
+         updated_at = now()
+     WHERE id = $1 AND tenant_id = $2 AND (last_message->>'id' = $3 OR last_message->>'providerMessageId' = $4)`,
+    [msg.conversation_id, tenantId, msg.id, msg.provider_message_id],
+  );
+
+  const updated = await query(
+    "SELECT * FROM messages WHERE id = $1 AND tenant_id = $2",
+    [msg.id, tenantId],
+  );
+  const formatted = formatMessage(updated.rows[0]);
+
+  if (io) {
+    emitForConversation(io, tenantId, msg.conversation_id, "message:updated", {
+      conversationId: msg.conversation_id,
+      chatId: msg.conversation_id,
+      messageId: msg.id,
+      message: formatted,
+    });
+    io.to(`tenant:${tenantId}`).emit("message:updated", {
+      conversationId: msg.conversation_id,
+      chatId: msg.conversation_id,
+      messageId: msg.id,
+      message: formatted,
+    });
+    io.to(`tenant:${tenantId}`).emit("conversation:updated", {
+      conversationId: msg.conversation_id,
+      chatId: msg.conversation_id,
+    });
+    emitForConversation(
+      io,
+      tenantId,
+      msg.conversation_id,
+      "conversation:updated",
+      { conversationId: msg.conversation_id, chatId: msg.conversation_id },
+      { snapshot: true },
+    );
+  }
+  return formatted;
+}
 export const MEDIA_MESSAGE_TYPES = new Set([
   "image",
   "video",
@@ -726,6 +802,16 @@ export async function deleteMessage({
         messageId,
         message: formatted,
       });
+      io.to(`tenant:${tenantId}`).emit("message:updated", {
+        conversationId,
+        chatId: conversationId,
+        messageId,
+        message: formatted,
+      });
+      io.to(`tenant:${tenantId}`).emit("conversation:updated", {
+        conversationId,
+        chatId: conversationId,
+      });
       emitForConversation(
         io,
         tenantId,
@@ -773,6 +859,15 @@ export async function deleteMessage({
         conversationId,
         chatId: conversationId,
         messageId,
+      });
+      io.to(`tenant:${tenantId}`).emit("message:deleted", {
+        conversationId,
+        chatId: conversationId,
+        messageId,
+      });
+      io.to(`tenant:${tenantId}`).emit("conversation:updated", {
+        conversationId,
+        chatId: conversationId,
       });
       emitForConversation(
         io,

@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { query, withTransaction } from "../db/index.js";
 import { defaultWhatsAppProvider as provider } from "./whatsapp/WhatsAppProvider.js";
-import { handleIncomingMessage, handleAckEvent } from "./messageService.js";
+import { handleIncomingMessage, handleAckEvent, handleRevokedMessage } from "./messageService.js";
 import { fail } from "../middleware/http.js";
 import { emitForSession } from "./realtime.js";
 import { scheduleSync } from "./syncService.js";
@@ -166,6 +166,10 @@ export async function startTenantSession(
       onAck: (ackData) =>
         handleAckEvent({ tenantId, ackData, io }).catch((e) =>
           console.error("Receipt event failed:", e.message),
+        ),
+      onRevokedMessage: (revokedData) =>
+        handleRevokedMessage({ tenantId, sessionName, revokedData, io }).catch((e) =>
+          console.error("Revoked event failed:", e.message),
         ),
     })
     .catch(async (error) => {

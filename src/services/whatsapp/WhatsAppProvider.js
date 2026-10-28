@@ -210,6 +210,18 @@ export class WhatsAppProvider {
       });
     }
 
+    // Register revoked message handler (message deleted for everyone in WhatsApp mobile app)
+    if (client?.onRevokedMessage && callbacks.onRevokedMessage) {
+      client.onRevokedMessage((data) => {
+        notify(callbacks.onRevokedMessage, {
+          tenantId,
+          sessionName,
+          providerMessageId: String(data?.refId || data?.id || ""),
+          data,
+        });
+      });
+    }
+
     return sessionState;
   }
 
