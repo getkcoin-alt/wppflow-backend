@@ -20,6 +20,7 @@ import { query, withTransaction } from "../db/index.js";
 import { ENV } from "../config/env.js";
 import { route, fail, text } from "../middleware/http.js";
 import { sendWelcomeEmail } from "../services/emailService.js";
+import { GoogleSignInError, googleConfigured, identityFromCode, personFor, startSignIn } from "../services/googleAuth.js";
 import { sendStaffInvite } from "../services/mailer.js";
 import {
   requestPasswordReset,
@@ -178,6 +179,59 @@ router.post(
     const tenant = await context(rows[0], result.tenantId);
     res.cookie("refreshToken", result.refreshToken, cookieOptions);
     await respondSession(res, rows[0], tenant, false);
+  }),
+);
+// ── Continue with Google ─────────────────────────────────────────────────────────────────────────
+// Which ways of signing in this server offers, so the page shows only buttons that work.
+router.get("/providers", (req, res) => res.json({ status: "success", google: googleConfigured() }));
+
+const GOOGLE_COOKIE = "googleSignIn";
+const googleCookieOptions = { ...cookieOptions, maxAge: 10 * 60 * 1000 };
+const backToApp = (res, params) => {
+  res.clearCookie(GOOGLE_COOKIE, { ...googleCookieOptions, maxAge: undefined });
+  res.redirect(`${ENV.APP_URL}/?${new URLSearchParams(params).toString()}`);
+};
+router.get(
+  "/google/start",
+  authRateLimiter,
+  route(async (req, res) => {
+    if (!googleConfigured()) return backToApp(res, { google_error: "unavailable" });
+    const { url, cookie } = startSignIn({ plan: req.query.plan, interval: req.query.interval });
+    res.cookie(GOOGLE_COOKIE, Buffer.from(JSON.stringify(cookie)).toString("base64url"), googleCookieOptions);
+    res.redirect(url);
+  }),
+);
+router.get(
+  "/google/callback",
+  authRateLimiter,
+  route(async (req, res) => {
+    if (!googleConfigured()) return backToApp(res, { google_error: "unavailable" });
+    let saved = null;
+    try {
+      saved = JSON.parse(Buffer.from(String(req.cookies?.[GOOGLE_COOKIE] || ""), "base64url").toString("utf8"));
+    } catch {
+      /* no usable cookie: the state check below refuses */
+    }
+    const intent = saved ? { plan: saved.plan || "", interval: saved.interval || "" } : { plan: "", interval: "" };
+    try {
+      // the person said no, or Google said no: nothing to do but go back
+      if (req.query.error) throw new GoogleSignInError(req.query.error === "access_denied" ? "cancelled" : "failed", String(req.query.error).slice(0, 80));
+      const identity = await identityFromCode({ code: req.query.code, state: req.query.state, saved });
+      const { user, created } = await personFor(identity);
+      const tenant = await context(user);
+      const { refreshToken } = await generateRefreshToken(user.id, tenant.id);
+      res.cookie("refreshToken", refreshToken, cookieOptions);
+      if (tenant.id)
+        await query("INSERT INTO audit_events(tenant_id,actor_id,event_type) VALUES($1,$2,'auth.login')", [tenant.id, user.id]);
+      if (created)
+        sendWelcomeEmail({ to: user.email, name: user.name, workspaceName: tenant.name }).catch((e) => console.warn(`Welcome email dispatch skipped: ${e.message}`));
+      return backToApp(res, { google: created ? "new" : "ok", ...(intent.plan ? { plan: intent.plan } : {}), ...(intent.interval ? { interval: intent.interval } : {}) });
+    } catch (error) {
+      if (!(error instanceof GoogleSignInError)) throw error;
+      // the reason is for the server's log; the person is given one of a few plain words
+      console.warn(`Google sign-in refused (${error.code}): ${error.message}`);
+      return backToApp(res, { google_error: error.code, ...(intent.plan ? { plan: intent.plan } : {}), ...(intent.interval ? { interval: intent.interval } : {}) });
+    }
   }),
 );
 router.post(

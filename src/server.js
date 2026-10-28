@@ -262,7 +262,7 @@ export async function startServer() {
     if (ENV.AUTO_MIGRATE) await runMigrations();
     else {
       const { rows } = await query(
-        "SELECT 1 FROM schema_migrations WHERE version='033_profile_pictures'",
+        "SELECT 1 FROM schema_migrations WHERE version='034_user_identities'",
       );
       if (!rows.length)
         throw new Error(
