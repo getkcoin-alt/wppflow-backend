@@ -35,6 +35,7 @@ The runner creates uniquely named local PostgreSQL databases, applies migrations
 - Automations can also start on a number from another country, and "Let Riwo chat" holds a short, checked conversation (answers only from text the company wrote, stops when a person replies); state lives in `automation_chats` (migration 032).
 - Measured workspace aggregates, audit records, scoped hashed API keys, signed public-HTTPS webhook deliveries and retry logs.
 - Private object-storage uploads/downloads, tenant-owned attachments and supported incoming media capture.
+- Profile pictures: fetched from WhatsApp with `getProfilePicFromServer`, kept in `profile_pictures` (migration 033) and served at a signed `/api/avatars/...` address, so they do not depend on WhatsApp's expiring links.
 - Industry solutions (`src/solutions/`): optional, off by default, switched on per company by a platform admin. Scriwo Real Estate adds lead qualification, property inventory with rule-based matching, viewings and a revenue-leak detector under `/api/solutions/real_estate`. It needs the `leads` plan feature, adds tables only (migrations 030 and 031) and sends nothing to WhatsApp by itself. How it works, how to add another industry and what is not built: `docs/industry-solutions-progress.md` in the app repository.
 
 ## Important limits

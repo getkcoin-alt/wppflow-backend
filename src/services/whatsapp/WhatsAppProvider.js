@@ -631,6 +631,16 @@ export class WhatsAppProvider {
       };
     });
   }
+  // The current picture of a chat or a contact, asked of WhatsApp itself. The `profilePicThumbObj` that comes with a contact
+  // is deprecated by the library and, on current WhatsApp Web, is usually empty; this is the lookup it recommends instead.
+  // An empty string means the person has no picture, or hides it from us. The address is signed and runs out, so it is
+  // only ever used straight away to fetch the image, never stored as the picture.
+  async getProfilePicUrl(tenantId, sessionName, chatId) {
+    const client = this.getSession(tenantId, sessionName)?.client;
+    if (!client) throw new Error("WhatsApp session is offline");
+    const pic = await client.getProfilePicFromServer(chatId);
+    return [pic?.eurl, pic?.img, pic?.imgFull].find((u) => typeof u === "string" && u.startsWith("https://")) || "";
+  }
   async markRead(tenantId, sessionName, chatId) {
     const client = this.getSession(tenantId, sessionName)?.client;
     if (!client) throw new Error("WhatsApp session is offline");

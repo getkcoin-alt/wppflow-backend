@@ -14,6 +14,7 @@ import authRoutes from "./routes/authRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import { ensureSuperAdmin } from "./services/adminService.js";
 import conversationRoutes from "./routes/conversationRoutes.js";
+import avatarRoutes from "./routes/avatarRoutes.js";
 import sessionRoutes from "./routes/sessionRoutes.js";
 import campaignRoutes from "./routes/campaignRoutes.js";
 import contactRoutes from "./routes/contactRoutes.js";
@@ -213,6 +214,7 @@ io.on("connection", (socket) => {
 app.use(healthRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);
+app.use("/api/avatars", avatarRoutes);
 app.use("/api/conversations", conversationRoutes);
 app.use("/api/sessions", sessionRoutes);
 app.use("/api/campaigns", campaignRoutes);
@@ -260,7 +262,7 @@ export async function startServer() {
     if (ENV.AUTO_MIGRATE) await runMigrations();
     else {
       const { rows } = await query(
-        "SELECT 1 FROM schema_migrations WHERE version='032_automation_chats'",
+        "SELECT 1 FROM schema_migrations WHERE version='033_profile_pictures'",
       );
       if (!rows.length)
         throw new Error(

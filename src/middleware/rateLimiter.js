@@ -18,6 +18,15 @@ export const sendMessageRateLimiter = rateLimit({
   message: { status: 'error', message: 'Rate limit exceeded: maximum 60 messages per minute per tenant.' }
 });
 
+// Profile pictures are drawn by the browser straight from their own address, a few dozen for each screen of the inbox.
+export const avatarRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 1200,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { status: 'error', message: 'Too many requests. Please slow down.' }
+});
+
 export const generalRateLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 300,

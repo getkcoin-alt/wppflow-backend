@@ -14,6 +14,7 @@ import { defaultWhatsAppProvider as provider } from "../services/whatsapp/WhatsA
 import { route, text, fail } from "../middleware/http.js";
 import { normalizePhone, displayPhone, PHONE_HELP } from "../services/phone.js";
 import { setContactLabels, setContactTags } from "../services/labelService.js";
+import { avatarUrl } from "../services/avatarService.js";
 const router = express.Router();
 router.use(authenticateToken, requireTenantContext, requireScope("contacts"));
 router.use(requireWriteAccess);
@@ -23,6 +24,7 @@ const LABELS_OF = `COALESCE((SELECT jsonb_agg(jsonb_build_object('id',l.id,'name
 const CONSENT_OF = "(SELECT opt_in_status FROM consents WHERE tenant_id=contacts.tenant_id AND phone=contacts.phone) AS opt_in_status";
 export const contactView = (c) => ({
   ...c,
+  avatar: (/^\d{6,20}$/.test(c.phone || "") && avatarUrl("contact", c)) || c.avatar || "",
   tags: Array.isArray(c.tags) ? c.tags : [],
   labels: Array.isArray(c.labels) ? c.labels : [],
   whatsappName: c.whatsapp_name || "",

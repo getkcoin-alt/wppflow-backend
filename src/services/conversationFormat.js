@@ -1,3 +1,5 @@
+import { avatarUrl } from "./avatarService.js";
+
 export function formatConversation(c) {
   if (!c) return null;
   const lastMsg =
@@ -15,7 +17,8 @@ export function formatConversation(c) {
     contactId: c.contact_id || "",
     phone: c.phone,
     contactName: c.contact_name,
-    avatar: c.avatar || "",
+    // our own address for the picture: the one WhatsApp attached to the chat expires, and is usually empty
+    avatar: avatarUrl("chat", c) || c.avatar || "",
     unreadCount: Number(c.unread_count || 0),
     isGroup: Boolean(c.is_group),
     groupMembersCount: Number(c.group_members_count || 0),
