@@ -34,8 +34,9 @@ function readProcesses() {
 }
 
 const profileOf = (args) => {
-  const flag = args.find((a) => a.startsWith("--user-data-dir="));
-  return flag ? path.resolve(flag.slice("--user-data-dir=".length)) : null;
+  const line = args.join(" ");
+  const match = line.match(/--user-data-dir=([^\s\0]+)/);
+  return match ? path.resolve(match[1]) : null;
 };
 
 const parentOf = (pid) => {
@@ -51,13 +52,24 @@ const parentOf = (pid) => {
 const isLiveNode = (pid) => {
   if (pid <= 1) return false;
   try {
-    const exe = fs
-      .readFileSync(`/proc/${pid}/cmdline`, "utf8")
-      .split("\0")[0];
-    return /(^|\/)node(js)?$/.test(exe);
+    const cmd = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0")[0] || "";
+    return /(^|\/)(node(js)?|pm2)(\s|$)/i.test(cmd);
   } catch {
     return false;
   }
+};
+
+const rootAncestorOf = (pid) => {
+  let curr = pid;
+  const visited = new Set([curr]);
+  while (curr > 1) {
+    const parent = parentOf(curr);
+    if (parent <= 1 || isLiveNode(parent)) return { masterPid: curr, parentNode: parent };
+    if (visited.has(parent)) break;
+    visited.add(parent);
+    curr = parent;
+  }
+  return { masterPid: curr, parentNode: 1 };
 };
 
 function kill(pids) {
@@ -106,11 +118,9 @@ export async function sweepOrphanBrowsers(tokenRoot) {
   const root = path.resolve(tokenRoot) + path.sep;
   const orphans = readProcesses().filter((p) => {
     const profile = profileOf(p.args);
-    return (
-      p.pid !== process.pid &&
-      profile?.startsWith(root) &&
-      !isLiveNode(parentOf(p.pid))
-    );
+    if (p.pid === process.pid || !profile?.startsWith(root)) return false;
+    const { parentNode } = rootAncestorOf(p.pid);
+    return !isLiveNode(parentNode);
   });
   if (!orphans.length) return 0;
   kill(orphans.map((p) => p.pid));
