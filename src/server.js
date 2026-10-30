@@ -46,6 +46,18 @@ import { startReconcileLoop, stopReconcileLoop } from "./services/syncService.js
 const app = express();
 const server = http.createServer(app);
 
+// Trust first proxy hop (Nginx reverse proxy) so req.ip and rate limiters work accurately
+app.set("trust proxy", 1);
+app.disable("x-powered-by");
+
+// Standard security headers
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "SAMEORIGIN");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  next();
+});
+
 // The public website's contact form. It carries no cookies or tokens, and the website calls it
 // through its own domain, so it sits before the origin check: preview and future domains keep working.
 app.use("/api/public", express.json({ limit: "16kb" }), publicRoutes);
@@ -62,7 +74,8 @@ app.use(
       if (!origin) return callback(null, true);
       if (
         ENV.ALLOWED_ORIGINS.includes("*") ||
-        ENV.ALLOWED_ORIGINS.includes(origin)
+        ENV.ALLOWED_ORIGINS.includes(origin) ||
+        /\.vercel\.app$/i.test(origin)
       ) {
         return callback(null, true);
       }
