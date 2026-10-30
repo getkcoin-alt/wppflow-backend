@@ -3,7 +3,15 @@ import crypto from "node:crypto";
 import { query } from "../db/index.js";
 import { ENV } from "../config/env.js";
 import { route, fail, text } from "../middleware/http.js";
-import { contactFormLimiter, contactFormCeiling, checkoutOrderLimiter, checkoutReadLimiter, checkoutOrderCeiling } from "../middleware/rateLimiter.js";
+import {
+  contactFormLimiter,
+  contactFormCeiling,
+  checkoutOrderLimiter,
+  checkoutReadLimiter,
+  checkoutOrderCeiling,
+  rewoChatLimiter,
+} from "../middleware/rateLimiter.js";
+import { askOpenRouter, openRouterConfigured } from "../services/openRouter.js";
 import { sendLeadNotification } from "../services/mailer.js";
 import { publicPlans } from "../services/plans.js";
 import { billingSettings } from "../services/billingSettings.js";
@@ -103,6 +111,76 @@ router.post(
       notified.sent ? "sent" : notified.reason === "not_configured" ? "not_configured" : "failed",
     ]);
     res.status(201).json({ status: "success", id });
+  }),
+);
+
+const REWO_SYSTEM_PROMPT = `You are Rewo, the vibrant, friendly, and expert AI sales concierge for Scriwo (https://scriwo.com).
+Your purpose is to answer prospective customer questions about Scriwo, provide insights into our features, and motivate visitors to start a 14-day free trial or choose a subscription plan.
+
+Key Capabilities & Value Props of Scriwo:
+- What it is: A collaborative team workspace and inbox for WhatsApp. Multiple team members talk with customers from one official WhatsApp number with zero conflicts or duplicate replies.
+- Multi-Agent Team Collaboration: Live typing indicators show who is writing, chat ownership assignment, and private internal notes (notes customers never see).
+- State-of-the-Art Anti-Ban Broadcast Engine:
+  * Dynamic Human Jitter (8-14s natural variance).
+  * Spintax Syntax ({Hi|Hello|Hey}) creating unique phrasing for every contact.
+  * Simulated Typing Presence (displays "typing..." to WhatsApp servers before delivery).
+  * Smart Batching (20-25 messages per batch followed by automated 5-minute cool-down pauses).
+  * Instant Opt-Out Shield (automatically suppresses STOP replies so users never click "Report as Spam").
+  * Circuit Breaker (pauses broadcasts automatically if 3 consecutive failures occur).
+- Real Estate & Pipeline CRM: Automated lead qualification, viewing trackers, property matching, and stage management.
+- Smart Automations: Auto-welcome, keyword rules, advance follow-up reminders with acoustic chimes, and automatic routing.
+- Pricing & Subscription Plans:
+  * Starter, Growth, and Business plans tailored to team sizes.
+  * Instant ROI: Saves 15+ staff hours weekly, eliminates missed leads, and prevents costly WhatsApp account blocks.
+  * Free trial available: Visitors can sign up in seconds without a credit card.
+
+Guidelines:
+- Keep answers warm, engaging, and clear (2-3 concise paragraphs or bullet points).
+- Use natural emojis to keep the conversation pleasant.
+- Always include an encouraging call to action (e.g. "Ready to transform your WhatsApp sales? Click 'Start Free Trial' below to test it in under 2 minutes!").`;
+
+router.post(
+  "/rewo/chat",
+  rewoChatLimiter,
+  route(async (req, res) => {
+    const userMsg = String(req.body?.message || "").trim();
+    if (!userMsg) throw fail(400, "Message is required");
+    if (userMsg.length > 1000) throw fail(400, "Message must be under 1,000 characters");
+
+    if (!openRouterConfigured()) {
+      return res.json({ status: "fallback" });
+    }
+
+    try {
+      const history = Array.isArray(req.body?.history)
+        ? req.body.history
+            .slice(-4)
+            .map((h) => `${h.role === "user" ? "User" : "Rewo"}: ${h.content}`)
+            .join("\n")
+        : "";
+
+      const prompt = history
+        ? `Conversation history:\n${history}\n\nVisitor: ${userMsg}`
+        : userMsg;
+
+      const aiRes = await askOpenRouter({
+        system: REWO_SYSTEM_PROMPT,
+        user: prompt,
+        maxTokens: 600,
+      });
+
+      if (!aiRes?.text) {
+        return res.json({ status: "fallback" });
+      }
+
+      res.json({
+        status: "success",
+        reply: aiRes.text,
+      });
+    } catch (err) {
+      console.warn("Rewo public chat error:", err.message);
+      res.json({ status: "fallback" });
+    }
   }),
 );
 

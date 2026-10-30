@@ -93,3 +93,13 @@ export const checkoutOrderCeiling = rateLimit({
   validate: false,
   message: { status: 'error', message: 'We are very busy right now. Please try again shortly.' }
 });
+
+export const rewoChatLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 25,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: visitorOf,
+  validate: false,
+  message: { status: 'error', message: 'You are chatting a bit fast. Please wait a moment.' }
+});
