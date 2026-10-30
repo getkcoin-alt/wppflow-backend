@@ -19,6 +19,13 @@ export const campaignView = (c) => ({
   sessionName: c.session_name,
   createdAt: c.created_at,
   scheduledFor: c.scheduled_for,
+  batchSize: c.batch_size ?? 25,
+  cooldownSeconds: c.cooldown_seconds ?? 300,
+  cooldownUntil: c.cooldown_until || null,
+  circuitBreakerTripped: Boolean(c.circuit_breaker_tripped),
+  consecutiveFailures: c.consecutive_failures ?? 0,
+  spintaxEnabled: c.spintax_enabled !== false,
+  typingSimulation: c.typing_simulation !== false,
 });
 const ALL = "All Contacts";
 // Who a broadcast to this audience would reach, and who it would leave out and why. `tag` is a contact tag, or
@@ -73,8 +80,8 @@ export async function recordPermission(tenantId, tag = ALL, actorId = null) {
 
 export async function duplicateCampaign(tenantId, id) {
   const { rows } = await query(
-    `INSERT INTO campaigns(id,tenant_id,name,target_segment,template_text,session_name,anti_ban_delay_seconds,scheduled_for)
-     SELECT $3,tenant_id,left(name,240) || ' (copy)',target_segment,template_text,session_name,anti_ban_delay_seconds,'' FROM campaigns WHERE id=$1 AND tenant_id=$2 RETURNING *`,
+    `INSERT INTO campaigns(id,tenant_id,name,target_segment,template_text,session_name,anti_ban_delay_seconds,scheduled_for,batch_size,cooldown_seconds,spintax_enabled,typing_simulation)
+     SELECT $3,tenant_id,left(name,240) || ' (copy)',target_segment,template_text,session_name,anti_ban_delay_seconds,'',batch_size,cooldown_seconds,spintax_enabled,typing_simulation FROM campaigns WHERE id=$1 AND tenant_id=$2 RETURNING *`,
     [id, tenantId, crypto.randomUUID()],
   );
   if (!rows[0]) throw fail(404, "Campaign not found");
@@ -93,7 +100,9 @@ export async function startCampaign(tenantId, id) {
       throw fail(409, "Completed campaigns cannot be restarted");
     // the plan's monthly broadcast limit: starts are counted one company at a time, so two at once cannot both slip in
     await c.query("SELECT 1 FROM tenants WHERE id=$1 FOR UPDATE", [tenantId]);
-    await assertRoomForBroadcast(tenantId, camp, (sql, params) => c.query(sql, params));
+    await assertRoomForBroadcast(tenantId, camp, (sql, params) =>
+      c.query(sql, params),
+    );
     const session = await c.query(
       "SELECT id FROM whatsapp_sessions WHERE tenant_id=$1 AND session_name=$2",
       [tenantId, camp.session_name],
@@ -114,7 +123,7 @@ export async function startCampaign(tenantId, id) {
     if (!count.rows[0].count)
       throw fail(400, "No opted-in recipients match this segment");
     const updated = await c.query(
-      "UPDATE campaigns SET status='running',total_recipients=$1,started_at=COALESCE(started_at,now()),updated_at=now() WHERE id=$2 AND tenant_id=$3 RETURNING *",
+      "UPDATE campaigns SET status='running',circuit_breaker_tripped=false,consecutive_failures=0,total_recipients=$1,started_at=COALESCE(started_at,now()),updated_at=now() WHERE id=$2 AND tenant_id=$3 RETURNING *",
       [count.rows[0].count, id, tenantId],
     );
     return campaignView(updated.rows[0]);
@@ -123,10 +132,16 @@ export async function startCampaign(tenantId, id) {
 async function claimRecipient(campaign) {
   return withTransaction(async (c) => {
     const lock = await c.query(
-      "SELECT * FROM campaigns WHERE id=$1 AND tenant_id=$2 AND status='running' AND updated_at < now()-make_interval(secs=>GREATEST(anti_ban_delay_seconds,4)) FOR UPDATE SKIP LOCKED",
+      `SELECT * FROM campaigns 
+       WHERE id=$1 AND tenant_id=$2 AND status='running' 
+         AND (cooldown_until IS NULL OR cooldown_until <= now())
+         AND updated_at < now()-make_interval(secs=>GREATEST(anti_ban_delay_seconds,4)) 
+       FOR UPDATE SKIP LOCKED`,
       [campaign.id, campaign.tenant_id],
     );
     if (!lock.rowCount) return null;
+    const currentCamp = lock.rows[0];
+
     const result = await c.query(
       "SELECT * FROM campaign_recipients WHERE campaign_id=$1 AND tenant_id=$2 AND (status='pending' OR (status='preparing' AND claimed_at<now()-interval '2 minutes')) ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED",
       [campaign.id, campaign.tenant_id],
@@ -168,9 +183,31 @@ async function claimRecipient(campaign) {
       "UPDATE campaign_recipients SET status='preparing',claimed_at=now() WHERE id=$1",
       [r.id],
     );
-    await c.query("UPDATE campaigns SET updated_at=now() WHERE id=$1", [
-      campaign.id,
-    ]);
+
+    const batchSize = Math.max(5, currentCamp.batch_size || 25);
+    const cooldownSecs = Math.max(30, currentCamp.cooldown_seconds || 300);
+    const claimedCountRes = await c.query(
+      "SELECT count(*)::int AS count FROM campaign_recipients WHERE campaign_id=$1 AND tenant_id=$2 AND status != 'pending'",
+      [campaign.id, campaign.tenant_id],
+    );
+    const alreadyClaimed = claimedCountRes.rows[0]?.count || 0;
+    const remainingPendingRes = await c.query(
+      "SELECT count(*)::int AS count FROM campaign_recipients WHERE campaign_id=$1 AND tenant_id=$2 AND status = 'pending' AND id != $3",
+      [campaign.id, campaign.tenant_id, r.id],
+    );
+    const remainingPending = remainingPendingRes.rows[0]?.count || 0;
+
+    if (remainingPending > 0 && alreadyClaimed % batchSize === 0) {
+      await c.query(
+        "UPDATE campaigns SET cooldown_until=now()+make_interval(secs=>$1), updated_at=now() WHERE id=$2",
+        [cooldownSecs, campaign.id],
+      );
+    } else {
+      await c.query("UPDATE campaigns SET updated_at=now() WHERE id=$1", [
+        campaign.id,
+      ]);
+    }
+
     return {
       ...r,
       conversationId: conv.rows[0].id,

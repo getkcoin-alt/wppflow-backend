@@ -383,6 +383,40 @@ export class WhatsAppProvider {
     );
   }
 
+  async simulateTyping(tenantId, sessionName, to, durationMs = 2000) {
+    const session = this.getSession(tenantId, sessionName);
+    if (!session?.client) return false;
+    const rawStr = String(to).trim();
+    const cleanTarget = rawStr.includes("@")
+      ? rawStr
+      : `${rawStr.replace(/\D/g, "")}@c.us`;
+    try {
+      if (typeof session.client.startTyping === "function") {
+        await session.client.startTyping(cleanTarget, durationMs);
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async stopTyping(tenantId, sessionName, to) {
+    const session = this.getSession(tenantId, sessionName);
+    if (!session?.client) return false;
+    const rawStr = String(to).trim();
+    const cleanTarget = rawStr.includes("@")
+      ? rawStr
+      : `${rawStr.replace(/\D/g, "")}@c.us`;
+    try {
+      if (typeof session.client.stopTyping === "function") {
+        await session.client.stopTyping(cleanTarget);
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async createGroup(tenantId, sessionName, title, participants) {
     const session = this.getSession(tenantId, sessionName);
     if (!session?.client) {

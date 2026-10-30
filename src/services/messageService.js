@@ -392,6 +392,21 @@ export async function handleIncomingMessage({
     );
     if (!saved.rowCount) return null;
     if (!history && !msg.fromMe) {
+      const rawIncomingText = String(msg.text || "").trim();
+      if (/^(stop|unsubscribe|opt[\s-]?out|cancel|arret)$/i.test(rawIncomingText)) {
+        await c.query(
+          `INSERT INTO consents(tenant_id, phone, opt_in_status, source) 
+           VALUES($1, $2, false, 'incoming_keyword') 
+           ON CONFLICT(tenant_id, phone) DO UPDATE SET opt_in_status=false`,
+          [tenantId, phone],
+        );
+        await c.query(
+          `INSERT INTO suppressions(tenant_id, phone, reason) 
+           VALUES($1, $2, 'Customer replied STOP/UNSUBSCRIBE') 
+           ON CONFLICT(tenant_id, phone) DO NOTHING`,
+          [tenantId, phone],
+        );
+      }
       await c.query(
         "INSERT INTO outbox_events(tenant_id,aggregate_type,aggregate_id,event_type,payload) VALUES($1,'message',$2,'automation.incoming',$3) ON CONFLICT DO NOTHING",
         [

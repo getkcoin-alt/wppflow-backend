@@ -80,11 +80,18 @@ export async function dispatchMessage(payload, io) {
       [messageId, tenantId],
     );
     if (!result.rowCount) return false;
-    if (campaignId)
+    if (campaignId) {
+      // Dynamic Human Jitter: 2-7s random + length variation (1-3s)
+      const jitter =
+        Math.floor(Math.random() * 6) +
+        2 +
+        Math.min(3, Math.floor((text?.length || 0) / 75));
+      const totalInterval = campaignDelay + jitter;
       await c.query(
         "UPDATE whatsapp_sessions SET next_send_at=now()+make_interval(secs=>$3) WHERE tenant_id=$1 AND session_name=$2",
-        [tenantId, sessionName, campaignDelay],
+        [tenantId, sessionName, totalInterval],
       );
+    }
     await c.query(
       "UPDATE outbox_events SET status='dispatching' WHERE aggregate_id=$1 AND tenant_id=$2",
       [messageId, tenantId],
@@ -92,6 +99,17 @@ export async function dispatchMessage(payload, io) {
     return true;
   });
   if (!claimed) return;
+
+  if (campaignId) {
+    try {
+      const typingDuration = 1500 + Math.floor(Math.random() * 1000);
+      await provider.simulateTyping(tenantId, sessionName, to, typingDuration);
+      await new Promise((r) => setTimeout(r, Math.min(2000, typingDuration)));
+    } catch {
+      // Non-fatal if typing simulation fails
+    }
+  }
+
   let result;
   try {
     result = attachmentId
@@ -168,6 +186,12 @@ export async function dispatchMessage(payload, io) {
       "SELECT status,ack FROM messages WHERE id=$1 AND tenant_id=$2",
       [messageId, tenantId],
     );
+    if (campaignId) {
+      query(
+        "UPDATE campaigns SET consecutive_failures=0 WHERE id=$1 AND tenant_id=$2",
+        [campaignId, tenantId],
+      ).catch(() => {});
+    }
     emitForConversation(io, tenantId, conversationId, "message:updated", {
       conversationId,
       chatId: conversationId,
@@ -185,6 +209,31 @@ export async function dispatchMessage(payload, io) {
       "UPDATE outbox_events SET status=$1,last_error=$2,retry_at=now()+interval '10 seconds' WHERE aggregate_id=$3 AND tenant_id=$4",
       [offline ? "pending" : "uncertain", error.message, messageId, tenantId],
     );
+    if (campaignId) {
+      try {
+        const failRes = await query(
+          `UPDATE campaigns 
+           SET consecutive_failures = coalesce(consecutive_failures, 0) + 1,
+               circuit_breaker_tripped = CASE WHEN coalesce(consecutive_failures, 0) + 1 >= 3 THEN true ELSE circuit_breaker_tripped END,
+               status = CASE WHEN coalesce(consecutive_failures, 0) + 1 >= 3 THEN 'paused' ELSE status END
+           WHERE id = $1 AND tenant_id = $2
+           RETURNING consecutive_failures, circuit_breaker_tripped`,
+          [campaignId, tenantId],
+        );
+        if (failRes.rows[0]?.circuit_breaker_tripped) {
+          console.warn(
+            `[AntiBan Circuit Breaker] Tripped for campaign ${campaignId} after 3 consecutive failures. Paused automatically.`,
+          );
+          io?.to(`tenant:${tenantId}`).emit("campaign:status", {
+            campaignId,
+            status: "paused",
+            circuitBreakerTripped: true,
+          });
+        }
+      } catch (e) {
+        console.error("Failed to update campaign circuit breaker:", e.message);
+      }
+    }
     emitForConversation(io, tenantId, conversationId, "message:updated", {
       conversationId,
       messageId,

@@ -64,8 +64,13 @@ router.post(
     } else if (launch !== "draft") throw fail(400, "Choose the WhatsApp number to send from");
     if (launch !== "draft" && !(await audienceFor(req.tenantId, segment)).willReceive)
       throw fail(400, "Nobody in this audience has given permission yet, so nothing would be sent");
+    const batchSize = Math.max(5, Math.min(Number(req.body.batchSize) || 25, 100));
+    const cooldownSeconds = Math.max(60, Math.min(Number(req.body.cooldownSeconds) || 300, 1800));
+    const spintaxEnabled = req.body.spintaxEnabled !== false;
+    const typingSimulation = req.body.typingSimulation !== false;
+
     const { rows } = await query(
-      `INSERT INTO campaigns(id,tenant_id,name,target_segment,template_text,session_name,anti_ban_delay_seconds,scheduled_for) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      `INSERT INTO campaigns(id,tenant_id,name,target_segment,template_text,session_name,anti_ban_delay_seconds,scheduled_for,batch_size,cooldown_seconds,spintax_enabled,typing_simulation) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
       [
         crypto.randomUUID(),
         req.tenantId,
@@ -75,6 +80,10 @@ router.post(
         req.body.sessionName || null,
         Math.max(4, Math.min(Number(req.body.antiBanDelaySeconds) || 4, 60)),
         scheduled,
+        batchSize,
+        cooldownSeconds,
+        spintaxEnabled,
+        typingSimulation,
       ],
     );
     let campaign = campaignView(rows[0]);
