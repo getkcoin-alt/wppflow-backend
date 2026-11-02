@@ -289,11 +289,33 @@ router.get(
     const result = await searchInbox({
       tenantId: req.tenantId,
       ownerUserId: isManager(req) ? null : req.user.id,
+      userId: req.user.id ?? null,
       text: String(req.query.q ?? ""),
       sessionName: req.query.sessionName ? String(req.query.sessionName) : null,
       limit: req.query.limit,
     });
     res.json({ status: "success", ...result });
+  }),
+);
+
+/**
+ * GET /api/conversations/of-contact/:contactId
+ * The chat this person is already in (the most recent one this user may open), or null when there is none yet.
+ * A person WhatsApp only gave a hidden id for has no number to start a chat with, but always has this chat.
+ */
+router.get(
+  "/of-contact/:contactId",
+  route(async (req, res) => {
+    const staff = !isManager(req);
+    const params = [req.tenantId, String(req.params.contactId).slice(0, 64)];
+    let sql = `SELECT * FROM conversations WHERE tenant_id=$1 AND contact_id=$2 AND NOT is_group AND provider_chat_id !~ '@(broadcast|newsletter)$'`;
+    if (staff) {
+      params.push(req.user.id);
+      sql += ` AND (session_name IN (SELECT session_name FROM whatsapp_sessions WHERE tenant_id=$1 AND owner_user_id=$3) OR assigned_user_id=$3)`;
+    }
+    const { rows } = await query(`${sql} ORDER BY last_active_epoch DESC, id DESC LIMIT 1`, params);
+    const [conversation] = rows[0] ? await withLabels(req.tenantId, [formatConversation(rows[0])]) : [null];
+    res.json({ status: "success", conversation });
   }),
 );
 
@@ -385,6 +407,7 @@ router.get("/:id/messages", async (req, res) => {
       conversationId: req.params.id,
       limit,
       cursor,
+      userId: req.user.id ?? null,
     });
     res.json({
       status: "success",

@@ -155,29 +155,29 @@ test("Inbox Quoted Replies, Message Deletion, and last_message Status Suite", as
   );
 
   await t.test(
-    "5. Delete for me sets is_deleted=true and excludes message from getConversationMessages",
+    "5. Delete for me hides the message from that person only, and touches nothing else",
     async () => {
+      const other = (await query("INSERT INTO users(name,email,password_hash) VALUES('Other','other-hide@example.com','x') RETURNING id")).rows[0].id;
+      const me = (await query("INSERT INTO users(name,email,password_hash) VALUES('Me','me-hide@example.com','x') RETURNING id")).rows[0].id;
+      const before = (await query("SELECT last_message FROM conversations WHERE id=$1", [convId])).rows[0].last_message;
       const delForMeRes = await deleteMessage({
         tenantId,
         conversationId: convId,
         messageId: firstMsgId,
         forEveryone: false,
+        userId: me,
       });
 
       assert.strictEqual(delForMeRes.deleted, true);
       assert.strictEqual(delForMeRes.forEveryone, false);
 
-      const msgs = await getConversationMessages({
-        tenantId,
-        conversationId: convId,
-      });
-
-      const found = msgs.messages.find((m) => m.id === firstMsgId);
-      assert.strictEqual(
-        found,
-        undefined,
-        "Message deleted for me should not be returned in conversation messages",
-      );
+      const ids = async (userId) => (await getConversationMessages({ tenantId, conversationId: convId, userId })).messages.map((m) => m.id);
+      assert.ok(!(await ids(me)).includes(firstMsgId), "gone from the view of the person who hid it");
+      assert.ok((await ids(other)).includes(firstMsgId), "still there for every teammate");
+      assert.ok((await ids(null)).includes(firstMsgId));
+      assert.deepStrictEqual((await query("SELECT is_deleted,type,status FROM messages WHERE id=$1", [firstMsgId])).rows[0].is_deleted, false);
+      assert.deepStrictEqual((await query("SELECT last_message FROM conversations WHERE id=$1", [convId])).rows[0].last_message, before, "the shared chat preview does not change");
+      await assert.rejects(deleteMessage({ tenantId, conversationId: convId, messageId: firstMsgId, forEveryone: false }), /Sign in again/);
     },
   );
 });

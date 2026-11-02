@@ -26,7 +26,7 @@ export function snippetOf(text, term, radius = 48) {
   return { text: out, start: lead.length + (at - from), length: term.length };
 }
 
-export async function searchInbox({ tenantId, ownerUserId = null, text = "", sessionName = null, limit = 30 }) {
+export async function searchInbox({ tenantId, ownerUserId = null, userId = null, text = "", sessionName = null, limit = 30 }) {
   const term = String(text ?? "").trim().slice(0, 100);
   if (term.length < MIN_CHARS) return { query: term, chats: [], messages: [], partial: false };
   const cap = Math.min(Math.max(parseInt(limit, 10) || 30, 1), 50);
@@ -45,6 +45,13 @@ export async function searchInbox({ tenantId, ownerUserId = null, text = "", ses
     return sql;
   };
 
+  // messages this person hid from their own view are not found either
+  const hiddenBy = (params) => {
+    if (!userId) return "";
+    params.push(userId);
+    return ` AND NOT EXISTS (SELECT 1 FROM message_hidden h WHERE h.message_id=m.id AND h.user_id=$${params.length})`;
+  };
+
   const chatParams = [tenantId];
   const chatSql = `SELECT c.* FROM conversations c WHERE c.tenant_id=$1${visible(chatParams)} AND ${chatMatch(chatParams, term, "c")}
     ORDER BY c.last_active_epoch DESC, c.id DESC LIMIT ${cap}`;
@@ -59,7 +66,7 @@ export async function searchInbox({ tenantId, ownerUserId = null, text = "", ses
       const params = [tenantId, likeOf(term)];
       const sql = `SELECT m.id AS message_id, m.text, m.file_name, m.sender, m.timestamp_epoch, c.*
         FROM messages m JOIN conversations c ON c.id=m.conversation_id AND c.tenant_id=m.tenant_id
-        WHERE m.tenant_id=$1 AND m.type<>'internal_note' AND (m.text ILIKE $2 ESCAPE '\\' OR m.file_name ILIKE $2 ESCAPE '\\')${visible(params)}
+        WHERE m.tenant_id=$1 AND m.type<>'internal_note' AND m.is_deleted IS NOT TRUE AND (m.text ILIKE $2 ESCAPE '\\' OR m.file_name ILIKE $2 ESCAPE '\\')${hiddenBy(params)}${visible(params)}
         ORDER BY m.timestamp_epoch DESC, m.id DESC LIMIT ${cap}`;
       return (await c.query(sql, params)).rows;
     });

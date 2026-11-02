@@ -8,6 +8,8 @@ import { pumpCampaigns } from "../src/services/campaignService.js";
 import { handleIncomingMessage, deleteMessage } from "../src/services/messageService.js";
 import { personalise } from "../src/services/templating.js";
 import { closeSessions } from "../src/services/sessionService.js";
+import { dispatchMessage } from "../src/services/queue/messageQueue.js";
+import { defaultWhatsAppProvider as provider } from "../src/services/whatsapp/WhatsAppProvider.js";
 
 test("wording variations are only resolved when the broadcast has them switched on", () => {
   assert.equal(personalise("{Hello|Hello} {{first_name}}", { name: "Asha Rao" }), "Hello Asha");
@@ -42,7 +44,12 @@ test("Review fixes: who may call the API, honest deletes, batches that pause, an
     assert.deepEqual((await query("SELECT type,status,text FROM messages WHERE id=$1", [msg.id])).rows[0], { type: "text", status: "delivered", text: "sent by us" }, "the message is untouched");
     const here = await request(app).delete(`/api/conversations/${msg.conversation_id}/messages/${msg.id}`).set(owner);
     assert.equal(here.status, 200, JSON.stringify(here.body));
-    assert.equal((await query("SELECT is_deleted FROM messages WHERE id=$1", [msg.id])).rows[0].is_deleted, true);
+    const mine = (await request(app).get(`/api/conversations/${msg.conversation_id}/messages`).set(owner)).body.messages.map((m) => m.id);
+    assert.ok(!mine.includes(msg.id), "hidden from the person who deleted it");
+    const colleague = (await query("INSERT INTO users(name,email,password_hash) VALUES('Colleague','colleague@review.test','x') RETURNING *")).rows[0];
+    await query("INSERT INTO memberships(tenant_id,user_id,role) VALUES($1,$2,'admin')", [tenantId, colleague.id]);
+    const theirs = (await request(app).get(`/api/conversations/${msg.conversation_id}/messages`).set({ Authorization: `Bearer ${generateAccessToken(colleague, tenantId, "admin")}` })).body.messages.map((m) => m.id);
+    assert.ok(theirs.includes(msg.id), "and still there for a teammate");
   });
 
   await t.test("a new group starts with up to 100 people", async () => {
@@ -91,5 +98,60 @@ test("Review fixes: who may call the API, honest deletes, batches that pause, an
       await query("UPDATE campaigns SET status='paused' WHERE id=$1", [made.body.campaign.id]);
     }
     assert.deepEqual(texts, { true: ["Hello there"], false: ["{Hello|Hello} there"] });
+  });
+
+  await t.test("a broadcast pauses itself after three failed sends in a row, and a success starts the count again", async () => {
+    const made = await request(app).post("/api/campaigns").set(owner).send({ name: "Breaker", templateText: "Hello", sessionName: "shop", launch: "now", targetSegment: "All Contacts", batchSize: 100, typingSimulation: false });
+    assert.equal(made.status, 201, JSON.stringify(made.body));
+    const id = made.body.campaign.id;
+    const original = provider.sendTextMessage;
+    let works = false;
+    provider.sendTextMessage = async () => {
+      if (!works) throw new Error("WhatsApp refused");
+      return { providerMessageId: `ok-${Math.random()}`, ack: 1 };
+    };
+    const attempt = async (succeeds) => {
+      works = succeeds;
+      await query("UPDATE campaigns SET updated_at=now()-interval '1 minute', cooldown_until=NULL WHERE id=$1 AND status='running'", [id]);
+      await pumpCampaigns();
+      await query("UPDATE whatsapp_sessions SET next_send_at=now()-interval '1 minute' WHERE tenant_id=$1", [tenantId]);
+      const row = (await query("SELECT payload FROM outbox_events WHERE event_type='message.outgoing' AND payload->>'campaignId'=$1 AND status='pending' ORDER BY id LIMIT 1", [id])).rows[0];
+      if (row) await dispatchMessage(row.payload);
+      return (await query("SELECT status,circuit_breaker_tripped AS tripped,consecutive_failures AS fails FROM campaigns WHERE id=$1", [id])).rows[0];
+    };
+    try {
+      assert.deepEqual(await attempt(false), { status: "running", tripped: false, fails: 1 });
+      assert.deepEqual(await attempt(false), { status: "running", tripped: false, fails: 2 });
+      assert.deepEqual(await attempt(true), { status: "running", tripped: false, fails: 0 }, "a success starts the count again");
+      assert.deepEqual(await attempt(false), { status: "running", tripped: false, fails: 1 });
+      assert.deepEqual(await attempt(false), { status: "running", tripped: false, fails: 2 });
+      assert.deepEqual(await attempt(false), { status: "paused", tripped: true, fails: 3 }, "the third failure in a row pauses it");
+      const shown = (await request(app).get("/api/campaigns").set(owner)).body.campaigns.find((c) => c.id === id);
+      assert.equal(shown.circuitBreakerTripped, true, "and the screen is told why");
+      const sentBefore = (await query("SELECT count(*)::int AS n FROM campaign_recipients WHERE campaign_id=$1 AND status<>'pending'", [id])).rows[0].n;
+      await attempt(true);
+      assert.equal((await query("SELECT count(*)::int AS n FROM campaign_recipients WHERE campaign_id=$1 AND status<>'pending'", [id])).rows[0].n, sentBefore, "nothing more goes out while it is paused");
+      const restarted = await request(app).post(`/api/campaigns/${id}/start`).set(owner);
+      assert.equal(restarted.status, 200, JSON.stringify(restarted.body));
+      assert.deepEqual((await query("SELECT status,circuit_breaker_tripped AS tripped,consecutive_failures AS fails FROM campaigns WHERE id=$1", [id])).rows[0], { status: "running", tripped: false, fails: 0 }, "starting it again clears the pause");
+    } finally {
+      provider.sendTextMessage = original;
+    }
+  });
+
+  await t.test("the chat of a saved person can be found by their contact, even when WhatsApp gave no number", async () => {
+    await handleIncomingMessage({ tenantId, sessionName: "shop", msg: { providerMessageId: "wamid.HID1", fromMe: false, remoteId: "83752348860497@lid", rawType: "chat", type: "text", text: "hello from a hidden number", timestampEpoch: Math.floor(Date.now() / 1000), senderName: "", ack: 2 } });
+    const contact = (await query("SELECT id FROM contacts WHERE tenant_id=$1 AND phone='83752348860497@lid'", [tenantId])).rows[0];
+    const found = await request(app).get(`/api/conversations/of-contact/${contact.id}`).set(owner);
+    assert.equal(found.status, 200, JSON.stringify(found.body));
+    assert.equal(found.body.conversation.providerChatId, "83752348860497@lid");
+    assert.equal(found.body.conversation.contactName, "Unknown contact");
+    const none = await request(app).get("/api/conversations/of-contact/no-such-contact").set(owner);
+    assert.equal(none.body.conversation, null);
+    // a teammate who does not own that number and was not given the chat cannot open it this way
+    const outsider = (await query("INSERT INTO users(name,email,password_hash) VALUES('Outsider','outsider@review.test','x') RETURNING *")).rows[0];
+    await query("INSERT INTO memberships(tenant_id,user_id,role) VALUES($1,$2,'agent')", [tenantId, outsider.id]);
+    const blocked = await request(app).get(`/api/conversations/of-contact/${contact.id}`).set({ Authorization: `Bearer ${generateAccessToken(outsider, tenantId, "agent")}` });
+    assert.equal(blocked.body.conversation, null);
   });
 });

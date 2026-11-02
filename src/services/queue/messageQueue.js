@@ -187,7 +187,7 @@ export async function dispatchMessage(payload, io) {
       [messageId, tenantId],
     );
     if (campaignId) {
-      query(
+      await query(
         "UPDATE campaigns SET consecutive_failures=0 WHERE id=$1 AND tenant_id=$2",
         [campaignId, tenantId],
       ).catch(() => {});

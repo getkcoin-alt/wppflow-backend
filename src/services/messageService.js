@@ -662,6 +662,7 @@ export async function getConversationMessages({
   conversationId,
   limit = 50,
   cursor = null,
+  userId = null,
 }) {
   const count = Math.min(Math.max(Number(limit) || 50, 1), 100),
     params = [tenantId, conversationId];
@@ -672,6 +673,11 @@ export async function getConversationMessages({
       throw fail(400, "Invalid cursor");
     params.push(Number(epoch), id);
     filter = " AND (timestamp_epoch,id)<($3,$4)";
+  }
+  // what this person chose to hide from their own view ("Delete for me")
+  if (userId) {
+    params.push(userId);
+    filter += ` AND NOT EXISTS (SELECT 1 FROM message_hidden h WHERE h.message_id=messages.id AND h.user_id=$${params.length})`;
   }
   const { rows } = await query(
     `SELECT * FROM messages WHERE tenant_id=$1 AND conversation_id=$2 AND (is_deleted IS NOT TRUE)${filter} ORDER BY timestamp_epoch DESC,id DESC LIMIT $${params.length + 1}`,
@@ -739,14 +745,15 @@ export async function deleteMessage({
   }
 
   const providerChatId = msg.provider_chat_id || msg.phone;
-  if (msg.provider_message_id && providerChatId) {
+  // "for me" is only about this person's own view: WhatsApp and the rest of the team are not touched
+  if (forEveryone && msg.provider_message_id && providerChatId) {
     try {
       await provider.deleteMessage(
         tenantId,
         msg.session_name,
         providerChatId,
         msg.provider_message_id,
-        !forEveryone,
+        false,
       );
     } catch (err) {
       console.warn(`WhatsApp deleteMessage: ${err.message}`);
@@ -794,52 +801,17 @@ export async function deleteMessage({
     }
     return { message: formatted, deleted: true, forEveryone: true };
   } else {
+    if (!userId) throw fail(400, "Sign in again to hide a message");
     await query(
-      `UPDATE messages SET is_deleted = TRUE, updated_at = now() WHERE id = $1 AND tenant_id = $2`,
-      [messageId, tenantId],
+      "INSERT INTO message_hidden(tenant_id,message_id,user_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
+      [tenantId, messageId, userId],
     );
-
-    const latest = await query(
-      `SELECT * FROM messages WHERE tenant_id = $1 AND conversation_id = $2 AND (is_deleted IS NOT TRUE)
-       ORDER BY timestamp_epoch DESC, id DESC LIMIT 1`,
-      [tenantId, conversationId],
-    );
-    if (latest.rows[0]) {
-      const lm = latest.rows[0];
-      await query(
-        `UPDATE conversations
-         SET last_message = $1, last_active_epoch = $2, updated_at = now()
-         WHERE id = $3 AND tenant_id = $4`,
-        [
-          JSON.stringify({
-            id: lm.id,
-            text: lm.text,
-            timestamp: lm.timestamp,
-            status: lm.status,
-            fromMe: lm.sender === "agent",
-          }),
-          lm.timestamp_epoch,
-          conversationId,
-          tenantId,
-        ],
-      );
-    }
-
-    if (io) {
-      emitForConversation(io, tenantId, conversationId, "message:deleted", {
-        conversationId,
-        chatId: conversationId,
-        messageId,
-      });
-      emitForConversation(
-        io,
-        tenantId,
-        conversationId,
-        "conversation:updated",
-        { conversationId, chatId: conversationId },
-        { snapshot: true },
-      );
-    }
+    // only this person's own screens are told: nobody else's view changes
+    io?.to(`user:${userId}`).emit("message:deleted", {
+      conversationId,
+      chatId: conversationId,
+      messageId,
+    });
     return { messageId, deleted: true, forEveryone: false };
   }
 }
