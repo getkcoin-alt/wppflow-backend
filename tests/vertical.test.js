@@ -73,6 +73,29 @@ test("Scriwo Homes: signing up on the homes address gives a property workspace w
     assert.equal((await query("SELECT count(*)::int AS n FROM pipeline_stages WHERE tenant_id=$1", [tenantId])).rows[0].n, 7, "nothing was removed");
   });
 
+  await t.test("the 14-day trial from the website: sign up first, and the company is on Growth for 14 days, without the real-estate layer", async () => {
+    const res = await post({ name: "Trial Tara", email: "tara@homes.test", companyName: "Tara Trading", trial: "growth" });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.tenant.plan, "Growth");
+    const row = (await query("SELECT plan,sessions_limit,period_start,period_end FROM tenants WHERE id=$1", [res.body.tenant.id])).rows[0];
+    assert.deepEqual([row.plan, row.sessions_limit], ["Growth", 3]);
+    assert.equal(Math.round((new Date(row.period_end).getTime() - new Date(row.period_start).getTime()) / day), TRIAL_DAYS);
+    assert.equal((await query("SELECT count(*)::int AS n FROM tenant_solutions WHERE tenant_id=$1", [res.body.tenant.id])).rows[0].n, 0);
+    assert.equal((await query("SELECT count(*)::int AS n FROM audit_events WHERE tenant_id=$1 AND event_type='trial.started'", [res.body.tenant.id])).rows[0].n, 1);
+    // a made-up trial name gives nothing
+    const odd = await post({ name: "Odd", email: "odd3@homes.test", companyName: "Odd Co", trial: "business" });
+    assert.equal(odd.body.tenant.plan, "Free");
+  });
+
+  await t.test("choosing real estate on the sign-up form gives the property workspace and the same trial, from any address", async () => {
+    const res = await post({ name: "Rana Realty", email: "rana@homes.test", companyName: "Rana Realty", industry: "real_estate" });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.tenant.plan, "Growth");
+    assert.deepEqual((await query("SELECT solution_key,enabled FROM tenant_solutions WHERE tenant_id=$1", [res.body.tenant.id])).rows.map((r) => [r.solution_key, r.enabled]), [["real_estate", true]]);
+    const other = await post({ name: "Other Co", email: "otherco@homes.test", companyName: "Other Co", industry: "retail" });
+    assert.equal(other.body.tenant.plan, "Free");
+  });
+
   await t.test("signing up anywhere else is the ordinary free workspace, and a made-up vertical is ignored", async () => {
     for (const [email, vertical] of [["plain@homes.test", undefined], ["odd@homes.test", "__proto__"], ["odd2@homes.test", "banks"]]) {
       const res = await post({ name: "Plain", email, companyName: `Plain ${email}`, vertical });

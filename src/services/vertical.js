@@ -38,18 +38,24 @@ export const brandingOf = (key) => {
   return v ? { vertical: v.key, name: v.name, tagline: v.tagline, intro: v.intro, trialDays: TRIAL_DAYS } : { vertical: null, name: "Scriwo", tagline: "", intro: "", trialDays: 0 };
 };
 
+// The 14-day Growth trial for a company that has just signed up and is still on Free (a company that already has a plan is left
+// alone). Returns whether it was given. The trial is a renewal date 14 days away, so the existing rule ends it by itself.
+export async function startTrial({ tenantId, user = null, plan = "Growth", numbers = 3, source = "website" }) {
+  const given = (await query(
+    `UPDATE tenants SET plan=$2, sessions_limit=$3, period_start=CURRENT_DATE, period_end=CURRENT_DATE + $4::int WHERE id=$1 AND plan='Free' RETURNING id`,
+    [tenantId, plan, numbers, TRIAL_DAYS],
+  )).rowCount > 0;
+  if (given) await query("INSERT INTO audit_events(tenant_id,actor_id,event_type,metadata) VALUES($1,$2,'trial.started',$3)", [tenantId, user?.id ?? null, JSON.stringify({ plan, days: TRIAL_DAYS, source })]);
+  return given;
+}
+
 // Sets a company that has just signed up on a vertical's address up as that vertical: the trial, the industry layer, and the
 // pipeline's steps. Safe to run twice. A failure is logged and never stops the signup: the company still has a working workspace.
 export async function applyVertical({ tenantId, user, key, io = null }) {
   const v = verticalKey(key) && VERTICALS[verticalKey(key)];
   if (!v) return false;
   try {
-    // only a company that is on Free (a new one) is given the trial; one that is already paying is left alone
-    await query(
-      `UPDATE tenants SET plan=$2, sessions_limit=$3, period_start=CURRENT_DATE, period_end=CURRENT_DATE + $4::int
-        WHERE id=$1 AND plan='Free'`,
-      [tenantId, v.trialPlan, v.trialNumbers, TRIAL_DAYS],
-    );
+    await startTrial({ tenantId, user, plan: v.trialPlan, numbers: v.trialNumbers, source: v.key });
     await ensurePipeline(tenantId, v.pipelinePreset);
     await setSolution({ tenantId, key: v.solution, enabled: true, actor: user ? { id: user.id, name: user.name } : null, io });
     await query("INSERT INTO audit_events(tenant_id,actor_id,event_type,metadata) VALUES($1,$2,'vertical.applied',$3)", [tenantId, user?.id ?? null, JSON.stringify({ vertical: v.key, trialDays: TRIAL_DAYS })]);

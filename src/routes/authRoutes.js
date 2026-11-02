@@ -20,7 +20,7 @@ import { query, withTransaction } from "../db/index.js";
 import { ENV } from "../config/env.js";
 import { route, fail, text } from "../middleware/http.js";
 import { sendWelcomeEmail } from "../services/emailService.js";
-import { applyVertical, brandingOf, verticalKey, verticalOfHost } from "../services/vertical.js";
+import { applyVertical, brandingOf, startTrial, verticalKey, verticalOfHost } from "../services/vertical.js";
 import { GoogleSignInError, googleConfigured, identityFromCode, personFor, startSignIn } from "../services/googleAuth.js";
 import { sendStaffInvite } from "../services/mailer.js";
 import {
@@ -130,10 +130,13 @@ router.post(
       sessionsLimit: 1,
     });
     // signing up on a vertical's address (homes.scriwo.com) sets the company up for that industry, with a 14-day trial
-    const vertical = verticalKey(req.body.vertical);
+    // Choosing "real estate" on the sign-up form, or the 14-day trial on the website, sets the company up the same way.
+    const vertical = verticalKey(req.body.vertical) || (req.body.industry === "real_estate" ? "homes" : null);
+    const trial = String(req.body.trial || "").toLowerCase() === "growth";
     if (vertical) await applyVertical({ tenantId: tenant.id, user, key: vertical, io: req.app.get("io") });
+    else if (trial) await startTrial({ tenantId: tenant.id, user, source: "website" });
     res.status(201);
-    await respondSession(res, user, { ...(vertical ? (await context(user)) : tenant), role });
+    await respondSession(res, user, { ...(vertical || trial ? await context(user) : tenant), role });
     sendWelcomeEmail({
       to: email,
       name: name.trim(),
@@ -204,6 +207,7 @@ router.get(
     if (!googleConfigured()) return backToApp(res, { google_error: "unavailable" });
     const { url, cookie } = startSignIn({ plan: req.query.plan, interval: req.query.interval });
     cookie.vertical = verticalKey(req.query.vertical) || "";
+    cookie.trial = String(req.query.trial || "").toLowerCase() === "growth" ? "growth" : "";
     res.cookie(GOOGLE_COOKIE, Buffer.from(JSON.stringify(cookie)).toString("base64url"), googleCookieOptions);
     res.redirect(url);
   }),
@@ -231,6 +235,7 @@ router.get(
       if (tenant.id)
         await query("INSERT INTO audit_events(tenant_id,actor_id,event_type) VALUES($1,$2,'auth.login')", [tenant.id, user.id]);
       if (created && tenant.id && verticalKey(saved?.vertical)) await applyVertical({ tenantId: tenant.id, user, key: saved.vertical, io: req.app.get("io") });
+      else if (created && tenant.id && saved?.trial === "growth") await startTrial({ tenantId: tenant.id, user, source: "website" });
       if (created)
         sendWelcomeEmail({ to: user.email, name: user.name, workspaceName: tenant.name }).catch((e) => console.warn(`Welcome email dispatch skipped: ${e.message}`));
       return backToApp(res, { google: created ? "new" : "ok", ...(intent.plan ? { plan: intent.plan } : {}), ...(intent.interval ? { interval: intent.interval } : {}) });
