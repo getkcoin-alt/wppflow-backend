@@ -45,6 +45,43 @@ export const AUTOMATION_TEMPLATES = [
     },
     needs: ["about"],
   },
+  {
+    id: "real-estate-sales-assistant",
+    group: "Sales",
+    recommended: true,
+    name: "Property assistant: qualify every buyer or renter, then hand over to a consultant",
+    description:
+      "When someone writes about a property, Riwo welcomes them and asks what a good consultant asks first: buy, rent or sell, which area, what type and how many bedrooms, budget, and when. It keeps the answers, opens the lead in your property pipeline and, the moment they ask for prices, options or a proposal, sends your formal message that a consultant is reviewing their requirements and hands the chat over with a summary. Riwo never states a price, availability or a return: those come from your own agents.",
+    hint: "Write a few sentences about your agency: where you work, what you list and your opening hours. Riwo answers short questions from this only. Read my website can write it for you.",
+    rule: {
+      triggerType: "first_message",
+      triggerCondition: "",
+      actionType: "ai_chat",
+      actionSummary: "",
+      config: {
+        reply: "Hi {{first_name}}, welcome to {{company}}! 🏡 Thanks for getting in touch. I'll ask a few quick questions so the right consultant can help you.",
+        knowledge: "",
+        handoff: "Thanks! I've passed this to our team and a consultant will get back to you soon.",
+        maxReplies: 8,
+        sourceOptions: [],
+        sales: {
+          enabled: true,
+          questions: [
+            "Are you looking to buy, rent or sell?",
+            "Which area or community do you prefer?",
+            "What type of property, and how many bedrooms?",
+            "What is your budget range?",
+            "When are you planning to move or buy?",
+          ],
+          formal:
+            "Thank you for your interest, {{first_name}}. Our property consultant {{executive}} has been assigned to review your requirements and will share matching options and details with you shortly.",
+          followUpHours: 1,
+          stageName: "Offer made",
+        },
+      },
+    },
+    needs: ["about"],
+  },
   // ── People from other countries ────────────────────────────────────────────────────────────────
   {
     id: "foreign-welcome-riwo",

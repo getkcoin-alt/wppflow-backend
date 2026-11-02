@@ -20,6 +20,7 @@ import { query, withTransaction } from "../db/index.js";
 import { ENV } from "../config/env.js";
 import { route, fail, text } from "../middleware/http.js";
 import { sendWelcomeEmail } from "../services/emailService.js";
+import { applyVertical, brandingOf, verticalKey, verticalOfHost } from "../services/vertical.js";
 import { GoogleSignInError, googleConfigured, identityFromCode, personFor, startSignIn } from "../services/googleAuth.js";
 import { sendStaffInvite } from "../services/mailer.js";
 import {
@@ -128,8 +129,11 @@ router.post(
       plan: "Free",
       sessionsLimit: 1,
     });
+    // signing up on a vertical's address (homes.scriwo.com) sets the company up for that industry, with a 14-day trial
+    const vertical = verticalKey(req.body.vertical);
+    if (vertical) await applyVertical({ tenantId: tenant.id, user, key: vertical, io: req.app.get("io") });
     res.status(201);
-    await respondSession(res, user, { ...tenant, role });
+    await respondSession(res, user, { ...(vertical ? (await context(user)) : tenant), role });
     sendWelcomeEmail({
       to: email,
       name: name.trim(),
@@ -183,6 +187,8 @@ router.post(
 );
 // ── Continue with Google ─────────────────────────────────────────────────────────────────────────
 // Which ways of signing in this server offers, so the page shows only buttons that work.
+// What the sign-in and sign-up pages call themselves on a vertical's address; Scriwo itself everywhere else.
+router.get("/branding", (req, res) => res.json({ status: "success", ...brandingOf(verticalOfHost(req.query.host)) }));
 router.get("/providers", (req, res) => res.json({ status: "success", google: googleConfigured() }));
 
 const GOOGLE_COOKIE = "googleSignIn";
@@ -197,6 +203,7 @@ router.get(
   route(async (req, res) => {
     if (!googleConfigured()) return backToApp(res, { google_error: "unavailable" });
     const { url, cookie } = startSignIn({ plan: req.query.plan, interval: req.query.interval });
+    cookie.vertical = verticalKey(req.query.vertical) || "";
     res.cookie(GOOGLE_COOKIE, Buffer.from(JSON.stringify(cookie)).toString("base64url"), googleCookieOptions);
     res.redirect(url);
   }),
@@ -223,6 +230,7 @@ router.get(
       res.cookie("refreshToken", refreshToken, cookieOptions);
       if (tenant.id)
         await query("INSERT INTO audit_events(tenant_id,actor_id,event_type) VALUES($1,$2,'auth.login')", [tenant.id, user.id]);
+      if (created && tenant.id && verticalKey(saved?.vertical)) await applyVertical({ tenantId: tenant.id, user, key: saved.vertical, io: req.app.get("io") });
       if (created)
         sendWelcomeEmail({ to: user.email, name: user.name, workspaceName: tenant.name }).catch((e) => console.warn(`Welcome email dispatch skipped: ${e.message}`));
       return backToApp(res, { google: created ? "new" : "ok", ...(intent.plan ? { plan: intent.plan } : {}), ...(intent.interval ? { interval: intent.interval } : {}) });
