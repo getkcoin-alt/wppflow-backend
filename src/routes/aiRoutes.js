@@ -12,6 +12,7 @@ import { query } from "../db/index.js";
 import { assertConversationAccess } from "../services/access.js";
 import {
   aiStatus,
+  routeCommand,
   suggestReply,
   summarize,
   suggestLead,
@@ -100,6 +101,15 @@ router.post(
       status: "success",
       ...(await translateText({ tenant: req.tenant, text: req.body?.text, target: req.body?.target })),
     }),
+  ),
+);
+
+// "Ask Riwo" in the search bar: which of the app's own commands a few typed words ask for.
+router.post(
+  "/command",
+  perPerson,
+  route(async (req, res) =>
+    res.json({ status: "success", ...(await routeCommand({ tenant: req.tenant, text: req.body?.text, commands: req.body?.commands })) }),
   ),
 );
 

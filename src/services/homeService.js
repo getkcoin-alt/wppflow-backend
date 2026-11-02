@@ -4,6 +4,7 @@ import { dueTasks } from "./leadService.js";
 import { numberHealth } from "./numberHealth.js";
 import { formatConversation } from "./conversationFormat.js";
 import { chatTitle, hideId } from "./personName.js";
+import { latestBrief } from "./aiBriefService.js";
 
 // What "Today" shows: what needs this person now, found with plain rules (no AI is asked, so it is quick and free), most
 // urgent first. The same visibility rule as the inbox applies: managers see everything, staff only the chats of their own
@@ -113,11 +114,12 @@ async function setupSteps(req) {
 export async function homeFor(req, { until } = {}) {
   const now = Math.floor(Date.now() / 1000);
   const manager = isManager(req);
-  const [waiting, tasks, numbers, setup] = await Promise.all([
+  const [waiting, tasks, numbers, setup, brief] = await Promise.all([
     waitingChats(req, now),
     followUps(req, until),
     numberProblems(req),
     manager ? setupSteps(req) : Promise.resolve(null),
+    manager ? latestBrief(req.tenantId) : Promise.resolve(null),
   ]);
   // most urgent first: customers past the reply target, a number that is down, late follow-ups, waiting customers, follow-ups later today
   const rank = (i) =>
@@ -140,5 +142,7 @@ export async function homeFor(req, { until } = {}) {
     needsYou: items.slice(0, MAX_ITEMS),
     more: Math.max(0, items.length - MAX_ITEMS),
     setup: setup && setup.done < setup.total ? setup : null,
+    // the morning brief, for owners and administrators
+    brief,
   };
 }

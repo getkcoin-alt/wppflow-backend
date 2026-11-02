@@ -8,6 +8,8 @@ import { pumpReports } from "./reportService.js";
 import { pumpNumberHealth } from "./numberHealth.js";
 import { pumpRealEstate } from "../solutions/real-estate/leaks.js";
 import { pumpAiPrep } from "./aiPrepService.js";
+import { pumpAutopilot } from "./autopilotService.js";
+import { pumpAiBrief } from "./aiBriefService.js";
 let timer, running;
 export function startDomainJobs(io) {
   timer = setInterval(() => {
@@ -23,6 +25,8 @@ export function startDomainJobs(io) {
       pumpNumberHealth(io),
       pumpRealEstate(io),
       pumpAiPrep(io),
+      pumpAutopilot(io),
+      pumpAiBrief(io),
     ])
       .then((results) => {
         for (const r of results)
