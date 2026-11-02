@@ -386,6 +386,38 @@ export async function moveLead(req, lead, { stageId, beforeLeadId, lostReason })
   await announce(req.app.get("io"), req.tenantId, lead.id);
 }
 
+// A rule moves a lead on (never back to an earlier step, never one that is won or lost). Used by the sales assistant.
+export async function advanceLeadBySystem({ tenantId, leadId, stageId, actor, io = null, detail = {} }) {
+  const lead = (
+    await query(
+      `SELECT l.*,s.position AS stage_position,s.name AS stage_name FROM leads l JOIN pipeline_stages s ON s.id=l.stage_id WHERE l.id=$1 AND l.tenant_id=$2`,
+      [leadId, tenantId],
+    )
+  ).rows[0];
+  const target = (await query("SELECT * FROM pipeline_stages WHERE id=$1 AND tenant_id=$2", [stageId, tenantId])).rows[0];
+  if (!lead || !target || lead.status !== "open" || target.kind !== "open" || target.pipeline_id !== lead.pipeline_id || target.position <= lead.stage_position) return false;
+  await withTransaction(async (c) => {
+    await c.query("UPDATE leads SET stage_id=$1,rank=$2,stage_changed_at=now(),updated_at=now() WHERE id=$3 AND tenant_id=$4", [target.id, await topRank(c, target.id), lead.id, tenantId]);
+    await record(c, lead, actor, "stage", { from: lead.stage_name, to: target.name, ...detail });
+  });
+  await announce(io, tenantId, lead.id);
+  return true;
+}
+
+// A line in the lead's history written by a rule (for example what the customer said they need).
+export async function noteOnLead({ tenantId, leadId, actor, type, detail }) {
+  await record({ query }, { tenant_id: tenantId, id: leadId }, actor, type, detail);
+}
+
+// A follow-up made by a rule rather than a teammate. Reminders and the "overdue for a day" escalation treat it like any other.
+export async function addSystemTask({ tenantId, leadId = null, conversationId = null, title, dueAt, assignedUserId = null, io = null }) {
+  if (!leadId && !conversationId) throw new Error("A follow-up needs a lead or a chat");
+  const id = crypto.randomUUID();
+  await query("INSERT INTO lead_tasks(id,tenant_id,lead_id,conversation_id,title,due_at,assigned_user_id,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,NULL)", [id, tenantId, leadId, conversationId, String(title).slice(0, 255), new Date(dueAt).toISOString(), assignedUserId]);
+  if (leadId) await announce(io, tenantId, leadId);
+  return id;
+}
+
 export async function deleteLead(tenantId, id, io) {
   const { rows } = await query("DELETE FROM leads WHERE id=$1 AND tenant_id=$2 RETURNING session_name,owner_user_id", [id, tenantId]);
   if (!rows[0]) throw fail(404, "Lead not found");

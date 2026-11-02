@@ -32,6 +32,8 @@ export function formatConversation(c) {
     isClosed: Boolean(c.is_closed),
     // the customer asked to talk to a person: first on the team's list until a teammate answers
     needsHuman: Boolean(c.needs_human_since),
+    // why: person (asked for one), pricing (asked for a price or proposal) or qualified (answered every question)
+    needsHumanReason: c.needs_human_since ? c.needs_human_reason || "person" : null,
     isPinned: Boolean(c.is_pinned),
     // epoch seconds of the customer's first message nobody on the team has answered yet, or null
     awaitingSince: c.awaiting_since === null || c.awaiting_since === undefined ? null : Number(c.awaiting_since),

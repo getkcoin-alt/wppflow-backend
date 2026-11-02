@@ -54,7 +54,7 @@ export async function noteHumanRequest({ tenantId, conversationId, messageId, te
   if (!asksForPerson(text, { machineAnswering: spoken })) return null;
   const marked = (
     await query(
-      `UPDATE conversations SET needs_human_since=COALESCE(needs_human_since, extract(epoch FROM now())::bigint), updated_at=now()
+      `UPDATE conversations SET needs_human_since=COALESCE(needs_human_since, extract(epoch FROM now())::bigint), needs_human_reason='person', updated_at=now()
         WHERE id=$1 AND tenant_id=$2 AND NOT is_group AND needs_human_since IS NULL RETURNING id,contact_name,phone,assigned_user_id,session_name`,
       [conversationId, tenantId],
     )

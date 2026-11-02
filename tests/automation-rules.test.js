@@ -97,7 +97,7 @@ test("Automation rules: what they can start on, what they do, and the limits tha
     const res = await request(app).get("/api/automations/templates").set(owner);
     assert.equal(res.status, 200);
     assert.deepEqual(res.body.templates.map((x) => x.id), AUTOMATION_TEMPLATES.map((x) => x.id));
-    assert.deepEqual([...new Set(res.body.templates.map((x) => x.group))], ["People from other countries", "Start here", "Answer common questions", "Send to your team", "Organise leads"]);
+    assert.deepEqual([...new Set(res.body.templates.map((x) => x.group))], ["Sales", "People from other countries", "Start here", "Answer common questions", "Send to your team", "Organise leads"]);
   });
 
   await t.test("a rule is checked before it is saved, and says what is wrong", async () => {

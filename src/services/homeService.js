@@ -56,6 +56,7 @@ async function waitingChats(req, now) {
         assignedTo: chat.assignedTo,
         isMine: r.assigned_user_id === req.user.id,
         askedForPerson: Boolean(r.needs_human_since),
+        askedReason: r.needs_human_since ? r.needs_human_reason || "person" : null,
         prep: r.ai_summary || r.ai_draft ? { summary: r.ai_summary, mood: r.ai_mood, moodNote: r.ai_mood_note, nextStep: r.ai_next_step, draft: r.ai_draft } : null,
       };
     }),

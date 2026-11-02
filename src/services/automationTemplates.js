@@ -1,3 +1,4 @@
+import { SALES } from "./automationRules.js";
 // Ready-made automation rules. A person picks one, finishes the few details only they know (their prices,
 // who takes complaints, their opening hours) and saves it paused. Keywords are in English, Arabic and Hindi
 // where the words are common, and can be changed.
@@ -12,6 +13,38 @@ const keyword = (triggerCondition, match = "contains", extra = {}) => ({
 });
 
 export const AUTOMATION_TEMPLATES = [
+  // ── Sales ──────────────────────────────────────────────────────────────────────────────────────
+  {
+    id: "sales-assistant",
+    group: "Sales",
+    recommended: true,
+    name: "Sales assistant: ask the right questions, then hand over to an executive",
+    description:
+      "When someone writes to you for the first time, Riwo welcomes them and asks your questions one at a time (what they need, how many, where, by when). It answers their short questions from what you write about your business and keeps what they tell you. The moment they ask for pricing or a proposal, Riwo sends one formal message that an executive is reviewing their requirements, hands the chat to your team with a summary, adds them to your pipeline in the Proposal step and sets a follow-up so nobody is left waiting. Riwo never states a price. Each Riwo answer uses one of your daily Riwo requests; the pricing hand-off does not.",
+    hint: "Write a few sentences about your business, and change the questions to the ones your team asks every new customer. Choose the Proposal step if your pipeline names it differently.",
+    rule: {
+      triggerType: "first_message",
+      triggerCondition: "",
+      actionType: "ai_chat",
+      actionSummary: "",
+      config: {
+        reply: "Hi {{first_name}}, welcome to {{company}}! 👋 Thanks for getting in touch. I'll ask a few quick questions so the right person can help you.",
+        knowledge: "",
+        handoff: "Thanks! I've passed this to our team and someone will get back to you soon.",
+        maxReplies: 7,
+        sourceOptions: [],
+        sales: {
+          enabled: true,
+          questions: SALES.defaultQuestions,
+          formal:
+            "Thank you for your interest, {{first_name}}. Our executive {{executive}} has been assigned to review your requirements and will share the proposal and pricing with you shortly.",
+          followUpHours: 2,
+          stageName: "",
+        },
+      },
+    },
+    needs: ["about"],
+  },
   // ── People from other countries ────────────────────────────────────────────────────────────────
   {
     id: "foreign-welcome-riwo",

@@ -8,7 +8,7 @@ import { personalise } from "./templating.js";
 import { createLeadFromChat } from "./leadService.js";
 import { matchesKeywords, withinHours, sendsReply } from "./automationRules.js";
 import { isForeignNumber } from "./countries.js";
-import { autoChatMode, runAutoChatTurn, startAutoChat, Skipped } from "./autoChat.js";
+import { autoChatMode, runAutoChatTurn, startSales, startAutoChat, Skipped } from "./autoChat.js";
 
 export const automationView = (a) => ({
   ...a,
@@ -128,6 +128,10 @@ async function perform(rule, { message, conv, contact, company, tenant, mode, ex
       }
       // the chat is marked as held before the welcome goes out, so a customer's quick answer is not missed
       await startAutoChat({ tenantId, conversationId: conv.id, automationId: rule.id, messageId: message.id });
+      if (rule.config?.sales?.enabled) {
+        await startSales({ rule, message, conv, contact, tenant, execution, io, say });
+        return; // the welcome went out with the first question, or the hand-off was the answer
+      }
       break;
     default:
       throw new Error("Unsupported automation action");

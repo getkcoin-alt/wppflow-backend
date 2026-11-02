@@ -13,7 +13,7 @@ import { AUTOMATION_TEMPLATES } from "../services/automationTemplates.js";
 import { requireFeature } from "../services/plans.js";
 import { callingCodeOf, COUNTRIES } from "../services/countries.js";
 import { unavailableReason } from "../services/aiService.js";
-import { AUTO_CHAT, DEFAULT_SOURCES } from "../services/automationRules.js";
+import { AUTO_CHAT, DEFAULT_SOURCES, SALES } from "../services/automationRules.js";
 const router = express.Router();
 router.use(
   authenticateToken,
@@ -55,7 +55,7 @@ router.get(
       homeCodes: suggested,
       homeFrom: suggested.length ? "the WhatsApp number you linked" : "",
       riwo: { available: unavailableReason(req.tenant) === null, reason: unavailableReason(req.tenant) },
-      chat: { defaultReplies: AUTO_CHAT.defaultReplies, maxReplies: AUTO_CHAT.maxReplies, sources: DEFAULT_SOURCES, handoff: AUTO_CHAT.handoff },
+      chat: { defaultReplies: AUTO_CHAT.defaultReplies, maxReplies: AUTO_CHAT.maxReplies, sources: DEFAULT_SOURCES, handoff: AUTO_CHAT.handoff, sales: { maxQuestions: SALES.maxQuestions, questions: SALES.defaultQuestions, formal: SALES.formal, followUpHours: SALES.followUpHours } },
     });
   }),
 );

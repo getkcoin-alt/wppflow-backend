@@ -18,6 +18,17 @@ export const AUTO_CHAT = {
   handoff: "Thanks! I've passed this to our team and someone will get back to you soon.",
   triggers: ["first_message", "foreign_number"],
 };
+// The sales assistant is an option of the same rule: Riwo asks the company's own questions and, when the customer asks for
+// pricing or a proposal, sends a fixed formal message and hands the chat to an executive.
+export const SALES = {
+  maxQuestions: 6,
+  minQuestion: 3,
+  maxQuestion: 200,
+  formal:
+    "Thank you for your interest, {{first_name}}. Our executive {{executive}} has been assigned to review your requirements and will share the proposal and pricing with you shortly.",
+  followUpHours: 2,
+  defaultQuestions: ["What are you looking for?", "How many do you need, and for which location?", "When do you need it by?", "Do you have a budget range in mind?"],
+};
 export const DEFAULT_SOURCES = ["AI", "Website", "Social media", "Word of mouth"];
 export const MATCHES = ["contains", "word", "exact"];
 
@@ -102,6 +113,33 @@ function checkText(value, label, max) {
   return s;
 }
 
+function cleanSales(raw) {
+  if (!raw || raw.enabled !== true) return null;
+  const questions = [];
+  for (const q of Array.isArray(raw.questions) ? raw.questions : []) {
+    const text = String(q ?? "").replace(/\s+/g, " ").trim();
+    if (!text) continue;
+    if (text.length < SALES.minQuestion || text.length > SALES.maxQuestion) throw fail(400, `Each question must be ${SALES.minQuestion} to ${SALES.maxQuestion} characters`);
+    if (/<\/?[a-z_]+>/i.test(text)) throw fail(400, "A question can't contain tags");
+    if (!questions.some((x) => x.toLowerCase() === text.toLowerCase())) questions.push(text);
+  }
+  if (!questions.length) throw fail(400, "Add at least one question for Riwo to ask");
+  if (questions.length > SALES.maxQuestions) throw fail(400, `Use up to ${SALES.maxQuestions} questions`);
+  // {{executive}} is filled in by the sales assistant itself (the teammate the chat is with), so it is not one of the common fields
+  let formal = SALES.formal;
+  if (String(raw.formal ?? "").trim()) {
+    formal = words(raw.formal, "The message for pricing and proposals", 600);
+    checkText(formal.replace(/\{\{\s*executive\s*\}\}/gi, ""), "The message for pricing and proposals", 600);
+  }
+  let followUpHours = SALES.followUpHours;
+  if (raw.followUpHours !== undefined && raw.followUpHours !== null && raw.followUpHours !== "") {
+    followUpHours = Number(raw.followUpHours);
+    if (!Number.isInteger(followUpHours) || followUpHours < 0 || followUpHours > 72) throw fail(400, "The follow-up for your team must be 0 to 72 hours (0 for none)");
+  }
+  const stageName = String(raw.stageName ?? "").trim().slice(0, 40);
+  return { enabled: true, questions, formal, followUpHours, stageName };
+}
+
 // Turns what the browser sent into what is stored, or says exactly what is wrong. `teammate` answers
 // whether a name belongs to an active teammate.
 export async function cleanRule(body, { teammate }) {
@@ -148,7 +186,9 @@ export async function cleanRule(body, { teammate }) {
       throw fail(400, "Write a few sentences about your business for Riwo to answer from. It will not answer anything that is not in them.");
     config.knowledge = knowledge;
     config.handoff = String(input.handoff ?? "").trim() ? checkText(input.handoff, "The hand-over message", 500) : AUTO_CHAT.handoff;
-    const replies = input.maxReplies === undefined || input.maxReplies === "" ? AUTO_CHAT.defaultReplies : Number(input.maxReplies);
+    const sales = cleanSales(input.sales);
+    if (sales) config.sales = sales;
+    const replies = input.maxReplies === undefined || input.maxReplies === "" ? (sales ? Math.min(sales.questions.length + 3, AUTO_CHAT.maxReplies) : AUTO_CHAT.defaultReplies) : Number(input.maxReplies);
     if (!Number.isInteger(replies) || replies < 1 || replies > AUTO_CHAT.maxReplies)
       throw fail(400, `Riwo can reply 1 to ${AUTO_CHAT.maxReplies} times in a chat`);
     config.maxReplies = replies;
