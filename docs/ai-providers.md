@@ -1,7 +1,7 @@
 # AI providers
 
-Riwo can run on several AI services at once. They are tried in order; when one is busy, rejects its key or is down, the next one
-answers. Nothing about a provider's limits is hardcoded, because free tiers change often: check each provider's own limits page
+Riwo can run on several AI services at once and shares the work between the free ones (round robin, weighted by size), so no
+single free allowance is used up first. When one is busy, out of tokens, rejects its key or is down, the others carry on. Nothing about a provider's limits is hardcoded, because free tiers change often: check each provider's own limits page
 before relying on a number.
 
 ## Adding every key at once
@@ -27,7 +27,7 @@ log, is written to `.env` (permissions 600, with a dated backup) and restarts th
 cd /opt/wppflow-backend
 bash scripts/add-ai-key.sh groq          # or gemini, cerebras, mistral, nvidia, openrouter, anthropic
 bash scripts/add-ai-key.sh list          # which are set (never shows a key)
-bash scripts/add-ai-key.sh order         # the order they are tried in
+bash scripts/add-ai-key.sh order         # which are used, and the tie order
 bash scripts/add-ai-key.sh self          # your own GPUs / any OpenAI-compatible server
 bash scripts/add-ai-key.sh remove groq
 ```
@@ -51,10 +51,23 @@ Check each provider's own page for its current free limits.
 
 Any other OpenAI-compatible service: name it in `AI_PROVIDERS` and set `AI_<NAME>_BASE_URL`, `AI_<NAME>_API_KEY`, `AI_<NAME>_MODEL`.
 
+## How the work is shared
+
+`AI_ROUTING=balanced` (the default):
+- Your own GPU servers always go first, and paid Claude always goes last, whatever else is connected.
+- The free providers in between take turns. Each request goes to the one that is least busy for its size (its requests in the last
+  minute against its `AI_<NAME>_RPM`), so a provider with twice the limit gets twice the traffic. Equally idle ones rotate.
+- When a provider answers "too many requests" it rests for as long as it says. When it says its **daily** allowance (tokens or
+  requests per day) is used up, it rests for what it asks, up to 6 hours, and the others take its share. It rejoins by itself.
+- If every provider is resting, they are tried anyway, because a rest is a guess.
+
+`AI_ROUTING=ordered` always uses the first one that works, in the order of `AI_PROVIDERS` (or the default order below).
+
 ## Choosing the order
 
-`AI_PROVIDERS=groq,gemini,openrouter` tries them in that order. Without it the order is: your own servers, Groq, Gemini, Cerebras,
-Mistral, NVIDIA, OpenRouter, Claude. `AI_PROVIDER=anthropic` uses that one provider and no other.
+`AI_PROVIDERS=groq,gemini,openrouter` limits and orders the providers (the order is used for ties and for `AI_ROUTING=ordered`).
+Without it the order is: your own servers, Groq, Gemini, Cerebras, Mistral, NVIDIA, OpenRouter, Claude.
+`AI_PROVIDER=anthropic` uses that one provider and no other.
 
 ## Per provider settings
 

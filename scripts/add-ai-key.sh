@@ -4,7 +4,7 @@
 #
 #   cd /opt/wppflow-backend && bash scripts/add-ai-key.sh groq
 #   bash scripts/add-ai-key.sh list            # which providers are set (never shows a key)
-#   bash scripts/add-ai-key.sh order           # choose the order they are tried in
+#   bash scripts/add-ai-key.sh order           # choose which are used, and the order for ties
 #   bash scripts/add-ai-key.sh self            # your own GPUs or any OpenAI-compatible server
 #
 # Providers: groq gemini cerebras mistral nvidia openrouter anthropic

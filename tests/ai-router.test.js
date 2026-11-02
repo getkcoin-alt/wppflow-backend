@@ -10,7 +10,7 @@ import { complete, resetRouter, routerStatus } from "../src/services/ai/router.j
 import { setAiFetch } from "../src/services/ai/http.js";
 import { aiStatus, aiProvider } from "../src/services/aiService.js";
 
-const ENVS = ["GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "CEREBRAS_API_KEY", "MISTRAL_API_KEY", "NVIDIA_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "AI_PROVIDER", "AI_PROVIDERS", "AI_SELF_BASE_URL", "AI_SELF_API_KEY", "AI_SELF_MODEL", "AI_GROQ_RPM", "AI_GROQ_DATA", "AI_GEMINI_DATA", "AI_REQUIRE_NO_TRAINING", "AI_GROQ_MODELS", "AI_GROQ_MODELS_FAST"];
+const ENVS = ["GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "CEREBRAS_API_KEY", "MISTRAL_API_KEY", "NVIDIA_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "AI_PROVIDER", "AI_PROVIDERS", "AI_SELF_BASE_URL", "AI_SELF_API_KEY", "AI_SELF_MODEL", "AI_GROQ_RPM", "AI_GROQ_DATA", "AI_GEMINI_DATA", "AI_REQUIRE_NO_TRAINING", "AI_GROQ_MODELS", "AI_GROQ_MODELS_FAST", "AI_ROUTING", "AI_CEREBRAS_RPM", "AI_GEMINI_RPM"];
 const saved = Object.fromEntries(ENVS.map((k) => [k, process.env[k]]));
 const clean = () => {
   for (const k of ENVS) delete process.env[k];
@@ -95,6 +95,7 @@ test("a busy provider is skipped for a while, and the next one answers", async (
 });
 
 test("a refused key rests for an hour; a model that is gone is dropped and the next model is tried", async () => {
+  process.env.AI_ROUTING = "ordered";
   process.env.GROQ_API_KEY = "q";
   process.env.AI_GROQ_MODELS = "old-model,new-model";
   process.env.GEMINI_API_KEY = "g";
@@ -113,6 +114,7 @@ test("a refused key rests for an hour; a model that is gone is dropped and the n
   await complete(ask);
   assert.deepEqual(models, ["new-model"], "the missing model is not tried again");
   clean();
+  process.env.AI_ROUTING = "ordered";
   process.env.GROQ_API_KEY = "q";
   process.env.GEMINI_API_KEY = "g";
   setAiFetch(async (url) => (hostOf(url).includes("groq") ? bad(401, { error: { message: "invalid key gsk-LEAK" } }) : geminiOk("gemini")));
@@ -123,6 +125,7 @@ test("a refused key rests for an hour; a model that is gone is dropped and the n
 });
 
 test("each provider is held to its own number of requests a minute, and background work uses half", async () => {
+  process.env.AI_ROUTING = "ordered";
   process.env.GROQ_API_KEY = "q";
   process.env.AI_GROQ_RPM = "4";
   process.env.GEMINI_API_KEY = "g";
@@ -134,6 +137,7 @@ test("each provider is held to its own number of requests a minute, and backgrou
   for (let i = 0; i < 6; i++) await complete(ask);
   assert.deepEqual(who, ["groq", "groq", "groq", "groq", "gemini", "gemini"], "four to the first, then the next takes over");
   clean();
+  process.env.AI_ROUTING = "ordered";
   process.env.GROQ_API_KEY = "q";
   process.env.AI_GROQ_RPM = "4";
   process.env.GEMINI_API_KEY = "g";
@@ -144,6 +148,96 @@ test("each provider is held to its own number of requests a minute, and backgrou
   });
   for (let i = 0; i < 3; i++) await complete(ask, { priority: "background" });
   assert.deepEqual(who, ["groq", "groq", "gemini"], "background work leaves half for people");
+});
+
+const nameOf = (url) => (hostOf(url).includes("groq") ? "groq" : hostOf(url).includes("cerebras") ? "cerebras" : hostOf(url).includes("openrouter") ? "openrouter" : hostOf(url).includes("anthropic") ? "anthropic" : hostOf(url).startsWith("10.") ? "self" : "gemini");
+
+test("balanced is the default: free providers take turns in proportion to their size, so none is drained first", async () => {
+  process.env.GROQ_API_KEY = "q";
+  process.env.GEMINI_API_KEY = "g";
+  process.env.CEREBRAS_API_KEY = "c";
+  process.env.AI_GROQ_RPM = "20";
+  process.env.AI_GEMINI_RPM = "10";
+  process.env.AI_CEREBRAS_RPM = "10";
+  const who = [];
+  setAiFetch(async (url) => {
+    who.push(nameOf(url));
+    return nameOf(url) === "gemini" ? geminiOk("m") : ok("g");
+  });
+  for (let i = 0; i < 12; i++) await complete(ask);
+  const count = (n) => who.filter((w) => w === n).length;
+  assert.deepEqual([count("groq"), count("gemini"), count("cerebras")], [6, 3, 3], `groq is twice the size, so it takes twice the turns: ${who}`);
+  assert.notDeepEqual(who.slice(0, 3), ["groq", "groq", "groq"], "not one provider until it is empty");
+  const status = routerStatus();
+  assert.equal(status.find((p) => p.id === "groq").answered, 6);
+});
+
+test("a provider that is out of daily allowance rests for hours and the others carry its share", async () => {
+  process.env.GROQ_API_KEY = "q";
+  process.env.GEMINI_API_KEY = "g";
+  process.env.CEREBRAS_API_KEY = "c";
+  const who = [];
+  setAiFetch(async (url) => {
+    who.push(nameOf(url));
+    if (nameOf(url) === "groq") return bad(429, { error: { message: "Rate limit reached for model on tokens per day (TPD): Limit 100000" } }, { "retry-after": "7200" });
+    return nameOf(url) === "gemini" ? geminiOk("m") : ok("c");
+  });
+  for (let i = 0; i < 6; i++) assert.notEqual((await complete(ask)).provider, "groq", "every customer still gets an answer");
+  assert.equal(who.filter((w) => w === "groq").length, 1, "asked once, then left alone");
+  const rest = routerStatus().find((p) => p.id === "groq").resting;
+  assert.match(rest.reason, /daily/);
+  assert.ok(rest.seconds > 7000 && rest.seconds <= 7200, "for as long as it said");
+  // an ordinary "slow down" is a short rest, not hours
+  clean();
+  process.env.GROQ_API_KEY = "q";
+  process.env.GEMINI_API_KEY = "g";
+  setAiFetch(async (url) => (nameOf(url) === "groq" ? bad(429, { error: { message: "slow down" } }, { "retry-after": "30" }) : geminiOk("m")));
+  await complete(ask);
+  await complete(ask);
+  assert.ok(routerStatus().find((p) => p.id === "groq").resting.seconds <= 30);
+});
+
+test("your own server always goes first and paid Claude last, whatever the rotation", async () => {
+  process.env.AI_SELF_BASE_URL = "http://10.0.0.5:8000/v1";
+  process.env.AI_SELF_MODEL = "mine";
+  process.env.GROQ_API_KEY = "q";
+  process.env.GEMINI_API_KEY = "g";
+  process.env.ANTHROPIC_API_KEY = "a";
+  const who = [];
+  setAiFetch(async (url) => {
+    who.push(nameOf(url));
+    return nameOf(url) === "gemini" ? geminiOk("m") : ok("x");
+  });
+  for (let i = 0; i < 4; i++) assert.equal((await complete(ask, {}, { anthropic: async () => ({ text: "claude" }) })).provider, "self");
+  assert.deepEqual([...new Set(who)], ["self"], "free tiers are not touched while your own server answers");
+  // your server goes down: the free ones take over, and Claude is the last resort
+  who.length = 0;
+  setAiFetch(async (url) => {
+    who.push(nameOf(url));
+    return nameOf(url) === "self" ? bad(503) : nameOf(url) === "gemini" ? geminiOk("m") : bad(500);
+  });
+  const claude = async () => ({ text: "claude" });
+  const out = await complete(ask, {}, { anthropic: claude });
+  assert.ok(["gemini"].includes(out.provider) || out.provider === "anthropic");
+  assert.equal(who[0], "self");
+  clean();
+  process.env.GROQ_API_KEY = "q";
+  process.env.ANTHROPIC_API_KEY = "a";
+  setAiFetch(async () => bad(500));
+  assert.equal((await complete(ask, {}, { anthropic: claude })).provider, "anthropic", "free ones failed, Claude answers");
+});
+
+test("AI_ROUTING=ordered keeps strict priority", async () => {
+  process.env.AI_ROUTING = "ordered";
+  process.env.GROQ_API_KEY = "q";
+  process.env.GEMINI_API_KEY = "g";
+  const who = [];
+  setAiFetch(async (url) => {
+    who.push(nameOf(url));
+    return nameOf(url) === "gemini" ? geminiOk("m") : ok("x");
+  });
+  for (let i = 0; i < 4; i++) await complete(ask);
+  assert.deepEqual(who, ["groq", "groq", "groq", "groq"]);
 });
 
 test("the only provider is still tried when it is resting: the rest was a guess", async () => {

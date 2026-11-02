@@ -13,12 +13,20 @@ const MINUTE = 60_000;
 const cooled = new Map(); // provider id -> { until, reason }
 const modelCooled = new Map(); // "id|model" -> until
 const windows = new Map(); // provider id -> timestamps of the last minute's requests
+const answered = new Map(); // provider id -> answers given since this server started
+let turn = 0; // moves on with every request so equally loaded providers take turns
 
 export function resetRouter() {
   cooled.clear();
   modelCooled.clear();
   windows.clear();
+  answered.clear();
+  turn = 0;
 }
+
+// "balanced" (default): the free providers share the work, so none of them runs out of its free allowance first.
+// "ordered": always the first one that works, in the order given.
+export const routingMode = () => (String(process.env.AI_ROUTING || "").toLowerCase() === "ordered" ? "ordered" : "balanced");
 
 const used = (id, now = Date.now()) => {
   const w = (windows.get(id) || []).filter((t) => now - t < MINUTE);
@@ -35,8 +43,26 @@ function judge(error) {
   const up = error.upstream || 0;
   if (up === 401 || up === 403) return { provider: 60 * MINUTE, reason: "the key was refused" };
   if (up === 404 || up === 400 || up === 422) return { model: 6 * 60 * MINUTE };
-  if (error.status === 429 || up === 429) return { provider: Math.max(10, Math.min(error.retryAfter || 60, 15 * 60)) * 1000, reason: "too many requests" };
+  if (error.status === 429 || up === 429) {
+    // "tokens per day" and "requests per day" do not come back in a minute: leave the provider alone until it says it will
+    if (/per ?day|daily|tpd|rpd/i.test(String(error.detail || ""))) return { provider: Math.max(10 * MINUTE, Math.min((error.retryAfter || 3600) * 1000, 6 * 60 * MINUTE)), reason: "its daily allowance is used up" };
+    return { provider: Math.max(10, Math.min(error.retryAfter || 60, 15 * 60)) * 1000, reason: "too many requests" };
+  }
   return { provider: 30_000, reason: error.code === "TIMEOUT" ? "too slow" : "not answering" };
+}
+
+// Your own servers first (they cost nothing and keep the words private), paid Claude last, and the free providers in between
+// taking turns: the least busy for its size goes first, and when they are equally idle they rotate. A provider that has run
+// out of allowance is resting, so the others carry its share until it is back.
+function balance(providers) {
+  const now = Date.now();
+  const own = providers.filter((p) => !p.free && p.style !== "anthropic");
+  const paid = providers.filter((p) => !p.free && p.style === "anthropic");
+  const free = providers.filter((p) => p.free);
+  const start = turn++ % Math.max(free.length, 1);
+  const rotated = [...free.slice(start), ...free.slice(0, start)];
+  const load = (p) => (cooled.get(p.id)?.until > now ? 2 : used(p.id, now) / Math.max(p.rpm, 1));
+  return [...own, ...rotated.sort((a, b) => load(a) - load(b)), ...paid];
 }
 
 export async function complete(request, { tier = "write", sensitivity = "customer", priority = "interactive", privateOnly = false } = {}, builtins = {}, only = null) {
@@ -48,6 +74,8 @@ export async function complete(request, { tier = "write", sensitivity = "custome
     providers = providers.filter((p) => p.policy === "no-training");
     if (!providers.length) throw fail(503, "No AI provider that keeps your messages private is connected, so Riwo is paused for this company.");
   }
+
+  if (routingMode() === "balanced") providers = balance(providers);
 
   let lastError = null;
   let busy = 0;
@@ -69,6 +97,7 @@ export async function complete(request, { tier = "write", sensitivity = "custome
           answer = await builtins.anthropic(request);
         } else if (p.style === "gemini") answer = await askGemini(p, model, request);
         else answer = await askOpenAiCompat(p, model, request);
+        answered.set(p.id, (answered.get(p.id) || 0) + 1);
         return { ...answer, provider: p.id, policy: p.policy };
       } catch (error) {
         if (error?.status === 422) throw error; // a refusal is about the content, not the provider
@@ -126,6 +155,7 @@ export function routerStatus() {
       free: p.free,
       rpm: p.rpm,
       usedLastMinute: used(p.id, now),
+      answered: answered.get(p.id) || 0,
       models: p.style === "openai" || p.style === "gemini" ? p.models : undefined,
       resting: rest && rest.until > now ? { reason: rest.reason, seconds: Math.ceil((rest.until - now) / 1000) } : null,
     };
