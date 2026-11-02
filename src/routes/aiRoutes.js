@@ -116,11 +116,15 @@ router.put(
   "/settings",
   requireRole("owner", "admin"),
   route(async (req, res) => {
-    if (typeof req.body?.enabled !== "boolean") throw fail(400, "enabled must be true or false");
-    await query("UPDATE tenants SET ai_enabled=$2 WHERE id=$1", [req.tenantId, req.body.enabled]);
+    const { enabled, privateOnly } = req.body || {};
+    if (enabled !== undefined && typeof enabled !== "boolean") throw fail(400, "enabled must be true or false");
+    if (privateOnly !== undefined && typeof privateOnly !== "boolean") throw fail(400, "privateOnly must be true or false");
+    if (enabled === undefined && privateOnly === undefined) throw fail(400, "enabled must be true or false");
+    if (enabled !== undefined) await query("UPDATE tenants SET ai_enabled=$2 WHERE id=$1", [req.tenantId, enabled]);
+    if (privateOnly !== undefined) await query("UPDATE tenants SET ai_private_only=$2 WHERE id=$1", [req.tenantId, privateOnly]);
     await query(
       "INSERT INTO audit_events(tenant_id,actor_id,event_type,metadata) VALUES($1,$2,'ai.toggled',$3)",
-      [req.tenantId, req.user.id, JSON.stringify({ enabled: req.body.enabled })],
+      [req.tenantId, req.user.id, JSON.stringify({ ...(enabled !== undefined ? { enabled } : {}), ...(privateOnly !== undefined ? { privateOnly } : {}) })],
     );
     const { rows } = await query("SELECT * FROM tenants WHERE id=$1", [req.tenantId]);
     res.json({ status: "success", ...(await aiStatus(rows[0])) });

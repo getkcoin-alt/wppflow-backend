@@ -3,21 +3,19 @@ import { chatTitle } from "./personName.js";
 import { query } from "../db/index.js";
 import { fail } from "../middleware/http.js";
 import { planAllows, notIncluded } from "./plans.js";
-import { askOpenRouter, diagnoseOpenRouter } from "./openRouter.js";
+import { diagnoseOpenRouter } from "./openRouter.js";
+import { configuredProviders } from "./ai/providers.js";
+import { complete, routerStatus } from "./ai/router.js";
 
 // Riwo, the assistant inside the inbox. It only ever writes text for a person to read and edit: nothing
 // it produces is sent to a customer, and it has no tools. Customer messages are passed to the model as
 // data inside tags, and the system prompt tells it never to follow instructions found there.
 //
-// It runs on OpenRouter's free models when OPENROUTER_API_KEY is set, or on Claude when ANTHROPIC_API_KEY
-// is. If both are set OpenRouter is used, unless AI_PROVIDER names the other.
+// It runs on whichever AI providers the server has keys for (see ai/providers.js): your own servers, Groq, Gemini,
+// Cerebras, Mistral, NVIDIA, OpenRouter's free models, or Claude. They are tried in order and the next one is used when a
+// provider is busy or down. AI_PROVIDER names a single one to use and nothing else.
 export function aiProvider() {
-  const forced = String(process.env.AI_PROVIDER || "").toLowerCase();
-  if (forced === "anthropic" && process.env.ANTHROPIC_API_KEY) return "anthropic";
-  if (forced === "openrouter" && process.env.OPENROUTER_API_KEY) return "openrouter";
-  if (process.env.OPENROUTER_API_KEY) return "openrouter";
-  if (process.env.ANTHROPIC_API_KEY) return "anthropic";
-  return null;
+  return configuredProviders()[0]?.id || null;
 }
 export const aiConfigured = () => aiProvider() !== null;
 export const aiModel = () => process.env.AI_MODEL || "claude-opus-5-5"; // Claude only
@@ -42,15 +40,12 @@ const anthropic = () =>
 let fallbackRejected = false;
 const FALLBACK_BETA = "server-side-fallback-2026-07-01";
 
-async function ask(request) {
-  if (aiProvider() === "openrouter") {
-    try {
-      return await askOpenRouter(request);
-    } catch (error) {
-      throw explain(error);
-    }
+async function ask(request, opts) {
+  try {
+    return await complete(request, opts, { anthropic: askClaude });
+  } catch (error) {
+    throw explain(error);
   }
-  return askClaude(request);
 }
 
 async function askClaude({ system, user, maxTokens }) {
@@ -157,6 +152,8 @@ export function unavailableReason(tenant) {
   if (!aiConfigured()) return "not_configured";
   if (!planAllows(tenant, "ai")) return "plan";
   if (tenant.ai_enabled === false) return "disabled";
+  // the company asked for providers that do not train on its customers' messages, and none is connected
+  if (tenant.ai_private_only === true && !configuredProviders().some((p) => p.policy === "no-training")) return "no_private_provider";
   return null;
 }
 export async function aiStatus(tenant) {
@@ -165,8 +162,11 @@ export async function aiStatus(tenant) {
     available: reason === null,
     reason,
     provider: aiProvider(),
-    // Free models run on providers that may keep what they are sent, so the app says so.
-    free: aiProvider() === "openrouter",
+    // Free providers may keep what they are sent, so the app says so.
+    free: configuredProviders()[0]?.free ?? false,
+    // whether anything connected may keep customers' messages, and whether this company limits Riwo to those that do not
+    mayKeepMessages: configuredProviders().some((p) => p.policy !== "no-training") && tenant.ai_private_only !== true,
+    privateOnly: tenant.ai_private_only === true,
     enabled: tenant.ai_enabled !== false,
     ...(await usageOf(tenant)),
   };
@@ -178,6 +178,8 @@ function assertAvailable(tenant) {
   if (reason === "plan") throw notIncluded(tenant.plan, "ai");
   if (reason === "disabled")
     throw fail(403, "Your company's administrator has turned the AI assistant off.");
+  if (reason === "no_private_provider")
+    throw fail(503, "Riwo is set to use only providers that keep messages private, and none is connected yet. Ask your administrator.");
 }
 
 // Takes one request from today's allowance before the model is asked, so a burst of requests can't
@@ -203,11 +205,13 @@ const record = (tenant, usage) =>
     [tenant.id, usage?.input_tokens || 0, usage?.output_tokens || 0],
   ).catch(() => {});
 
-async function run(tenant, request) {
+// tier: "fast" for quick jobs (summaries), "write" for text a customer may read. priority: "background" for work nobody
+// is waiting for, which gives way to people.
+async function run(tenant, request, { tier = "write", priority = "interactive", sensitivity = "customer" } = {}) {
   assertAvailable(tenant);
   await reserve(tenant);
   try {
-    const answer = await ask(request);
+    const answer = await ask(request, { tier, priority, sensitivity, privateOnly: tenant.ai_private_only === true });
     await record(tenant, answer.usage);
     return answer;
   } catch (error) {
@@ -358,7 +362,7 @@ Keep the whole summary under 110 words.`,
   ]
     .filter(Boolean)
     .join("\n\n");
-  const { text, model } = await run(tenant, { system: systemFor(tenant.name), user, maxTokens: 4096 });
+  const { text, model } = await run(tenant, { system: systemFor(tenant.name), user, maxTokens: 4096 }, { tier: "fast" });
   return { text, model, sections: parseSummary(text), mood: parseMood(text) };
 }
 
@@ -394,7 +398,7 @@ Follow up in: a whole number of days from 1 to 14`,
   ]
     .filter(Boolean)
     .join("\n\n");
-  const { text, model } = await run(tenant, { system: systemFor(tenant.name), user, maxTokens: 4096 });
+  const { text, model } = await run(tenant, { system: systemFor(tenant.name), user, maxTokens: 4096 }, { tier: "fast" });
   return { ...parseLeadSuggestion(text), model };
 }
 
@@ -467,15 +471,28 @@ export async function translateText({ tenant, text, target }) {
   return { text: out.text, model: out.model, target: language };
 }
 
-// The settings test: asks the assistant for one word and reports what happened, for owners and administrators.
+// The settings test: asks every connected provider for one word and reports what happened, for owners and administrators.
+// The first fields describe the provider that is tried first, as before; `providers` has them all.
 export async function diagnoseAi() {
-  const provider = aiProvider();
-  if (!provider) return { provider: null, ok: false, error: "No AI key is set on the server." };
-  if (provider === "openrouter") return diagnoseOpenRouter();
-  try {
-    const out = await askClaude({ system: "You are running a connection test.", user: "Reply with the single word OK.", maxTokens: 200 });
-    return { provider, ok: true, model: out.model, sample: out.text.slice(0, 80), attempts: [{ model: out.model, ok: true }] };
-  } catch (error) {
-    return { provider, ok: false, error: error.message, attempts: [] };
+  const providers = configuredProviders();
+  if (!providers.length) return { provider: null, ok: false, error: "No AI key is set on the server.", providers: [] };
+  const results = [];
+  for (const p of providers) {
+    let result;
+    try {
+      if (p.style === "openrouter") result = await diagnoseOpenRouter();
+      else if (p.style === "anthropic") {
+        const out = await askClaude({ system: "You are running a connection test.", user: "Reply with the single word OK.", maxTokens: 200 });
+        result = { ok: true, model: out.model, sample: out.text.slice(0, 80), attempts: [{ model: out.model, ok: true }] };
+      } else {
+        const out = await complete({ system: "You are running a connection test.", user: "Reply with the single word OK.", maxTokens: 200 }, { tier: "fast", sensitivity: "general", only: p.id }, {}, [p]);
+        result = { ok: true, model: out.model, sample: out.text.slice(0, 80), attempts: [{ model: out.model, ok: true }] };
+      }
+    } catch (error) {
+      result = { ok: false, error: error.message, attempts: [] };
+    }
+    results.push({ ...result, id: p.id, policy: p.policy, free: p.free });
   }
+  const first = results[0];
+  return { ...first, provider: first.id, ok: results.some((r) => r.ok), providers: results, status: routerStatus() };
 }
