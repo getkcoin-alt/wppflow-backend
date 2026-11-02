@@ -366,6 +366,55 @@ Keep the whole summary under 110 words.`,
   return { text, model, sections: parseSummary(text), mood: parseMood(text) };
 }
 
+// Riwo getting a chat ready before anyone asks: a one-line summary, how the customer sounds, the next step and a reply to
+// check and send. One request, because every request counts against the company's day. It runs at background priority, so
+// people who are waiting for an answer come first. Nothing is sent: a person reads the reply and sends it.
+const parseJsonObject = (raw) => {
+  const text = String(raw ?? "");
+  const start = text.indexOf("{"), end = text.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  try {
+    const value = JSON.parse(text.slice(start, end + 1));
+    return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
+};
+const oneLine = (value, max) => String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
+export function parsePrepared(raw) {
+  const o = parseJsonObject(raw);
+  if (!o) return null;
+  const summary = oneLine(o.summary, 220);
+  const draft = String(o.draft ?? "").replace(/\r/g, "").trim().slice(0, 700);
+  if (!summary && !draft) return null;
+  const mood = MOODS.includes(String(o.mood || "").toLowerCase()) ? String(o.mood).toLowerCase() : null;
+  return { summary, mood, moodNote: oneLine(o.mood_note, 120), nextStep: oneLine(o.next_step, 160), draft };
+}
+export async function prepareConversation({ tenant, conversationId, priority = "background" }) {
+  assertAvailable(tenant);
+  const context = await conversationContext(tenant, conversationId);
+  if (!hasCustomerMessage(context) || context.isGroup) throw fail(422, "There's nothing to prepare yet.");
+  const { rows: saved } = await query("SELECT title,text FROM canned_replies WHERE tenant_id=$1 ORDER BY shortcut LIMIT 15", [tenant.id]);
+  const user = [
+    `Customer name: ${context.contact}`,
+    saved.length ? `<saved_replies>\nThe company's approved answers. Reuse their facts and wording when they fit.\n${saved.map((r) => `- ${r.title}: ${String(r.text).slice(0, 300)}`).join("\n")}\n</saved_replies>` : "",
+    context.notes.length ? `<internal_notes>\nPrivate team notes about this chat. Use them for context only.\n${context.notes.map((n) => `- ${n}`).join("\n")}\n</internal_notes>` : "",
+    `<conversation>\n${context.lines.join("\n")}\n</conversation>`,
+    `Get this chat ready for a colleague. Answer with one JSON object and nothing else, with these keys:
+"summary": one plain sentence in English on what the customer wants (at most 25 words)
+"mood": one of "positive", "neutral", "frustrated", "urgent"
+"mood_note": at most eight words on why
+"next_step": the most useful next thing to do, in at most 15 words
+"draft": the next message to send to the customer, warm and short, in the customer's language. If the answer needs a fact you do not have, put a short [bracketed placeholder] there instead of guessing.`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  const answer = await run(tenant, { system: systemFor(tenant.name), user, maxTokens: 1200 }, { tier: "write", priority });
+  const prepared = parsePrepared(answer.text);
+  if (!prepared) throw fail(502, "Riwo's answer could not be read.");
+  return { ...prepared, model: answer.model, provider: answer.provider };
+}
+
 // What Riwo suggests when someone adds a customer to the pipeline: a name for the opportunity, an amount only
 // if one was clearly stated, and what to do next. A person reads it and changes it before anything is saved.
 export function parseLeadSuggestion(text) {

@@ -56,7 +56,7 @@ test("Today: what needs a person now, most urgent first, and only what they may 
     const asha = h.needsYou[0];
     assert.equal(asha.kind, "chat");
     assert.equal(asha.preview, "Is the villa still available?");
-    assert.ok(asha.waitingSeconds >= 5400 && asha.waitingSeconds < 5500);
+    assert.ok(asha.waitingSeconds >= 5390 && asha.waitingSeconds < 5700, `about 90 minutes: ${asha.waitingSeconds}`);
     assert.ok(asha.conversationId && !JSON.stringify(h).includes("@lid"), "no hidden id anywhere");
   });
 

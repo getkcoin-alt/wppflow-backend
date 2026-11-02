@@ -23,7 +23,14 @@ async function waitingChats(req, now) {
   const base = `FROM conversations c WHERE c.tenant_id=$1 AND c.awaiting_since IS NOT NULL AND NOT c.is_closed AND NOT c.is_group
     AND c.provider_chat_id !~ '@(broadcast|newsletter)$'${visible}`;
   const [{ rows }, totals] = await Promise.all([
-    query(`SELECT c.* ${base} ORDER BY c.awaiting_since ASC LIMIT ${MAX_ITEMS}`, params),
+    // Riwo's preparation is shown only while it is for the customer's latest message
+    query(
+      `SELECT c.*, i.summary AS ai_summary, i.mood AS ai_mood, i.mood_note AS ai_mood_note, i.next_step AS ai_next_step, i.draft AS ai_draft
+         ${base.replace("FROM conversations c WHERE", `FROM conversations c LEFT JOIN ai_insights i ON i.conversation_id=c.id AND i.status='ready'
+           AND i.based_on_message_id IS NOT DISTINCT FROM (SELECT m.id FROM messages m WHERE m.tenant_id=c.tenant_id AND m.conversation_id=c.id AND m.sender='customer' ORDER BY m.timestamp_epoch DESC, m.id DESC LIMIT 1) WHERE`)}
+        ORDER BY c.awaiting_since ASC LIMIT ${MAX_ITEMS}`,
+      params,
+    ),
     query(`SELECT count(*)::int AS waiting, count(*) FILTER (WHERE c.awaiting_since < $${params.length + 1})::int AS overdue ${base}`, [...params, now - sla * 60]),
   ]);
   return {
@@ -46,6 +53,7 @@ async function waitingChats(req, now) {
         unread: chat.unreadCount,
         assignedTo: chat.assignedTo,
         isMine: r.assigned_user_id === req.user.id,
+        prep: r.ai_summary || r.ai_draft ? { summary: r.ai_summary, mood: r.ai_mood, moodNote: r.ai_mood_note, nextStep: r.ai_next_step, draft: r.ai_draft } : null,
       };
     }),
   };
