@@ -14,6 +14,9 @@ import { requireFeature } from "../services/plans.js";
 import { callingCodeOf, COUNTRIES } from "../services/countries.js";
 import { unavailableReason } from "../services/aiService.js";
 import { AUTO_CHAT, DEFAULT_SOURCES, SALES } from "../services/automationRules.js";
+import rateLimit from "express-rate-limit";
+import { readWebsite } from "../services/websiteReader.js";
+import { draftBusinessProfile } from "../services/aiService.js";
 const router = express.Router();
 router.use(
   authenticateToken,
@@ -57,6 +60,27 @@ router.get(
       riwo: { available: unavailableReason(req.tenant) === null, reason: unavailableReason(req.tenant) },
       chat: { defaultReplies: AUTO_CHAT.defaultReplies, maxReplies: AUTO_CHAT.maxReplies, sources: DEFAULT_SOURCES, handoff: AUTO_CHAT.handoff, sales: { maxQuestions: SALES.maxQuestions, questions: SALES.defaultQuestions, formal: SALES.formal, followUpHours: SALES.followUpHours } },
     });
+  }),
+);
+
+// Reads the company's own website and drafts what Riwo may say about the business, and the questions to ask. The person reads
+// and edits it before saving; nothing is stored here.
+const websiteLimit = rateLimit({
+  windowMs: 60 * 1000,
+  max: 6,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `${req.tenantId}:${req.user?.id ?? "api"}`,
+  validate: false,
+  message: { status: "error", message: "You're going a little fast. Wait a moment and try again." },
+});
+router.post(
+  "/about-from-website",
+  websiteLimit,
+  route(async (req, res) => {
+    const site = await readWebsite(req.body?.url);
+    const draft = await draftBusinessProfile({ tenant: req.tenant, site });
+    res.json({ status: "success", url: site.url, pages: site.pages.length, ...draft });
   }),
 );
 

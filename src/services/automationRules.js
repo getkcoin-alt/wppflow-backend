@@ -1,6 +1,7 @@
 import { fail } from "../middleware/http.js";
 import { unknownVariables, VARIABLES } from "./templating.js";
 import { cleanHomeCodes } from "./countries.js";
+import { normalizeSiteUrl } from "./websiteReader.js";
 
 // What a rule is made of. A rule starts on a TRIGGER and does one ACTION; it can also send a confirmation reply.
 export const TRIGGERS = ["keyword", "first_message", "after_hours", "foreign_number"];
@@ -185,6 +186,8 @@ export async function cleanRule(body, { teammate }) {
     if (knowledge.length < AUTO_CHAT.knowledgeMin)
       throw fail(400, "Write a few sentences about your business for Riwo to answer from. It will not answer anything that is not in them.");
     config.knowledge = knowledge;
+    // the address the about text was read from, kept so the form can show it again
+    if (String(input.website ?? "").trim()) config.website = normalizeSiteUrl(input.website).origin;
     config.handoff = String(input.handoff ?? "").trim() ? checkText(input.handoff, "The hand-over message", 500) : AUTO_CHAT.handoff;
     const sales = cleanSales(input.sales);
     if (sales) config.sales = sales;

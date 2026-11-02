@@ -24,6 +24,20 @@ lead and hands it to a person at the right moment.
    - a follow-up task is created for the teammate, due after the hours the company set (default 2, 0 for none), so the
      customer is not left waiting. It follows the usual reminder and 24-hour escalation.
 
+## Setting it up from the company's website
+
+In the form, "Your website" → **Read my website**. The server fetches the home page and up to three pages that tell about the
+business (about, services, products, contact, FAQ), Riwo writes the "about" text (and 3–5 suggested questions) from them, and
+the result lands in the form for the owner to read and edit. Nothing is saved until the rule is saved. The address is kept with
+the rule (`config.website`).
+
+- The address is typed by a customer, so it is treated as hostile: http(s) on ports 80/443 only, no credentials, never a private
+  or reserved address (checked again on every redirect, and the connection is pinned to the checked address), 8 s and 1.5 MB per
+  page, text pages only, at most 3 redirects, 6 requests a minute per person.
+- The website text is data for the model, never instructions. Sentences that quote money, percentages or discounts are removed:
+  pricing is for the executives. A line with the website address is added.
+- Without a model (or if it fails) the page's own title, description and first lines are used, and no questions are suggested.
+
 ## Safety
 
 - The pricing/proposal request is found by a word list (English, Arabic, Hindi, Hinglish) **before** the model is asked, and
