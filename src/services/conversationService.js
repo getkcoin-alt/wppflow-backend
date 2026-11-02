@@ -45,7 +45,7 @@ export async function getConversations({
     SELECT id, tenant_id, session_name, provider_chat_id, contact_id, phone,
            contact_name, avatar, unread_count, is_group, group_members_count,
            assigned_to, assigned_user_id, is_closed, is_pinned, is_archived, last_active_epoch,
-           last_message, tags, awaiting_since, created_at, updated_at
+           last_message, tags, awaiting_since, needs_human_since, created_at, updated_at
     FROM conversations
     WHERE tenant_id = $1 AND provider_chat_id !~ '@(broadcast|newsletter)$'
   `;
@@ -288,7 +288,7 @@ export async function getConversationChanges({
     `SELECT id, tenant_id, session_name, provider_chat_id, contact_id, phone,
             contact_name, avatar, unread_count, is_group, group_members_count,
             assigned_to, assigned_user_id, is_closed, is_pinned, is_archived, last_active_epoch,
-            last_message, tags, awaiting_since, created_at, updated_at
+            last_message, tags, awaiting_since, needs_human_since, created_at, updated_at
      FROM conversations WHERE tenant_id=$1 AND updated_at > $2 AND provider_chat_id !~ '@(broadcast|newsletter)$'${scope}
      ORDER BY updated_at ASC LIMIT $${params.length}`,
     params,

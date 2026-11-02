@@ -30,7 +30,7 @@ test("Today: what needs a person now, most urgent first, and only what they may 
   await t.test("a new workspace has nothing waiting, and owners are shown how to get set up", async () => {
     const h = await home(owner);
     assert.equal(h.status, "success");
-    assert.deepEqual(h.counts, { waiting: 0, overdue: 0, tasksDue: 0, tasksOverdue: 0, numbersNeedingCare: 0 });
+    assert.deepEqual(h.counts, { waiting: 0, overdue: 0, tasksDue: 0, tasksOverdue: 0, numbersNeedingCare: 0, askedForPerson: 0 });
     assert.deepEqual(h.needsYou, []);
     assert.equal(h.firstName, "Olivia");
     assert.deepEqual(h.setup.steps.map((s) => [s.key, s.done]), [["connect", true], ["replies", false], ["automation", false], ["team", true]]);

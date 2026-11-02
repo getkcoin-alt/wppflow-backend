@@ -7,6 +7,7 @@ import { personalise } from "./templating.js";
 import { emitForConversation } from "./realtime.js";
 import { assertConversationAccess, isManager } from "./access.js";
 import { chatTitle } from "./personName.js";
+import { withDisclosure } from "./handoffService.js";
 
 // Autopilot: what a company lets Riwo do by itself. Everything is off until an owner switches it on, and each rule is small
 // enough to explain in a sentence.
@@ -53,7 +54,7 @@ export async function sentToday(tenantId) {
 // Waiting chats whose latest customer message Autopilot has not looked at yet.
 export async function candidates(tenantId, limit = AUTOPILOT.perTenantPerRun, now = Math.floor(Date.now() / 1000)) {
   const { rows } = await query(
-    `SELECT c.id, c.assigned_user_id, c.contact_name, c.phone, last.id AS message_id, last.text AS text, last.type AS type, c.awaiting_since
+    `SELECT c.id, c.assigned_user_id, c.needs_human_since, c.contact_name, c.phone, last.id AS message_id, last.text AS text, last.type AS type, c.awaiting_since
        FROM conversations c
        JOIN LATERAL (SELECT m.id,m.text,m.type FROM messages m WHERE m.tenant_id=c.tenant_id AND m.conversation_id=c.id AND m.sender='customer'
                       ORDER BY m.timestamp_epoch DESC, m.id DESC LIMIT 1) last ON true
@@ -82,6 +83,7 @@ const finish = (id, outcome, fields = {}) =>
 // Why this chat must be left to a person, or null when Autopilot may act.
 async function holdBack(tenant, chat) {
   if (chat.assigned_user_id) return "a teammate owns this chat";
+  if (chat.needs_human_since) return "the customer asked for a person";
   const recent = (
     await query(
       `SELECT
@@ -133,7 +135,7 @@ export async function handle(tenant, rules, chat, io = null) {
     const sent = await sendTextMessage({
       tenantId: tenant.id,
       conversationId: chat.id,
-      text,
+      text: withDisclosure(text),
       idempotencyKey: `autopilot:${chat.message_id}`.slice(0, 128),
       agentName: "Riwo",
       io,

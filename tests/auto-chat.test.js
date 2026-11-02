@@ -11,6 +11,7 @@ import { checkAnswer } from "../src/services/autoChat.js";
 import { callingCodeOf, isForeignNumber, cleanHomeCodes, COUNTRIES } from "../src/services/countries.js";
 import { setAiClient } from "../src/services/aiService.js";
 import { closeSessions } from "../src/services/sessionService.js";
+import { DISCLOSURE } from "../src/services/handoffService.js";
 
 const KNOWLEDGE = "Chat Co sells shared inbox software for WhatsApp. Plans start at INR 999 a month. Visit https://chat.example/pricing. We are open Sunday to Thursday.";
 const OPTIONS = ["AI", "Website", "Social media", "Word of mouth"];
@@ -157,7 +158,14 @@ test("Riwo chats with people from abroad until a person takes over", async (t) =
         "SELECT m.text FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE m.tenant_id=$1 AND c.phone=$2 AND m.sender='agent' AND m.agent_name=$3 ORDER BY m.created_at, m.id",
         [tenantId, from, who],
       )
-    ).rows.map((r) => r.text);
+    ).rows.map((r) => {
+      // everything Riwo says to a customer must say so, and how to reach a person; the rest of these tests read the words
+      if (who === "Riwo") {
+        assert.ok(r.text.endsWith(`\n\n${DISCLOSURE}`), `Riwo's message does not say it is automated: ${r.text}`);
+        return r.text.slice(0, -(DISCLOSURE.length + 2));
+      }
+      return r.text;
+    });
   const chatOf = async (phone) => (await query("SELECT * FROM conversations WHERE tenant_id=$1 AND phone=$2", [tenantId, phone])).rows[0];
   const state = async (phone) => (await query("SELECT s.* FROM automation_chats s JOIN conversations c ON c.id=s.conversation_id WHERE s.tenant_id=$1 AND c.phone=$2", [tenantId, phone])).rows[0];
   const bells = async () => (await query("SELECT title,user_id FROM notifications WHERE tenant_id=$1 ORDER BY created_at, id", [tenantId])).rows;

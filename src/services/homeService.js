@@ -32,12 +32,13 @@ async function waitingChats(req, now) {
         ORDER BY c.awaiting_since ASC LIMIT ${MAX_ITEMS}`,
       params,
     ),
-    query(`SELECT count(*)::int AS waiting, count(*) FILTER (WHERE c.awaiting_since < $${params.length + 1})::int AS overdue ${base}`, [...params, now - sla * 60]),
+    query(`SELECT count(*)::int AS waiting, count(*) FILTER (WHERE c.awaiting_since < $${params.length + 1})::int AS overdue, count(*) FILTER (WHERE c.needs_human_since IS NOT NULL)::int AS asked ${base}`, [...params, now - sla * 60]),
   ]);
   return {
     sla,
     waiting: totals.rows[0].waiting,
     overdue: totals.rows[0].overdue,
+    asked: totals.rows[0].asked,
     items: rows.map((r) => {
       const chat = formatConversation(r);
       const waited = Math.max(0, now - Number(r.awaiting_since));
@@ -54,6 +55,7 @@ async function waitingChats(req, now) {
         unread: chat.unreadCount,
         assignedTo: chat.assignedTo,
         isMine: r.assigned_user_id === req.user.id,
+        askedForPerson: Boolean(r.needs_human_since),
         prep: r.ai_summary || r.ai_draft ? { summary: r.ai_summary, mood: r.ai_mood, moodNote: r.ai_mood_note, nextStep: r.ai_next_step, draft: r.ai_draft } : null,
       };
     }),
@@ -123,7 +125,7 @@ export async function homeFor(req, { until } = {}) {
   ]);
   // most urgent first: customers past the reply target, a number that is down, late follow-ups, waiting customers, follow-ups later today
   const rank = (i) =>
-    i.kind === "chat" ? (i.overdue ? 0 : 3) + (i.isMine ? 0 : 0.5) : i.kind === "number" ? (i.level === "down" || i.level === "unpaired" ? 1 : 4) : i.overdue ? 2 : 5;
+    i.kind === "chat" ? (i.askedForPerson ? -1 : i.overdue ? 0 : 3) + (i.isMine ? 0 : 0.5) : i.kind === "number" ? (i.level === "down" || i.level === "unpaired" ? 1 : 4) : i.overdue ? 2 : 5;
   const items = [...waiting.items, ...tasks, ...numbers]
     .map((i, n) => ({ i, n }))
     .sort((a, b) => rank(a.i) - rank(b.i) || (a.i.kind === "chat" && b.i.kind === "chat" ? b.i.waitingSeconds - a.i.waitingSeconds : a.n - b.n))
@@ -137,6 +139,7 @@ export async function homeFor(req, { until } = {}) {
       tasksDue: tasks.length,
       tasksOverdue: tasks.filter((t) => t.overdue).length,
       numbersNeedingCare: numbers.length,
+      askedForPerson: waiting.asked,
     },
     replyTargetMinutes: waiting.sla,
     needsYou: items.slice(0, MAX_ITEMS),

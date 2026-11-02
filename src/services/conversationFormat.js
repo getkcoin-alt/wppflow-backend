@@ -30,6 +30,8 @@ export function formatConversation(c) {
     assignedTo: c.assigned_to || "",
     assignedUserId: c.assigned_user_id ?? null,
     isClosed: Boolean(c.is_closed),
+    // the customer asked to talk to a person: first on the team's list until a teammate answers
+    needsHuman: Boolean(c.needs_human_since),
     isPinned: Boolean(c.is_pinned),
     // epoch seconds of the customer's first message nobody on the team has answered yet, or null
     awaitingSince: c.awaiting_since === null || c.awaiting_since === undefined ? null : Number(c.awaiting_since),

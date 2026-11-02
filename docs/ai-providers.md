@@ -6,7 +6,23 @@ before relying on a number.
 
 ## Adding a provider
 
-Put the key in the server's `.env` (never in chat or code), then restart the backend (`pm2 restart wppflow-backend-v3`).
+On the server, run the script and paste the key at the hidden prompt. It never appears on screen, in the shell history or in a
+log, is written to `.env` (permissions 600, with a dated backup) and restarts the backend:
+
+```
+cd /opt/wppflow-backend
+bash scripts/add-ai-key.sh groq          # or gemini, cerebras, mistral, nvidia, openrouter, anthropic
+bash scripts/add-ai-key.sh list          # which are set (never shows a key)
+bash scripts/add-ai-key.sh order         # the order they are tried in
+bash scripts/add-ai-key.sh self          # your own GPUs / any OpenAI-compatible server
+bash scripts/add-ai-key.sh remove groq
+```
+
+Then open Admin, Riwo, and press "Run a test": it shows which providers work.
+
+Where to get a key: Groq (console.groq.com/keys), Google Gemini (aistudio.google.com/apikey), Cerebras (cloud.cerebras.ai),
+Mistral (console.mistral.ai), NVIDIA (build.nvidia.com), OpenRouter (openrouter.ai/keys), Anthropic (console.anthropic.com).
+Check each provider's own page for its current free limits.
 
 | Provider | Key variable | Notes |
 |---|---|---|
@@ -41,3 +57,13 @@ this server sends it), `AI_<NAME>_DATA` (`no-training`, `may-train` or `unknown`
 
 Set `AI_SELF_BASE_URL` (and `AI_SELF_MODEL`) and restart. It is tried first and the hosted providers become the fallback. Remove the
 hosted keys when you no longer want a fallback.
+
+## Customers know it is a machine, and can get a person
+
+- Everything Riwo sends (Autopilot replies and Riwo's chats) ends with: "🤖 Automated reply from Riwo. Reply "human" to talk to a person."
+- When a customer asks for a person (English, Arabic or Hinglish: "talk to a human", "I need an agent", "أريد التحدث مع موظف",
+  "mujhe insaan se baat karni hai", or just "human" after a machine has been answering):
+  Riwo and Autopilot stop answering that chat, the owner of the WhatsApp number (or the person it is assigned to) and the
+  managers get a notification, the chat shows "Asked for a person" and goes to the top of Today, and the customer is told a
+  person will reply (only if a machine had been talking to them).
+- A teammate's reply clears the mark.

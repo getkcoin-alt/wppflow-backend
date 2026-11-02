@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { query, withTransaction } from "../db/index.js";
 import { fail, text as validateText } from "../middleware/http.js";
 import { recordWebhook } from "./webhookService.js";
+import { noteHumanRequest } from "./handoffService.js";
 import { defaultWhatsAppProvider as provider } from "./whatsapp/WhatsAppProvider.js";
 import {
   mediaEnabled,
@@ -201,7 +202,7 @@ export async function sendTextMessage({
       );
       await c.query(
         // a reply from a person ends the customer's wait; an automatic reply or a broadcast does not
-        "UPDATE conversations SET last_active_epoch=$1,last_message=$2,awaiting_since=CASE WHEN $5::boolean THEN NULL ELSE awaiting_since END,updated_at=now() WHERE id=$3 AND tenant_id=$4",
+        "UPDATE conversations SET last_active_epoch=$1,last_message=$2,awaiting_since=CASE WHEN $5::boolean THEN NULL ELSE awaiting_since END,needs_human_since=CASE WHEN $5::boolean AND $6::boolean THEN NULL ELSE needs_human_since END,updated_at=now() WHERE id=$3 AND tenant_id=$4",
         [
           epoch,
           JSON.stringify({
@@ -214,6 +215,8 @@ export async function sendTextMessage({
           conversationId,
           tenantId,
           !["Automation", "Campaign"].includes(agentName),
+          // only a person answering ends a request for a person; Riwo does not
+          !["Automation", "Campaign", "Riwo"].includes(agentName),
         ],
       );
     }
@@ -404,7 +407,7 @@ export async function handleIncomingMessage({
       // awaiting_since: a customer's message starts a wait if none is running; a reply typed on the phone ends it.
       // Imported history and groups never change it.
       `UPDATE conversations SET unread_count=unread_count+$1,last_message=CASE WHEN last_active_epoch<=$2 THEN $3 ELSE last_message END,last_active_epoch=GREATEST(last_active_epoch,$2),
-         awaiting_since=CASE WHEN $6::boolean THEN COALESCE(awaiting_since,$2) WHEN $7::boolean THEN NULL ELSE awaiting_since END,updated_at=now() WHERE id=$4 AND tenant_id=$5`,
+         awaiting_since=CASE WHEN $6::boolean THEN COALESCE(awaiting_since,$2) WHEN $7::boolean THEN NULL ELSE awaiting_since END,needs_human_since=CASE WHEN $7::boolean AND NOT $6::boolean THEN NULL ELSE needs_human_since END,updated_at=now() WHERE id=$4 AND tenant_id=$5`,
       [
         !history && !msg.fromMe ? 1 : 0,
         epoch,
@@ -424,6 +427,9 @@ export async function handleIncomingMessage({
     return saved.rows[0];
   });
   if (inserted) {
+    // a customer asking for a person: the team is told, and nothing automatic answers them any more
+    if (!history && !msg.fromMe && !isGroup && inserted.type !== "revoked")
+      noteHumanRequest({ tenantId, conversationId: inserted.conversation_id, messageId: inserted.id, text: msg.text, io }).catch((e) => console.error("Hand-off check failed:", e.message));
     if (inserted.type === "revoked") {
       emitMessage(io, tenantId, "message:updated", inserted);
       return inserted;

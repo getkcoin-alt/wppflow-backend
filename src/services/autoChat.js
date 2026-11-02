@@ -3,6 +3,7 @@ import { chatForBusiness, unavailableReason, usageOf } from "./aiService.js";
 import { sendTextMessage } from "./messageService.js";
 import { addContactTag } from "./labelService.js";
 import { createNotifications } from "./notificationService.js";
+import { withDisclosure } from "./handoffService.js";
 import { isForeignNumber } from "./countries.js";
 
 // "Let Riwo chat": an automation rule that starts a short conversation with a customer and keeps it going until a person
@@ -96,6 +97,7 @@ const personSpoke = async (state) =>
 async function stillHolding(state, conv) {
   let reason = "";
   if (conv.is_closed) reason = "The chat was closed";
+  else if (conv.needs_human_since) reason = "The customer asked for a person";
   else if (await personSpoke(state)) reason = "A teammate replied";
   else if (Date.now() - new Date(state.updated_at).getTime() > ALIVE_HOURS * 3600000) reason = "The conversation went quiet for a day";
   if (!reason) return true;
@@ -173,7 +175,7 @@ export async function runAutoChatTurn({ rule, message, conv, contact, tenant, ex
   const key = `automation:${execution.id}:ai`;
   if ((await query("SELECT 1 FROM messages WHERE tenant_id=$1 AND idempotency_key=$2", [tenantId, key])).rowCount) return;
   const config = rule.config || {};
-  const send = (text) => sendTextMessage({ tenantId, conversationId: conv.id, text, idempotencyKey: key, agentName: RIWO, io });
+  const send = (text) => sendTextMessage({ tenantId, conversationId: conv.id, text: withDisclosure(text), idempotencyKey: key, agentName: RIWO, io });
   const handoffText = config.handoff;
   const bump = () => query("UPDATE automation_chats SET updated_at=now() WHERE tenant_id=$1 AND conversation_id=$2 AND automation_id=$3", [tenantId, conv.id, rule.id]);
 
