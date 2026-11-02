@@ -6,3 +6,4 @@ tokens/
 npm-debug.log
 .DS_Store
 .tokens-test-*
+ai-keys.env

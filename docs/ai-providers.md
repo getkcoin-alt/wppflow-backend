@@ -4,7 +4,21 @@ Riwo can run on several AI services at once. They are tried in order; when one i
 answers. Nothing about a provider's limits is hardcoded, because free tiers change often: check each provider's own limits page
 before relying on a number.
 
-## Adding a provider
+## Adding every key at once
+
+Fill in `ai-keys.example.env` (copy it to `ai-keys.env`), put it on the server with `apply-ai-keys.sh`, and run the script:
+
+```
+scp ai-keys.env scripts/apply-ai-keys.sh YOU@SERVER:/opt/wppflow-backend/
+ssh YOU@SERVER
+cd /opt/wppflow-backend && bash apply-ai-keys.sh
+```
+
+It checks every line, adds the keys to `.env` (permissions 600, dated backup), restarts the backend, shows which are set (never the
+keys) and deletes `ai-keys.env`. `ai-keys.env` is git-ignored: never commit it.
+
+## Adding one provider
+
 
 On the server, run the script and paste the key at the hidden prompt. It never appears on screen, in the shell history or in a
 log, is written to `.env` (permissions 600, with a dated backup) and restarts the backend:
