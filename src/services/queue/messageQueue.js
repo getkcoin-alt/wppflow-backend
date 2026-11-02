@@ -100,7 +100,7 @@ export async function dispatchMessage(payload, io) {
   });
   if (!claimed) return;
 
-  if (campaignId) {
+  if (campaignId && (await query("SELECT typing_simulation FROM campaigns WHERE id=$1 AND tenant_id=$2", [campaignId, tenantId])).rows[0]?.typing_simulation !== false) {
     try {
       const typingDuration = 1500 + Math.floor(Math.random() * 1000);
       await provider.simulateTyping(tenantId, sessionName, to, typingDuration);

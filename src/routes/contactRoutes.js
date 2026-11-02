@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { chatTitle, mobileText } from "../services/personName.js";
+import { chatTitle, isWhatsAppId, mobileText } from "../services/personName.js";
 import { assertRoomForContacts, assertImportFits, contactCount, roomForContacts } from "../services/limitsService.js";
 import express from "express";
 import {
@@ -30,7 +30,8 @@ export const contactView = (c) => ({
   avatar: (/^\d{6,20}$/.test(c.phone || "") && avatarUrl("contact", c)) || c.avatar || "",
   tags: Array.isArray(c.tags) ? c.tags : [],
   labels: Array.isArray(c.labels) ? c.labels : [],
-  whatsappName: c.whatsapp_name || "",
+  // WhatsApp's own id for a person is not a name to offer, to show or to reset to
+  whatsappName: isWhatsAppId(c.whatsapp_name) ? "" : c.whatsapp_name || "",
   nameEdited: Boolean(c.name_edited),
   optIn: Boolean(c.opt_in_status),
   customTraits: c.custom_traits || {},

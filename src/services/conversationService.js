@@ -362,9 +362,6 @@ export async function createGroupConversation({
     emitForConversation(io, tenantId, chat.id, "conversation:updated", {
       conversation: chat,
     });
-    io.to(`tenant:${tenantId}`).emit("conversation:updated", {
-      conversation: chat,
-    });
   }
 
   return {

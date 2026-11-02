@@ -127,6 +127,8 @@ router.post(
     if (!Array.isArray(participants) || participants.length === 0) {
       throw fail(400, "At least one participant is required to create a group");
     }
+    // a big, sudden group of strangers is what gets a number reported
+    if (participants.length > 100) throw fail(400, "A new group can start with up to 100 people. Add the rest once it exists.");
 
     const line = await query(
       "SELECT status FROM whatsapp_sessions WHERE tenant_id=$1 AND session_name=$2",

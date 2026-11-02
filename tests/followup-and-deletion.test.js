@@ -23,11 +23,6 @@ test("Message Deletion Reflection & Follow-up Notifications Suite", async (t) =>
   const tenantId = tData.tenant.id;
   const user = tData.user;
 
-  // Ensure column upcoming_notified_at exists
-  await query(
-    `ALTER TABLE lead_tasks ADD COLUMN IF NOT EXISTS upcoming_notified_at TIMESTAMPTZ DEFAULT NULL;`,
-  );
-
   const convId = `conv_test_${Date.now()}`;
   await query(
     `INSERT INTO conversations (id, tenant_id, session_name, phone, provider_chat_id, contact_name, last_active_epoch, last_message)
@@ -39,16 +34,22 @@ test("Message Deletion Reflection & Follow-up Notifications Suite", async (t) =>
     ],
   );
 
+  // a stand-in for the socket server that remembers every room an event went to (rooms can be chained: io.to(a).to(b))
   const emitted = [];
   const fakeIo = {
-    to: (room) => ({
-      emit: (event, payload) => {
-        emitted.push({ room, event, payload });
-      },
-    }),
+    to: (room) => {
+      const rooms = [room];
+      const chain = {
+        to: (more) => (rooms.push(more), chain),
+        emit: (event, payload) => emitted.push({ rooms: [...rooms], room: rooms[0], event, payload }),
+      };
+      return chain;
+    },
   };
+  const settle = () => new Promise((r) => setTimeout(r, 150)); // the scoped events look the chat's owner up first
+  const managers = `tenant:${tenantId}:managers`;
 
-  await t.test("1. deleteMessage broadcasts to tenant room directly", async () => {
+  await t.test("1. deleting for everyone tells only the people who can open the chat, never the whole workspace", async () => {
     const sent = await sendTextMessage({
       tenantId,
       conversationId: convId,
@@ -68,16 +69,19 @@ test("Message Deletion Reflection & Follow-up Notifications Suite", async (t) =>
       io: fakeIo,
     });
 
-    const tenantEmits = emitted.filter((e) => e.room === `tenant:${tenantId}`);
-    assert.ok(tenantEmits.some((e) => e.event === "message:updated" && e.payload?.messageId === msgId));
-    assert.ok(tenantEmits.some((e) => e.event === "conversation:updated"));
+    await settle();
+    const scoped = emitted.filter((e) => e.rooms.includes(managers));
+    assert.ok(scoped.some((e) => e.event === "message:updated" && e.payload?.messageId === msgId));
+    assert.ok(scoped.some((e) => e.event === "conversation:updated"));
+    // a message's words must never go to the room every teammate is in: staff only see their own chats
+    assert.deepEqual(emitted.filter((e) => e.rooms.length === 1 && e.room === `tenant:${tenantId}`), [], "nothing went to the whole workspace");
 
     const { rows } = await query("SELECT type, status, text FROM messages WHERE id = $1", [msgId]);
     assert.strictEqual(rows[0].type, "revoked");
     assert.strictEqual(rows[0].status, "deleted");
   });
 
-  await t.test("2. handleRevokedMessage handles mobile revocation and broadcasts", async () => {
+  await t.test("2. a message deleted on the phone is reflected, and told only to people who can open the chat", async () => {
     const providerMsgId = `wamid_revoked_${Date.now()}`;
     const sent = await sendTextMessage({
       tenantId,
@@ -103,9 +107,11 @@ test("Message Deletion Reflection & Follow-up Notifications Suite", async (t) =>
     assert.strictEqual(revoked.status, "deleted");
     assert.strictEqual(revoked.type, "revoked");
 
-    const tenantEmits = emitted.filter((e) => e.room === `tenant:${tenantId}`);
-    assert.ok(tenantEmits.some((e) => e.event === "message:updated"));
-    assert.ok(tenantEmits.some((e) => e.event === "conversation:updated"));
+    await settle();
+    const scoped = emitted.filter((e) => e.rooms.includes(managers));
+    assert.ok(scoped.some((e) => e.event === "message:updated"));
+    assert.ok(scoped.some((e) => e.event === "conversation:updated"));
+    assert.deepEqual(emitted.filter((e) => e.rooms.length === 1 && e.room === `tenant:${tenantId}`), [], "nothing went to the whole workspace");
   });
 
   await t.test("3. pumpLeadReminders fires advance warning for upcoming follow-ups", async () => {
@@ -113,6 +119,7 @@ test("Message Deletion Reflection & Follow-up Notifications Suite", async (t) =>
     const req = {
       tenantId,
       user,
+      membership: { role: "owner" },
       app: { get: () => fakeIo },
     };
 

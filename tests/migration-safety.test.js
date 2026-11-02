@@ -4,6 +4,7 @@ import request from "supertest";
 import { app, io } from "../src/server.js";
 import { getPool, query } from "../src/db/index.js";
 import { runMigrations } from "../src/db/migrate.js";
+import fs from "node:fs";
 
 test("A stuck table lock can never hang a deploy, and /health says what is running", async (t) => {
   t.after(() => io.close());
@@ -13,7 +14,11 @@ test("A stuck table lock can never hang a deploy, and /health says what is runni
     assert.equal(res.status, 200);
     assert.match(res.body.build.commit, /^[0-9a-f]{7}$|^unknown$/);
     assert.ok(res.body.build.startedAt);
-    assert.equal(res.body.schemaVersion, "034_user_identities");
+    // the newest migration file is the one the database reports: a file nobody registered in migrate.js would never run
+    const files = fs.readdirSync(new URL("../src/db/migrations/", import.meta.url)).filter((f) => /^\d+_.*\.js$/.test(f)).sort();
+    assert.equal(res.body.schemaVersion, files.at(-1).replace(/\.js$/, ""));
+    const applied = (await query("SELECT count(*)::int AS n FROM schema_migrations WHERE version ~ '^[0-9]'")).rows[0].n;
+    assert.equal(applied, files.length, "every migration file is registered and applied");
   });
 
   const probe = {

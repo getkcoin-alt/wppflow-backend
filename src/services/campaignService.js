@@ -228,7 +228,7 @@ export async function pumpCampaigns(io) {
         const result = await sendTextMessage({
           tenantId: r.tenant_id,
           conversationId: r.conversationId,
-          text: personalise(campaign.template_text, { name: r.name, company }),
+          text: personalise(campaign.template_text, { name: r.name, company, spintax: campaign.spintax_enabled !== false }),
           idempotencyKey: `campaign:${campaign.id}:${r.id}`,
           agentName: "Campaign",
           io,

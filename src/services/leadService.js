@@ -442,7 +442,7 @@ export async function addTask(req, lead, { title, dueAt, assignedUserId }) {
       dedupeKey: `task-assigned:${id}:${who.id}`,
       recipients: [{ userId: who.id, type: "lead_task" }],
       title: `New follow-up assigned: ${text}`,
-      body: `${req.user.name || "A teammate"} assigned you a follow-up for ${lead.contact_name || lead.phone || "a lead"}.`,
+      body: `${req.user.name || "A teammate"} assigned you a follow-up for ${chatTitle(lead.contact_name, lead.phone) || "a lead"}.`,
     }).catch((e) => console.error("Task assignment notice failed:", e.message));
   }
   return id;
@@ -482,7 +482,7 @@ export async function addChatTask(req, { conversationId, title, dueAt, assignedU
       dedupeKey: `task-assigned:${id}:${assignee}`,
       recipients: [{ userId: assignee, type: "lead_task" }],
       title: `New follow-up assigned: ${text}`,
-      body: `${req.user.name || "A teammate"} assigned you a follow-up for ${chat.contact_name || chat.phone || "this chat"}.`,
+      body: `${req.user.name || "A teammate"} assigned you a follow-up for ${chatTitle(chat.contact_name, chat.phone) || "this chat"}.`,
     }).catch((e) => console.error("Chat task assignment notice failed:", e.message));
   }
   return id;
@@ -617,7 +617,7 @@ export async function pumpLeadReminders(io) {
       io, tenantId: t.tenant_id, actor: null, conversationId: chat?.id || null, dedupeKey: `task-upcoming:${t.id}`,
       recipients: [{ userId: recipient, type: "lead_task" }],
       title: `⏰ Upcoming follow-up in ~${minutesLeft}m: ${t.title}`,
-      body: `${t.who ? `${t.who} • ` : ""}Scheduled for ${new Date(t.due_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
+      body: `${t.who ? `${hideId(t.who, "")} • ` : ""}Scheduled for ${new Date(t.due_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
     }).catch((e) => console.error("Upcoming task notice failed:", e.message));
   }
 
@@ -641,8 +641,8 @@ export async function pumpLeadReminders(io) {
     await createNotifications({
       io, tenantId: t.tenant_id, actor: null, conversationId: chat?.id || null, dedupeKey: `task:${t.id}`,
       recipients: [{ userId: recipient, type: "lead_task" }],
-      title: `🔔 Follow-up due now: ${t.title}`,
-      body: t.who ? `${t.who} • Due now` : "Due now",
+      title: `Follow-up due: ${t.title}`,
+      body: hideId(t.who, "") || "",
     }).catch((e) => console.error("Due task notice failed:", e.message));
   }
   await escalateOverdueTasks(io);

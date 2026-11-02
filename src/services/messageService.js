@@ -63,17 +63,6 @@ const emitMessage = (io, tenant, event, message) => {
     },
     { snapshot: true },
   );
-  if (io && tenant) {
-    io.to(`tenant:${tenant}`).emit(event, {
-      conversationId: message.conversation_id,
-      chatId: message.conversation_id,
-      message: formatted,
-    });
-    io.to(`tenant:${tenant}`).emit("conversation:updated", {
-      conversationId: message.conversation_id,
-      chatId: message.conversation_id,
-    });
-  }
 };
 export async function sendTextMessage({
   tenantId,
@@ -392,21 +381,6 @@ export async function handleIncomingMessage({
     );
     if (!saved.rowCount) return null;
     if (!history && !msg.fromMe) {
-      const rawIncomingText = String(msg.text || "").trim();
-      if (/^(stop|unsubscribe|opt[\s-]?out|cancel|arret)$/i.test(rawIncomingText)) {
-        await c.query(
-          `INSERT INTO consents(tenant_id, phone, opt_in_status, source) 
-           VALUES($1, $2, false, 'incoming_keyword') 
-           ON CONFLICT(tenant_id, phone) DO UPDATE SET opt_in_status=false`,
-          [tenantId, phone],
-        );
-        await c.query(
-          `INSERT INTO suppressions(tenant_id, phone, reason) 
-           VALUES($1, $2, 'Customer replied STOP/UNSUBSCRIBE') 
-           ON CONFLICT(tenant_id, phone) DO NOTHING`,
-          [tenantId, phone],
-        );
-      }
       await c.query(
         "INSERT INTO outbox_events(tenant_id,aggregate_type,aggregate_id,event_type,payload) VALUES($1,'message',$2,'automation.incoming',$3) ON CONFLICT DO NOTHING",
         [
@@ -629,16 +603,6 @@ export async function handleRevokedMessage({ tenantId, sessionName, revokedData,
       messageId: msg.id,
       message: formatted,
     });
-    io.to(`tenant:${tenantId}`).emit("message:updated", {
-      conversationId: msg.conversation_id,
-      chatId: msg.conversation_id,
-      messageId: msg.id,
-      message: formatted,
-    });
-    io.to(`tenant:${tenantId}`).emit("conversation:updated", {
-      conversationId: msg.conversation_id,
-      chatId: msg.conversation_id,
-    });
     emitForConversation(
       io,
       tenantId,
@@ -786,6 +750,8 @@ export async function deleteMessage({
       );
     } catch (err) {
       console.warn(`WhatsApp deleteMessage: ${err.message}`);
+      // "for everyone" is a promise about the customer's phone: if WhatsApp did not do it, it is not shown as done
+      if (forEveryone) throw fail(502, "WhatsApp could not delete this message for everyone right now. Check that the number is connected and try again.");
     }
   }
 
@@ -816,16 +782,6 @@ export async function deleteMessage({
         chatId: conversationId,
         messageId,
         message: formatted,
-      });
-      io.to(`tenant:${tenantId}`).emit("message:updated", {
-        conversationId,
-        chatId: conversationId,
-        messageId,
-        message: formatted,
-      });
-      io.to(`tenant:${tenantId}`).emit("conversation:updated", {
-        conversationId,
-        chatId: conversationId,
       });
       emitForConversation(
         io,
@@ -874,15 +830,6 @@ export async function deleteMessage({
         conversationId,
         chatId: conversationId,
         messageId,
-      });
-      io.to(`tenant:${tenantId}`).emit("message:deleted", {
-        conversationId,
-        chatId: conversationId,
-        messageId,
-      });
-      io.to(`tenant:${tenantId}`).emit("conversation:updated", {
-        conversationId,
-        chatId: conversationId,
       });
       emitForConversation(
         io,

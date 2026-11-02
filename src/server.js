@@ -74,8 +74,7 @@ app.use(
       if (!origin) return callback(null, true);
       if (
         ENV.ALLOWED_ORIGINS.includes("*") ||
-        ENV.ALLOWED_ORIGINS.includes(origin) ||
-        /\.vercel\.app$/i.test(origin)
+        ENV.ALLOWED_ORIGINS.includes(origin)
       ) {
         return callback(null, true);
       }

@@ -91,6 +91,10 @@ test("Inbox search: people by name or number in any format, messages by their wo
     assert.equal(hidden.contactName, "Unknown contact");
     assert.equal(hidden.displayPhone, "");
     assert.ok(!JSON.stringify(all.body.conversations.map((c) => [c.contactName, c.contact_name, c.displayPhone])).includes("@lid"));
+    const people = (await request(app).get("/api/contacts").set(owner.auth)).body;
+    const list = people.contacts || people.items || people;
+    assert.ok(Array.isArray(list) && list.length > 0, JSON.stringify(people).slice(0, 200));
+    for (const c of list) assert.ok(!/@(lid|c\.us)/.test(`${c.name} ${c.whatsappName}`), `a contact shows an id: ${c.name} / ${c.whatsappName}`);
     assert.equal((await find(owner, "83752348")).chats.length, 0, "digits of a hidden id do not find the chat");
     assert.equal((await find(owner, "lid")).chats.filter((c) => c.providerChatId.endsWith("@lid")).length, 0);
   });
