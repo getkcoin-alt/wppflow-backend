@@ -80,7 +80,7 @@ export async function noteHumanRequest({ tenantId, conversationId, messageId, te
   }).catch((e) => console.error("Hand-off notice failed:", e.message));
   if (spoken) {
     // the customer has been talking to a machine: say that a person will follow
-    await sendTextMessage({ tenantId, conversationId, text: ACK, idempotencyKey: `asked-for-person-ack:${messageId}`, agentName: "Automation", io }).catch((e) => console.error("Hand-off reply failed:", e.message));
+    await sendTextMessage({ tenantId, conversationId, text: ACK, idempotencyKey: `asked-for-person-ack:${messageId}`, agentName: "Automation", io, audit: { source: "handoff_notice", ruleRef: "customer asked for a person", triggerMessageId: messageId } }).catch((e) => console.error("Hand-off reply failed:", e.message));
   }
   emitForConversation(io, tenantId, conversationId, "home:changed", { conversationId });
   emitForConversation(io, tenantId, conversationId, "conversation:updated", { conversationId }, { snapshot: true });

@@ -15,6 +15,7 @@ import {
   previewUrl,
 } from "./mediaService.js";
 import { backfillPreviews } from "./previewService.js";
+import { recordAutomated, AUTOMATED_SENDERS } from "./auditTrail.js";
 
 export function formatMessage(m) {
   return m
@@ -77,6 +78,7 @@ export async function sendTextMessage({
   attachment = null,
   campaignId = null,
   quotedMessageId = null,
+  audit = null,
 }) {
   text = validateText(text, "Message", 10000);
   idempotencyKey = validateText(idempotencyKey, "Idempotency key", 128);
@@ -227,6 +229,23 @@ export async function sendTextMessage({
       );
     return { message: saved.rows[0], duplicate: false };
   });
+  // everything Riwo or a rule says to a customer is written to the audit record: what started it, which rule allowed it, which
+  // model was involved and the exact words. A message nobody labelled is recorded too, as "unlabelled", so none escapes.
+  if (!result.duplicate && type === "text" && AUTOMATED_SENDERS.includes(agentName)) {
+    const a = audit || {};
+    await recordAutomated({
+      tenantId,
+      conversationId,
+      source: a.source || "unlabelled",
+      ruleRef: a.ruleRef || "",
+      triggerMessageId: a.triggerMessageId || null,
+      messageId: result.message.id,
+      provider: a.provider || "",
+      model: a.model || "",
+      text: result.message.text,
+      reversible: a.reversible === true,
+    }).catch((e) => console.error("Audit record failed:", e.message));
+  }
   if (!result.duplicate)
     emitMessage(io, tenantId, "message:created", result.message);
   return { ...result, message: formatMessage(result.message) };

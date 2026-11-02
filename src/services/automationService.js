@@ -86,6 +86,7 @@ async function perform(rule, { message, conv, contact, company, tenant, mode, ex
       idempotencyKey: `automation:${execution.id}${suffix}`,
       agentName: "Automation",
       io,
+      audit: { source: "rule", ruleRef: `${rule.name || rule.action_type}: rule ${rule.id}`, triggerMessageId: message.id },
     });
   switch (rule.action_type) {
     case "reply_text":

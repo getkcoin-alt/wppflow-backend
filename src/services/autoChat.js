@@ -190,11 +190,14 @@ export async function runAutoChatTurn({ rule, message, conv, contact, tenant, ex
   const key = `automation:${execution.id}:ai`;
   if ((await query("SELECT 1 FROM messages WHERE tenant_id=$1 AND idempotency_key=$2", [tenantId, key])).rowCount) return;
   const config = rule.config || {};
-  const send = (text) => sendTextMessage({ tenantId, conversationId: conv.id, text: withDisclosure(text), idempotencyKey: key, agentName: RIWO, io });
+  const ruleRef = `${config.sales?.enabled ? "sales assistant" : "Riwo chat"}: rule ${rule.id}`;
+  const modelInfo = { provider: "", model: "" }; // filled in when the model has been asked, so the record says which one wrote what
+  const send = (text) =>
+    sendTextMessage({ tenantId, conversationId: conv.id, text: withDisclosure(text), idempotencyKey: key, agentName: RIWO, io, audit: { source: config.sales?.enabled ? "sales_assistant" : "riwo_chat", ruleRef, triggerMessageId: message.id, provider: modelInfo.provider, model: modelInfo.model } });
   const handoffText = config.handoff;
   const bump = () => query("UPDATE automation_chats SET updated_at=now() WHERE tenant_id=$1 AND conversation_id=$2 AND automation_id=$3", [tenantId, conv.id, rule.id]);
 
-  if (config.sales?.enabled) return runSalesTurn({ rule, message, conv, contact, tenant, execution, io, state, config, send, bump });
+  if (config.sales?.enabled) return runSalesTurn({ rule, message, conv, contact, tenant, execution, io, state, config, send, bump, modelInfo });
 
   if ((await riwoReplies(state)) >= (config.maxReplies || 5)) {
     await send(handoffText);
@@ -216,6 +219,8 @@ export async function runAutoChatTurn({ rule, message, conv, contact, tenant, ex
   let result;
   try {
     result = await chatForBusiness({ tenant, conversationId: conv.id, knowledge: config.knowledge, sourceOptions: config.sourceOptions || [] });
+    modelInfo.provider = result.provider || "";
+    modelInfo.model = result.model || "";
   } catch (error) {
     // the allowance can run out between the check above and the request; anything else (the provider is busy) is tried again
     if (error.status === 429 && /used today's/.test(error.message)) await giveUp("Today's Riwo allowance has been used.");
@@ -263,7 +268,7 @@ export async function startSales({ rule, message, conv, contact, tenant, executi
 // A later message in a chat the sales assistant is holding. In order: a request for pricing or a proposal is handed to an
 // executive without asking the model; then what the customer said is kept as answers (read by the model when one is available,
 // otherwise taken as the answer to the question just asked); then the next question, or the hand-off when none are left.
-async function runSalesTurn({ rule, message, conv, contact, tenant, execution, io, state, config, send, bump }) {
+async function runSalesTurn({ rule, message, conv, contact, tenant, execution, io, state, config, send, bump, modelInfo }) {
   const tenantId = message.tenant_id;
   const questions = questionsOf(rule);
   let requirements = Array.isArray(state.requirements) ? state.requirements : [];
@@ -284,6 +289,8 @@ async function runSalesTurn({ rule, message, conv, contact, tenant, execution, i
         sourceOptions: config.sourceOptions || [],
         questions: questions.map((text, i) => ({ n: i + 1, text, answered: done.has(i + 1) })),
       });
+      modelInfo.provider = result.provider || "";
+      modelInfo.model = result.model || "";
       const opts = { knowledge: config.knowledge || "", options: config.sourceOptions || [], allowEmpty: true };
       let answer = checkAnswer(result.text, opts);
       if (answer.invalid) {

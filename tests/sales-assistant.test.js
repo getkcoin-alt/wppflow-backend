@@ -169,6 +169,13 @@ test("The sales assistant asks, remembers, hands pricing to an executive, and op
     // the model was told which questions exist and which are answered, and never asked to ask them
     assert.match(asked.at(-1).messages[0].content, /<questions>\n1\. What are you looking for\?\n2\. How many do you need, and where\?\n3\. When/);
     assert.equal((await chatOf("447700900001")).needs_human_since, null);
+    // the audit record says what started it, which rule allowed it, which model was involved, and the exact words
+    const audit = (await query("SELECT a.*,m.text AS trigger_text FROM automation_audit a LEFT JOIN messages m ON m.id=a.trigger_message_id WHERE a.tenant_id=$1 AND a.source='sales_assistant' ORDER BY a.id", [tenantId])).rows.at(-1);
+    assert.equal(audit.text, `${QUESTIONS[1]}\n\n${DISCLOSURE}`);
+    assert.equal(audit.trigger_text, "I want to buy a 2 bedroom apartment");
+    assert.match(audit.rule_ref, /^sales assistant: rule /);
+    assert.equal(audit.provider, "anthropic");
+    assert.ok(audit.model.length > 0);
   });
 
   await t.test("a question from the customer is answered from the company's text, and the next question follows it", async () => {
@@ -201,6 +208,9 @@ test("The sales assistant asks, remembers, hands pricing to an executive, and op
     assert.equal(riwo.length, riwoBefore + 1);
     assert.equal(riwo.at(-1), "Thank you for your interest, Amelia. Our executive Sam Executive has been assigned to review your requirements and will share the proposal and pricing with you shortly.");
     assert.ok(!/\d/.test(riwo.at(-1)), "no figure in it");
+    const formal = (await query("SELECT * FROM automation_audit WHERE tenant_id=$1 AND source='sales_assistant' ORDER BY id DESC LIMIT 1", [tenantId])).rows[0];
+    assert.match(formal.rule_ref, /^sales assistant hand-off \(pricing\): rule /);
+    assert.ok(formal.trigger_message_id, "the message that asked for pricing");
     const chat = await chatOf("447700900001");
     assert.ok(chat.needs_human_since, "the chat is first on the team's list");
     assert.equal(chat.needs_human_reason, "pricing");

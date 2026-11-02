@@ -8,6 +8,7 @@ import { emitForConversation } from "./realtime.js";
 import { assertConversationAccess, isManager } from "./access.js";
 import { chatTitle } from "./personName.js";
 import { withDisclosure } from "./handoffService.js";
+import { recordAutomated } from "./auditTrail.js";
 
 // Autopilot: what a company lets Riwo do by itself. Everything is off until an owner switches it on, and each rule is small
 // enough to explain in a sentence.
@@ -117,6 +118,7 @@ export async function handle(tenant, rules, chat, io = null) {
       // nothing is sent, so a teammate who owns the chat does not matter, but a person who is answering does
       await query("UPDATE conversations SET awaiting_since=NULL, updated_at=now() WHERE id=$1 AND tenant_id=$2 AND awaiting_since IS NOT DISTINCT FROM $3", [chat.id, tenant.id, chat.awaiting_since]);
       await finish(logId, "cleared", { reason: "only said thanks", text: String(chat.text).slice(0, 80) });
+      await recordAutomated({ tenantId: tenant.id, conversationId: chat.id, event: "cleared", source: "autopilot", ruleRef: "thanks_done", triggerMessageId: chat.message_id, text: String(chat.text).slice(0, 80), reversible: true }).catch((e) => console.error("Audit record failed:", e.message));
       emitForConversation(io, tenant.id, chat.id, "home:changed", { conversationId: chat.id });
       return "cleared";
     }
@@ -139,6 +141,7 @@ export async function handle(tenant, rules, chat, io = null) {
       idempotencyKey: `autopilot:${chat.message_id}`.slice(0, 128),
       agentName: "Riwo",
       io,
+      audit: { source: "autopilot", ruleRef: "saved_replies", triggerMessageId: chat.message_id, provider: choice.provider, model: choice.model, reversible: true },
     });
     await finish(logId, "sent", { reason: reply.title, text, replyMessageId: sent.message.id });
     emitForConversation(io, tenant.id, chat.id, "home:changed", { conversationId: chat.id });
@@ -222,6 +225,9 @@ export async function undo(req, logId, io = null) {
     [row.conversation_id, req.tenantId, row.prior_awaiting_since, row.created_at],
   );
   await query("UPDATE autopilot_log SET outcome='undone', updated_at=now() WHERE id=$1", [logId]);
+  // taking it back is a new row in the audit record, naming the action it reverses and who did it
+  const earlier = (await query("SELECT id FROM automation_audit WHERE tenant_id=$1 AND conversation_id=$2 AND message_id IS NOT DISTINCT FROM $3 AND event IN ('sent','cleared') ORDER BY id DESC LIMIT 1", [req.tenantId, row.conversation_id, row.reply_message_id])).rows[0];
+  await recordAutomated({ tenantId: req.tenantId, conversationId: row.conversation_id, event: "undone", source: "autopilot", ruleRef: `${row.rule_key} (taken back by ${req.user?.name || "a teammate"})`, messageId: row.reply_message_id, text: row.text || "", undoes: earlier?.id ?? null }).catch((e) => console.error("Audit record failed:", e.message));
   emitForConversation(io, req.tenantId, row.conversation_id, "home:changed", { conversationId: row.conversation_id });
   return { id: logId, outcome: "undone" };
 }

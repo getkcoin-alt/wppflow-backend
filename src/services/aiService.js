@@ -76,7 +76,7 @@ async function askClaude({ system, user, maxTokens }) {
         );
         response = await plain();
       }
-    return { text: textOf(response), usage: response.usage, model: response.model };
+    return { text: textOf(response), usage: response.usage, model: response.model || params.model };
   } catch (error) {
     throw explain(error);
   }
@@ -467,6 +467,7 @@ Pick null when you are not sure, when the customer asks for something the saved 
     confident: String(o.confidence).toLowerCase() === "high" && replyId !== null,
     tone: MOODS.includes(String(o.tone).toLowerCase()) ? String(o.tone).toLowerCase() : "neutral",
     provider: answer.provider,
+    model: answer.model,
   };
 }
 
@@ -564,8 +565,8 @@ export async function chatForBusiness({ tenant, conversationId, knowledge, sourc
   ]
     .filter(Boolean)
     .join("\n\n");
-  const { text, model } = await run(tenant, { system: customerSystem(tenant.name, questions.length > 0), user, maxTokens: 400 });
-  return { text, model };
+  const { text, model, provider } = await run(tenant, { system: customerSystem(tenant.name, questions.length > 0), user, maxTokens: 400 });
+  return { text, model, provider };
 }
 
 // ── Writing the "about" text from the company's own website ─────────────────────────────────────

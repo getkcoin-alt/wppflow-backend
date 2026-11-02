@@ -105,7 +105,7 @@ export async function handOffToExecutive({ rule, state, conv, contact, execution
     .replace(/[ \t]{2,}/g, " ")
     .replace(/\s+([,.!?])/g, "$1")
     .trim();
-  await sendTextMessage({ tenantId, conversationId: conv.id, text: withDisclosure(formal), idempotencyKey: `automation:${execution.id}:sales`, agentName: RIWO, io });
+  await sendTextMessage({ tenantId, conversationId: conv.id, text: withDisclosure(formal), idempotencyKey: `automation:${execution.id}:sales`, agentName: RIWO, io, audit: { source: "sales_assistant", ruleRef: `sales assistant hand-off (${reason}): rule ${rule.id}`, triggerMessageId: execution.message_id || null } });
 
   // 2. the chat is marked (as when a customer asks for a person), so Riwo and Autopilot go quiet and the team's list shows it
   await query(
