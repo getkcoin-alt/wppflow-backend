@@ -129,6 +129,11 @@ async function perform(rule, { message, conv, contact, company, tenant, mode, ex
       }
       // the chat is marked as held before the welcome goes out, so a customer's quick answer is not missed
       await startAutoChat({ tenantId, conversationId: conv.id, automationId: rule.id, messageId: message.id });
+      if (rule.config?.agent?.enabled) {
+        // the agent answers the very first message too, from the knowledge base, instead of sending a welcome and a question
+        await runAutoChatTurn({ rule, message, conv, contact, tenant, execution, io });
+        return;
+      }
       if (rule.config?.sales?.enabled) {
         await startSales({ rule, message, conv, contact, tenant, execution, io, say });
         return; // the welcome went out with the first question, or the hand-off was the answer

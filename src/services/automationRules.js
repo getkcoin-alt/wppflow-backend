@@ -30,6 +30,8 @@ export const SALES = {
   followUpHours: 2,
   defaultQuestions: ["What are you looking for?", "How many do you need, and for which location?", "When do you need it by?", "Do you have a budget range in mind?"],
 };
+// Riwo as the company's sales agent: a whole conversation from the knowledge base, toward the goal the owner described.
+export const AGENT = { maxGoal: 300, maxPlaybook: 2000, closes: ["handoff", "collect_details", "book_demo", "send_link"], pricing: ["handoff", "knowledge"], maxReplies: 20, defaultReplies: 12 };
 export const DEFAULT_SOURCES = ["AI", "Website", "Social media", "Word of mouth"];
 export const MATCHES = ["contains", "word", "exact"];
 
@@ -114,7 +116,28 @@ function checkText(value, label, max) {
   return s;
 }
 
-function cleanSales(raw) {
+function cleanAgent(raw) {
+  if (!raw || raw.enabled !== true) return null;
+  const text = (v, max, label) => {
+    const t = String(v ?? "").replace(/\r/g, "").trim();
+    if (t.length > max) throw fail(400, `${label} can be up to ${max} characters`);
+    if (/<\/?[a-z_]+>/i.test(t)) throw fail(400, `${label} can't contain tags`);
+    return t;
+  };
+  const goal = text(raw.goal, AGENT.maxGoal, "The goal");
+  const playbook = text(raw.playbook, AGENT.maxPlaybook, "How Riwo should talk");
+  if (!goal && !playbook) throw fail(400, "Tell Riwo what it should achieve in the chat, in your own words");
+  return {
+    enabled: true,
+    goal,
+    playbook,
+    closeWith: AGENT.closes.includes(raw.closeWith) ? raw.closeWith : "handoff",
+    // pricing: by default a request for prices goes to a person; a company can let Riwo repeat the prices that are on its website
+    pricing: AGENT.pricing.includes(raw.pricing) ? raw.pricing : "handoff",
+  };
+}
+
+function cleanSales(raw, { agent = false } = {}) {
   if (!raw || raw.enabled !== true) return null;
   const questions = [];
   for (const q of Array.isArray(raw.questions) ? raw.questions : []) {
@@ -124,7 +147,7 @@ function cleanSales(raw) {
     if (/<\/?[a-z_]+>/i.test(text)) throw fail(400, "A question can't contain tags");
     if (!questions.some((x) => x.toLowerCase() === text.toLowerCase())) questions.push(text);
   }
-  if (!questions.length) throw fail(400, "Add at least one question for Riwo to ask");
+  if (!questions.length && !agent) throw fail(400, "Add at least one question for Riwo to ask");
   if (questions.length > SALES.maxQuestions) throw fail(400, `Use up to ${SALES.maxQuestions} questions`);
   // {{executive}} is filled in by the sales assistant itself (the teammate the chat is with), so it is not one of the common fields
   let formal = SALES.formal;
@@ -181,19 +204,28 @@ export async function cleanRule(body, { teammate }) {
   if (actionType === "ai_chat") {
     if (!AUTO_CHAT.triggers.includes(triggerType))
       throw fail(400, "Riwo can chat when someone writes for the first time, or when a number from another country writes");
-    config.reply = checkText(input.reply, "The welcome message", 1000);
-    const knowledge = words(input.knowledge, "What Riwo may talk about", AUTO_CHAT.knowledgeMax);
-    if (knowledge.length < AUTO_CHAT.knowledgeMin)
-      throw fail(400, "Write a few sentences about your business for Riwo to answer from. It will not answer anything that is not in them.");
-    config.knowledge = knowledge;
+    const agent = cleanAgent(input.agent);
+    // an agent answers the first message itself, so it needs no fixed welcome
+    config.reply = agent && !String(input.reply ?? "").trim() ? "" : checkText(input.reply, "The welcome message", 1000);
+    // Riwo may answer from the company's knowledge base (its websites and notes) instead of, or as well as, a text written here
+    config.useKnowledge = input.useKnowledge === true;
+    const written = String(input.knowledge ?? "").trim();
+    if (!config.useKnowledge || written) {
+      const knowledge = words(input.knowledge, "What Riwo may talk about", AUTO_CHAT.knowledgeMax);
+      if (knowledge.length < AUTO_CHAT.knowledgeMin)
+        throw fail(400, "Write a few sentences about your business for Riwo to answer from, or use your knowledge base. It will not answer anything that is not in them.");
+      config.knowledge = knowledge;
+    } else config.knowledge = "";
     // the address the about text was read from, kept so the form can show it again
     if (String(input.website ?? "").trim()) config.website = normalizeSiteUrl(input.website).origin;
     config.handoff = String(input.handoff ?? "").trim() ? checkText(input.handoff, "The hand-over message", 500) : AUTO_CHAT.handoff;
-    const sales = cleanSales(input.sales);
+    if (agent) config.agent = agent;
+    // an agent hands over the same way the sales assistant does, so it always has those settings (with the usual defaults)
+    const sales = cleanSales(agent && !input.sales ? { enabled: true, questions: [] } : input.sales, { agent: Boolean(agent) });
     if (sales) config.sales = sales;
-    const replies = input.maxReplies === undefined || input.maxReplies === "" ? (sales ? Math.min(sales.questions.length + 3, AUTO_CHAT.maxReplies) : AUTO_CHAT.defaultReplies) : Number(input.maxReplies);
-    if (!Number.isInteger(replies) || replies < 1 || replies > AUTO_CHAT.maxReplies)
-      throw fail(400, `Riwo can reply 1 to ${AUTO_CHAT.maxReplies} times in a chat`);
+    const cap = agent ? AGENT.maxReplies : AUTO_CHAT.maxReplies;
+    const replies = input.maxReplies === undefined || input.maxReplies === "" ? (agent ? AGENT.defaultReplies : sales ? Math.min(sales.questions.length + 3, AUTO_CHAT.maxReplies) : AUTO_CHAT.defaultReplies) : Number(input.maxReplies);
+    if (!Number.isInteger(replies) || replies < 1 || replies > cap) throw fail(400, `Riwo can reply 1 to ${cap} times in a chat`);
     config.maxReplies = replies;
     const options = [];
     for (const raw of Array.isArray(input.sourceOptions) ? input.sourceOptions : []) {

@@ -52,12 +52,12 @@ test("Which country a number belongs to, and what counts as foreign", () => {
 
 test("Riwo's answer is used only when it is short, grounded in the company's own words, and in the right form", () => {
   const ok = (obj, o = {}) => checkAnswer(JSON.stringify(obj), { knowledge: KNOWLEDGE, options: OPTIONS, ...o });
-  assert.deepEqual(ok({ reply: "Plans start at INR 999 a month.", needs_person: false, heard_from: null }), { reply: "Plans start at INR 999 a month.", needsPerson: false, heardFrom: null, answers: {} });
+  assert.deepEqual(ok({ reply: "Plans start at INR 999 a month.", needs_person: false, heard_from: null }), { reply: "Plans start at INR 999 a month.", needsPerson: false, heardFrom: null, answers: {}, collected: {}, ready: false });
   assert.equal(ok({ reply: "Hello!", needs_person: false, heard_from: "website" }).heardFrom, "Website", "the option is copied exactly");
   assert.equal(ok({ reply: "Thanks", needs_person: false, heard_from: "a billboard" }).heardFrom, null, "an answer that is not one of the options is not recorded");
   assert.equal(checkAnswer('Sure! {"reply":"Yes","needs_person":false,"heard_from":null} Hope that helps', { knowledge: KNOWLEDGE }).reply, "Yes", "JSON in a sentence is found");
   // asking for a person needs no reply of the model's own
-  assert.deepEqual(ok({ reply: "ignored", needs_person: true, heard_from: null }), { needsPerson: true, reply: "", heardFrom: null, answers: {} });
+  assert.deepEqual(ok({ reply: "ignored", needs_person: true, heard_from: null }), { needsPerson: true, reply: "", heardFrom: null, answers: {}, collected: {}, ready: false });
   // refused: each of these would have put words in the company's mouth
   for (const [why, obj] of [
     ["a price that is not in the company's text", { reply: "Plans start at INR 499 a month.", needs_person: false }],

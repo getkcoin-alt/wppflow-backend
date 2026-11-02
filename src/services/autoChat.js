@@ -1,11 +1,12 @@
 import { query, withTransaction } from "../db/index.js";
-import { chatForBusiness, unavailableReason, usageOf } from "./aiService.js";
+import { chatAsAgent, chatForBusiness, unavailableReason, usageOf } from "./aiService.js";
 import { sendTextMessage } from "./messageService.js";
 import { addContactTag } from "./labelService.js";
 import { createNotifications } from "./notificationService.js";
 import { withDisclosure } from "./handoffService.js";
 import { isForeignNumber } from "./countries.js";
-import { asksForCommercial, questionsOf, answeredNumbers, nextQuestion, withAnswer, handOffToExecutive, ensureLead } from "./salesAssistant.js";
+import { knowledgeFor } from "./knowledgeService.js";
+import { asksForCommercial, questionsOf, answeredNumbers, nextQuestion, withAnswer, withFacts, handOffToExecutive, ensureLead } from "./salesAssistant.js";
 
 // "Let Riwo chat": an automation rule that starts a short conversation with a customer and keeps it going until a person
 // takes over. The rule sends a fixed welcome first (so the first thing a stranger reads was written by the company). After
@@ -22,6 +23,13 @@ const RESTART_AFTER_DAYS = 7;
 
 // A rule that should not run again, and says why. The engine records it as "skipped", not as a failure to retry.
 export class Skipped extends Error {}
+
+// What Riwo may talk about for this message: the company's knowledge base (its profile, notes and the pages that match what
+// the customer wrote), and the text written in the rule. The answer is checked against exactly this.
+export async function knowledgeOf(config, tenantId, customerText) {
+  const fromBase = config.useKnowledge ? await knowledgeFor(tenantId, customerText).catch(() => "") : "";
+  return [fromBase, config.knowledge].filter(Boolean).join("\n\n");
+}
 
 // ── The answer, checked ──────────────────────────────────────────────────────────────────────────
 const DIGIT_BASES = [0x0660, 0x06f0, 0x0966]; // Arabic-Indic, Persian, Devanagari
@@ -62,7 +70,7 @@ function parseObject(raw) {
 // What the model said, or why it cannot be used. A reply is refused if it is empty or long, if it carries a figure (a
 // price, a date, a phone number) that the company's own text does not contain, or if it carries a link or an address that
 // the company's text does not contain. The caller then sends the company's hand-over words instead of the model's.
-export function checkAnswer(raw, { knowledge = "", options = [], allowEmpty = false } = {}) {
+export function checkAnswer(raw, { knowledge = "", options = [], allowEmpty = false, maxLength = 320 } = {}) {
   const obj = parseObject(raw);
   if (!obj) return { invalid: "The answer was not in the expected form" };
   const needsPerson = obj.needs_person === true;
@@ -76,16 +84,18 @@ export function checkAnswer(raw, { knowledge = "", options = [], allowEmpty = fa
       const text = typeof v === "string" || typeof v === "number" ? String(v).replace(/\s+/g, " ").trim().slice(0, 300) : "";
       if (/^\d{1,2}$/.test(n) && text) answers[Number(n)] = text;
     }
-  if (needsPerson) return { needsPerson: true, reply: "", heardFrom, answers };
-  if (!reply && allowEmpty) return { reply: "", needsPerson: false, heardFrom, answers };
+  const ready = obj.ready_to_hand_off === true;
+  const collected = obj.collected && typeof obj.collected === "object" && !Array.isArray(obj.collected) ? obj.collected : {};
+  if (needsPerson) return { needsPerson: true, reply: "", heardFrom, answers, collected, ready };
+  if (!reply && allowEmpty) return { reply: "", needsPerson: false, heardFrom, answers, collected, ready };
   if (!reply) return { invalid: "The answer was empty" };
-  if (reply.length > 320) return { invalid: "The answer was too long" };
+  if (reply.length > maxLength) return { invalid: "The answer was too long" };
   const known = figuresOf(knowledge);
   for (const figure of figuresOf(reply)) if (!known.has(figure)) return { invalid: `The answer contained a figure (${figure}) that is not in the company's text` };
   const haystack = knowledge.toLowerCase();
   for (const link of reply.match(LINKS) || [])
     if (!haystack.includes(link.toLowerCase().replace(/[.,!?)]+$/, ""))) return { invalid: "The answer contained a link or address that is not in the company's text" };
-  return { reply, needsPerson: false, heardFrom, answers };
+  return { reply, needsPerson: false, heardFrom, answers, collected, ready };
 }
 
 // ── Where a chat stands ──────────────────────────────────────────────────────────────────────────
@@ -197,7 +207,9 @@ export async function runAutoChatTurn({ rule, message, conv, contact, tenant, ex
   const handoffText = config.handoff;
   const bump = () => query("UPDATE automation_chats SET updated_at=now() WHERE tenant_id=$1 AND conversation_id=$2 AND automation_id=$3", [tenantId, conv.id, rule.id]);
 
-  if (config.sales?.enabled) return runSalesTurn({ rule, message, conv, contact, tenant, execution, io, state, config, send, bump, modelInfo });
+  const knowledge = await knowledgeOf(config, tenantId, message.text);
+  if (config.agent?.enabled) return runAgentTurn({ rule, message, conv, contact, tenant, execution, io, state, config, send, bump, modelInfo, knowledge });
+  if (config.sales?.enabled) return runSalesTurn({ rule, message, conv, contact, tenant, execution, io, state, config, send, bump, modelInfo, knowledge });
 
   if ((await riwoReplies(state)) >= (config.maxReplies || 5)) {
     await send(handoffText);
@@ -218,7 +230,7 @@ export async function runAutoChatTurn({ rule, message, conv, contact, tenant, ex
 
   let result;
   try {
-    result = await chatForBusiness({ tenant, conversationId: conv.id, knowledge: config.knowledge, sourceOptions: config.sourceOptions || [] });
+    result = await chatForBusiness({ tenant, conversationId: conv.id, knowledge, sourceOptions: config.sourceOptions || [] });
     modelInfo.provider = result.provider || "";
     modelInfo.model = result.model || "";
   } catch (error) {
@@ -227,7 +239,7 @@ export async function runAutoChatTurn({ rule, message, conv, contact, tenant, ex
     throw error;
   }
 
-  const answer = checkAnswer(result.text, { knowledge: config.knowledge || "", options: config.sourceOptions || [] });
+  const answer = checkAnswer(result.text, { knowledge, options: config.sourceOptions || [] });
   if (answer.invalid) console.warn(`Riwo's answer for chat ${conv.id} was not used: ${answer.invalid}`);
 
   if (answer.heardFrom && !state.heard_from && contact) {
@@ -268,7 +280,7 @@ export async function startSales({ rule, message, conv, contact, tenant, executi
 // A later message in a chat the sales assistant is holding. In order: a request for pricing or a proposal is handed to an
 // executive without asking the model; then what the customer said is kept as answers (read by the model when one is available,
 // otherwise taken as the answer to the question just asked); then the next question, or the hand-off when none are left.
-async function runSalesTurn({ rule, message, conv, contact, tenant, execution, io, state, config, send, bump, modelInfo }) {
+async function runSalesTurn({ rule, message, conv, contact, tenant, execution, io, state, config, send, bump, modelInfo, knowledge }) {
   const tenantId = message.tenant_id;
   const questions = questionsOf(rule);
   let requirements = Array.isArray(state.requirements) ? state.requirements : [];
@@ -285,13 +297,13 @@ async function runSalesTurn({ rule, message, conv, contact, tenant, execution, i
       const result = await chatForBusiness({
         tenant,
         conversationId: conv.id,
-        knowledge: config.knowledge,
+        knowledge,
         sourceOptions: config.sourceOptions || [],
         questions: questions.map((text, i) => ({ n: i + 1, text, answered: done.has(i + 1) })),
       });
       modelInfo.provider = result.provider || "";
       modelInfo.model = result.model || "";
-      const opts = { knowledge: config.knowledge || "", options: config.sourceOptions || [], allowEmpty: true };
+      const opts = { knowledge, options: config.sourceOptions || [], allowEmpty: true };
       let answer = checkAnswer(result.text, opts);
       if (answer.invalid) {
         // what Riwo wanted to say is not used, but what the customer told us still counts: only the reply is dropped
@@ -338,4 +350,65 @@ async function runSalesTurn({ rule, message, conv, contact, tenant, execution, i
   if ((await riwoReplies(state)) >= (config.maxReplies || questions.length + 3)) return void (await hand("limit"));
   await send([reply, questions[next - 1]].filter(Boolean).join("\n\n"));
   await query("UPDATE automation_chats SET step=$4,updated_at=now() WHERE tenant_id=$1 AND conversation_id=$2 AND automation_id=$3", [tenantId, conv.id, rule.id, next]);
+}
+
+// ── The sales agent ──────────────────────────────────────────────────────────────────────────────
+// A free conversation from the knowledge base, toward the goal the owner described. In order: prices and proposals go to a person
+// (unless the company let Riwo repeat the prices on its website); the reply is written from the knowledge base and checked, with one
+// second try if it carried a figure or link the company never wrote; what the customer said is kept; and when the customer is
+// ready, or Riwo is unsure, a person takes over with a summary.
+async function runAgentTurn({ rule, message, conv, contact, tenant, execution, io, state, config, send, bump, modelInfo, knowledge }) {
+  const tenantId = message.tenant_id;
+  const agent = config.agent;
+  let requirements = Array.isArray(state.requirements) ? state.requirements : [];
+  const hand = (reason) => handOffToExecutive({ rule, state, conv, contact, execution, io, reason, requirements, company: tenant.name, lastText: message.text, since: message.timestamp_epoch });
+  const tellNeedsPerson = async () => {
+    if (state.needs_person) {
+      await bump();
+      throw new Skipped("The customer has already been told a person will follow up");
+    }
+    await send(config.handoff);
+    await query("UPDATE automation_chats SET needs_person=true,requirements=$4,updated_at=now() WHERE tenant_id=$1 AND conversation_id=$2 AND automation_id=$3", [tenantId, conv.id, rule.id, JSON.stringify(requirements)]);
+    await tellTeam({ io, tenantId, conv, state, title: `${contact?.name || conv.contact_name} needs a person`, body: "Riwo could not answer this from what your company wrote. Please reply when you can." });
+  };
+
+  if (agent.pricing !== "knowledge" && asksForCommercial(message.text)) return void (await hand("pricing"));
+  // a customer who has been told a person will follow up is not answered again by Riwo until that person has
+  if (state.needs_person) {
+    await bump();
+    throw new Skipped("The customer has already been told a person will follow up");
+  }
+  const max = config.maxReplies || 12;
+  if ((await riwoReplies(state)) >= max) return void (await hand("limit"));
+  if (unavailableReason(tenant) || (await usageOf(tenant)).remaining <= 0) return void (await tellNeedsPerson());
+
+  const learned = Object.fromEntries(requirements.map((r) => [r.question, r.answer]));
+  let answer = null;
+  let correction = "";
+  for (let attempt = 0; attempt < 2 && !answer; attempt++) {
+    const result = await chatAsAgent({ tenant, conversationId: conv.id, knowledge, agent, collected: learned, correction });
+    modelInfo.provider = result.provider || "";
+    modelInfo.model = result.model || "";
+    const checked = checkAnswer(result.text, { knowledge, options: [], maxLength: 500 });
+    if (!checked.invalid) answer = checked;
+    else {
+      console.warn(`Riwo's agent reply for chat ${conv.id} was not used: ${checked.invalid}`);
+      correction = checked.invalid.endsWith(".") ? checked.invalid : `${checked.invalid}.`;
+      // what the customer said still counts, even when the words could not be used
+      const salvage = parseObject(result.text);
+      if (salvage?.collected) requirements = withFacts(requirements, salvage.collected);
+    }
+  }
+  if (!answer) return void (await tellNeedsPerson());
+
+  const hadNone = !(state.requirements || []).length;
+  requirements = withFacts(requirements, answer.collected);
+  await query("UPDATE automation_chats SET requirements=$4 WHERE tenant_id=$1 AND conversation_id=$2 AND automation_id=$3", [tenantId, conv.id, rule.id, JSON.stringify(requirements)]);
+  if (hadNone && requirements.length) await ensureLead({ tenantId, conv, name: contact?.name || conv.contact_name, requirements, io }).catch((e) => console.error("Riwo agent could not open a lead:", e.message));
+
+  if (answer.needsPerson) return void (await tellNeedsPerson());
+  // the customer is ready: your formal message goes out and a person takes the conversation, with what Riwo learned
+  if (answer.ready) return void (await hand("qualified"));
+  await send(answer.reply);
+  await bump();
 }

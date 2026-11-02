@@ -57,7 +57,22 @@ export function withAnswer(requirements, questions, n, answer) {
   if (!text || !questions[n - 1] || answeredNumbers(requirements).has(n)) return requirements || [];
   return [...(requirements || []), { n, question: questions[n - 1], answer: text }].sort((a, b) => a.n - b.n);
 }
-export const summaryOf = (requirements) => (requirements || []).map((r) => `• ${r.question} ${r.answer}`).join("\n");
+// Facts Riwo learned in a free conversation (labels and short values), kept beside the answers to fixed questions
+export function withFacts(requirements, facts) {
+  const list = [...(requirements || [])];
+  let n = list.reduce((m, r) => Math.max(m, r.n), 0);
+  for (const [rawLabel, rawValue] of Object.entries(facts && typeof facts === "object" ? facts : {}).slice(0, 12)) {
+    const label = String(rawLabel).replace(/<\/?[a-z_]+>/gi, "").replace(/\s+/g, " ").trim().slice(0, 40);
+    const value = String(rawValue ?? "").replace(/<\/?[a-z_]+>/gi, "").replace(/\s+/g, " ").trim().slice(0, 200);
+    if (!label || !value || value.toLowerCase() === "unknown") continue;
+    const at = list.findIndex((r) => r.question.toLowerCase() === label.toLowerCase());
+    if (at >= 0) list[at] = { ...list[at], answer: value };
+    else list.push({ n: ++n, question: label, answer: value });
+  }
+  return list.slice(0, 20);
+}
+// a fixed question reads "What are you looking for? Buy a flat"; a fact Riwo learned reads "Company size: 40 people"
+export const summaryOf = (requirements) => (requirements || []).map((r) => `• ${r.question}${/[?؟]$/.test(r.question) ? " " : ": "}${r.answer}`).join("\n");
 
 // ── Handing the chat to an executive ─────────────────────────────────────────────────────────────
 const REASONS = {

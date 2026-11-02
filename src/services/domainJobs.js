@@ -10,6 +10,7 @@ import { pumpRealEstate } from "../solutions/real-estate/leaks.js";
 import { pumpAiPrep } from "./aiPrepService.js";
 import { pumpAutopilot } from "./autopilotService.js";
 import { pumpAiBrief } from "./aiBriefService.js";
+import { pumpKnowledge } from "./knowledgeService.js";
 let timer, running;
 export function startDomainJobs(io) {
   timer = setInterval(() => {
@@ -27,6 +28,7 @@ export function startDomainJobs(io) {
       pumpAiPrep(io),
       pumpAutopilot(io),
       pumpAiBrief(io),
+      pumpKnowledge(),
     ])
       .then((results) => {
         for (const r of results)

@@ -16,7 +16,8 @@ import { unavailableReason } from "../services/aiService.js";
 import { AUTO_CHAT, DEFAULT_SOURCES, SALES } from "../services/automationRules.js";
 import rateLimit from "express-rate-limit";
 import { readWebsite } from "../services/websiteReader.js";
-import { draftBusinessProfile } from "../services/aiService.js";
+import { draftAgentFromWords, draftBusinessProfile } from "../services/aiService.js";
+import { hasKnowledge } from "../services/knowledgeService.js";
 const router = express.Router();
 router.use(
   authenticateToken,
@@ -81,6 +82,55 @@ router.post(
     const site = await readWebsite(req.body?.url);
     const draft = await draftBusinessProfile({ tenant: req.tenant, site });
     res.json({ status: "success", url: site.url, pages: site.pages.length, ...draft });
+  }),
+);
+
+// "Describe it in your own words": Riwo asks what it still needs to know, or drafts the agent. The draft is checked by the same
+// rules as one made by hand and returned for the owner to read, change and save; nothing is saved or switched on here.
+const draftLimit = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `${req.tenantId}:draft`,
+  validate: false,
+  message: { status: "error", message: "You've asked Riwo to draft a lot just now. Please try again in a while." },
+});
+router.post(
+  "/draft",
+  draftLimit,
+  route(async (req, res) => {
+    const instruction = String(req.body?.instruction ?? "").trim();
+    if (instruction.length < 10) throw fail(400, "Describe in a sentence or two what Riwo should do.");
+    if (instruction.length > 2000) throw fail(400, "Please keep it under 2,000 characters.");
+    const known = await hasKnowledge(req.tenantId);
+    const out = await draftAgentFromWords({ tenant: req.tenant, instruction, answers: req.body?.answers, hasKnowledge: known });
+    if (out.clarify) return res.json({ status: "success", clarify: out.clarify });
+    const d = out.draft;
+    const rule = {
+      name: d.name,
+      triggerType: d.trigger,
+      triggerCondition: "",
+      actionType: "ai_chat",
+      actionSummary: "",
+      config: {
+        reply: "",
+        useKnowledge: known,
+        knowledge: "",
+        handoff: d.handoff || undefined,
+        agent: { enabled: true, goal: d.goal, playbook: d.playbook, closeWith: d.closeWith, pricing: d.pricing },
+        sales: { enabled: true, questions: [], formal: d.formal || undefined, followUpHours: d.followUpHours, stageName: d.stageName },
+        homeCodes: d.trigger === "foreign_number" ? [] : undefined,
+      },
+    };
+    // checked by the same rules as any rule; a missing knowledge base is reported, not an error, so the owner can add it
+    let problem = "";
+    try {
+      await cleanRule({ ...rule, config: { ...rule.config, knowledge: known ? "" : "placeholder text so the rest can be checked", homeCodes: d.trigger === "foreign_number" ? ["971"] : undefined } }, { teammate: async () => true });
+    } catch (e) {
+      problem = e.message;
+    }
+    res.json({ status: "success", draft: rule, understood: d.understood, needs: known ? [] : ["knowledge"], problem });
   }),
 );
 

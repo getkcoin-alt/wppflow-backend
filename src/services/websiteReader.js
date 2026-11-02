@@ -86,8 +86,11 @@ async function publicTarget(url) {
   return addresses[0];
 }
 
+// Is this address a public website? Used when an address is added, so a private one is refused at once.
+export const assertPublicSite = (url) => publicTarget(url);
+
 // One page, following a few redirects, each checked like the first address.
-export async function fetchPage(start) {
+export async function fetchPage(start, { types = /text\/html|text\/plain|application\/xhtml/i } = {}) {
   let url = start;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     const address = await publicTarget(url);
@@ -107,7 +110,7 @@ export async function fetchPage(start) {
       continue;
     }
     if (res.status < 200 || res.status >= 300) throw fail(422, `That website answered with an error (${res.status}).`);
-    if (!/text\/html|text\/plain|application\/xhtml/i.test(res.type)) throw fail(422, "That address isn't a web page.");
+    if (!types.test(res.type)) throw fail(422, "That address isn't a web page.");
     return { url, html: res.body };
   }
   throw fail(422, "That website redirects too many times.");
@@ -125,7 +128,7 @@ const meta = (html, name) => {
   return decode(tag?.match(/content=["']([^"']*)["']/i)?.[1] || "").replace(/\s+/g, " ").trim();
 };
 
-export function extractPage(html, base) {
+export function extractPage(html, base, maxText = PAGE_TEXT) {
   const source = String(html ?? "");
   const title = decode(source.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || "").replace(/\s+/g, " ").trim().slice(0, 200);
   const description = (meta(source, "description") || meta(source, "og:description")).slice(0, 400);
@@ -147,7 +150,7 @@ export function extractPage(html, base) {
     .split("\n")
     .map((l) => l.replace(/\s+/g, " ").trim())
     .filter((l) => l.length >= 3 && !seen.has(l.toLowerCase()) && seen.add(l.toLowerCase()));
-  return { title, description, text: lines.join("\n").slice(0, PAGE_TEXT), links };
+  return { title, description, text: lines.join("\n").slice(0, maxText), links };
 }
 
 const ABOUT_PATH = /\/(about|about-us|who-we-are|our-story|company|services?|solutions?|products?|what-we-do|offerings?|contact|contact-us|faq|faqs)(\/|$|\.html?$)/i;
@@ -179,4 +182,94 @@ export async function readWebsite(input) {
   if (!pages.some((p) => p.text.length > 80 || p.description.length > 40))
     throw fail(422, "We couldn't find any text on that website. Sites that only show their words after loading scripts can't be read; write a few sentences yourself instead.");
   return { url: home.url.origin, pages };
+}
+
+
+// ── Reading a whole site, politely ───────────────────────────────────────────────────────────────
+// For a company with many products: the home page, the pages it links to, and what its sitemap lists, up to a limit, one page
+// at a time with a short pause, skipping what robots.txt asks robots to leave alone. Pages that fail are skipped.
+const LIKELY = /\/(about|company|services?|solutions?|products?|platform|features?|industries|portfolio|work|case-stud(y|ies)|projects?|clients?|pricing|plans?|faq|faqs|contact|blog|resources?|offerings?|what-we-do)(\/|$|\.html?$)/i;
+const SKIP = /\.(pdf|jpe?g|png|gif|webp|svg|zip|docx?|xlsx?|pptx?|mp4|mp3|css|js|xml|json)(\?|$)/i;
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+export const setCrawlPause = (ms) => {
+  crawlPause = ms;
+};
+let crawlPause = 250;
+
+async function robotsRules(origin) {
+  try {
+    const res = await fetchPage(new URL("/robots.txt", origin));
+    const disallow = [];
+    let applies = false;
+    for (const raw of String(res.html).split(/\r?\n/)) {
+      const line = raw.replace(/#.*/, "").trim();
+      const [k, ...rest] = line.split(":");
+      const v = rest.join(":").trim();
+      if (/^user-agent$/i.test(k)) applies = v === "*" || /scriwo/i.test(v);
+      else if (applies && /^disallow$/i.test(k) && v) disallow.push(v);
+    }
+    return disallow;
+  } catch {
+    return [];
+  }
+}
+
+async function sitemapLinks(origin, host) {
+  try {
+    const res = await fetchPage(new URL("/sitemap.xml", origin), { types: /xml|text\/plain/i });
+    const found = [];
+    for (const m of String(res.html).matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/gi)) {
+      try {
+        const u = new URL(m[1].replace(/&amp;/g, "&"));
+        if (hostKey(u) === host && !/sitemap.*\.xml$/i.test(u.pathname)) found.push(u);
+      } catch {
+        /* skip */
+      }
+    }
+    return found;
+  } catch {
+    return [];
+  }
+}
+
+// Returns { url, pages: [{ url, title, description, text }] }. The first page must be readable; the others are best effort.
+export async function crawlSite(input, { maxPages = 30, maxText = 8000 } = {}) {
+  const start = normalizeSiteUrl(input);
+  const home = await fetchPage(start);
+  const origin = home.url.origin;
+  const host = hostKey(home.url);
+  const disallow = await robotsRules(origin);
+  const allowed = (u) => !disallow.some((d) => u.pathname.startsWith(d));
+  const first = extractPage(home.html, home.url, maxText);
+  const pages = [{ url: home.url.href, title: first.title, description: first.description, text: first.text }];
+  const seen = new Set([home.url.href]);
+  const queue = [];
+  const add = (u, boost) => {
+    u = new URL(u.href);
+    u.hash = "";
+    u.search = "";
+    if (seen.has(u.href) || hostKey(u) !== host || !["http:", "https:"].includes(u.protocol) || SKIP.test(u.pathname) || !allowed(u)) return;
+    seen.add(u.href);
+    queue.push({ u, score: (LIKELY.test(u.pathname) ? 2 : 0) + boost - u.pathname.split("/").length * 0.1 });
+  };
+  for (const l of first.links) add(l, 1);
+  for (const l of await sitemapLinks(origin, host)) add(l, 0);
+  queue.sort((a, b) => b.score - a.score);
+  while (queue.length && pages.length < maxPages) {
+    const { u } = queue.shift();
+    await pause(crawlPause);
+    try {
+      const page = await fetchPage(u);
+      const got = extractPage(page.html, page.url, maxText);
+      if (got.text.length > 60) pages.push({ url: page.url.href, title: got.title, description: got.description, text: got.text });
+      // pages found on a page that matters are worth a look too
+      if (LIKELY.test(page.url.pathname)) for (const l of got.links) add(l, 0.5);
+      queue.sort((a, b) => b.score - a.score);
+    } catch {
+      /* a page that cannot be read is skipped */
+    }
+  }
+  if (!pages.some((p) => p.text.length > 80 || p.description.length > 40))
+    throw fail(422, "We couldn't find any text on that website. Sites that only show their words after loading scripts can't be read; write the facts in the notes instead.");
+  return { url: origin, pages };
 }
