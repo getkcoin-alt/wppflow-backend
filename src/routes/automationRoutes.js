@@ -233,10 +233,25 @@ router.post(
   }),
 );
 // Changing a saved rule keeps whether it is live and how often it has run.
+// Every saved change keeps what was there before it, so the last change can be undone. Twenty versions are kept per rule.
+const KEEP_VERSIONS = 20;
+async function keepVersion(tenantId, id, userId, note = "") {
+  const old = (await query("SELECT * FROM automations WHERE id=$1 AND tenant_id=$2", [id, tenantId])).rows[0];
+  if (!old) return null;
+  const next = (await query("SELECT COALESCE(max(version),0)+1 AS v FROM automation_versions WHERE automation_id=$1", [id])).rows[0].v;
+  await query(
+    `INSERT INTO automation_versions(tenant_id,automation_id,version,name,trigger_type,trigger_condition,action_type,action_summary,config,note,created_by)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11)`,
+    [tenantId, id, next, old.name, old.trigger_type, old.trigger_condition || "", old.action_type, old.action_summary || "", JSON.stringify(old.config || {}), note, userId || null],
+  );
+  await query("DELETE FROM automation_versions WHERE automation_id=$1 AND tenant_id=$2 AND version <= (SELECT max(version) FROM automation_versions WHERE automation_id=$1) - $3", [id, tenantId, KEEP_VERSIONS]);
+  return old;
+}
 router.put(
   "/:id",
   route(async (req, res) => {
     const rule = await cleanRule(req.body, { teammate: teammateOf(req.tenantId) });
+    await keepVersion(req.tenantId, req.params.id, req.user?.id, "Before a change");
     const { rows } = await query(
       `UPDATE automations SET name=$3,trigger_type=$4,trigger_condition=$5,action_type=$6,action_summary=$7,config=$8,updated_at=now() WHERE id=$1 AND tenant_id=$2 RETURNING *`,
       [req.params.id, req.tenantId, rule.name, rule.triggerType, rule.triggerCondition, rule.actionType, rule.actionSummary, JSON.stringify(rule.config)],
@@ -254,6 +269,62 @@ router.patch(
     );
     if (!rows[0]) throw fail(404, "Automation not found");
     res.json({ status: "success", automation: automationView(rows[0]) });
+  }),
+);
+// The saved versions of a rule, newest first, and putting one back (the rule as it is now is kept first, so undoing can be undone).
+router.get(
+  "/:id/versions",
+  route(async (req, res) => {
+    const { rows } = await query("SELECT version,name,note,created_at FROM automation_versions WHERE automation_id=$1 AND tenant_id=$2 ORDER BY version DESC LIMIT $3", [req.params.id, req.tenantId, KEEP_VERSIONS]);
+    res.json({ status: "success", versions: rows.map((r) => ({ version: r.version, name: r.name, note: r.note, createdAt: r.created_at })) });
+  }),
+);
+router.post(
+  "/:id/versions/:version/restore",
+  route(async (req, res) => {
+    const wanted = (await query("SELECT * FROM automation_versions WHERE automation_id=$1 AND tenant_id=$2 AND version=$3", [req.params.id, req.tenantId, Number(req.params.version) || 0])).rows[0];
+    if (!wanted) throw fail(404, "That version isn't saved any more");
+    if (!(await keepVersion(req.tenantId, req.params.id, req.user?.id, "Before going back"))) throw fail(404, "Automation not found");
+    const { rows } = await query(
+      "UPDATE automations SET name=$3,trigger_type=$4,trigger_condition=$5,action_type=$6,action_summary=$7,config=$8::jsonb,updated_at=now() WHERE id=$1 AND tenant_id=$2 RETURNING *",
+      [req.params.id, req.tenantId, wanted.name, wanted.trigger_type, wanted.trigger_condition, wanted.action_type, wanted.action_summary, JSON.stringify(wanted.config || {})],
+    );
+    res.json({ status: "success", automation: automationView(rows[0]) });
+  }),
+);
+
+// How a workflow is doing: how many chats it began, which way the answers went, how many were handed to a person, and a suggestion
+// when many answers could not be understood.
+router.get(
+  "/:id/insights",
+  route(async (req, res) => {
+    const rule = (await query("SELECT * FROM automations WHERE id=$1 AND tenant_id=$2", [req.params.id, req.tenantId])).rows[0];
+    if (!rule) throw fail(404, "Automation not found");
+    const chats = (await query("SELECT status,outcome,vars,created_at FROM automation_chats WHERE automation_id=$1 AND tenant_id=$2", [req.params.id, req.tenantId])).rows;
+    const nodes = Object.values(rule.config?.workflow?.nodes || {});
+    const questions = nodes
+      .filter((n) => n.type === "ask")
+      .map((n) => ({
+        question: n.question,
+        options: n.options.map((o) => ({ key: o.key, label: o.label, count: chats.filter((c) => c.vars?.[n.saveAs] === o.key).length })),
+      }));
+    const started = chats.length;
+    const unclear = chats.filter((c) => c.outcome === "unclear").length;
+    const handedOver = chats.filter((c) => c.status === "handed_off" && c.outcome && c.outcome !== "completed").length;
+    res.json({
+      status: "success",
+      insights: {
+        started,
+        active: chats.filter((c) => c.status === "active").length,
+        finished: chats.filter((c) => c.outcome === "completed").length,
+        handedOver,
+        unclear,
+        meetings: chats.filter((c) => c.vars?.meeting).length,
+        last7Days: chats.filter((c) => Date.now() - new Date(c.created_at).getTime() < 7 * 86400000).length,
+        questions,
+        suggestion: started >= 8 && unclear / started >= 0.2 ? `${unclear} of ${started} people gave an answer Riwo could not understand. Add the words people really use to the answers, or ask the question a different way.` : "",
+      },
+    });
   }),
 );
 router.delete(
