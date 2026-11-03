@@ -104,6 +104,20 @@ export const sendPurchaseReceipt = ({ to, name, company, plan, period, total, in
       note: `Your tax invoice ${esc(invoice)} is under Team, Plans & Billing. A separate email has the link to choose your password; if it does not arrive, choose Forgot password? on the sign-in page and enter ${esc(to)}.`,
     }),
   });
+// A new account's address is confirmed with a link that works once. Until then the person can use Scriwo, with a reminder.
+export const sendEmailVerification = ({ to, name, link, product = "Scriwo" }) =>
+  sendMail({
+    to,
+    subject: `Confirm your email for ${product}`,
+    text: `Hello ${name},\n\nPlease confirm that ${to} is your email address. This link works once and expires in 24 hours:\n${link}\n\nIf you did not create a ${product} account, you can ignore this email.\n\n${product}`,
+    html: layout({
+      heading: "Confirm your email",
+      intro: `Hello ${esc(name)}, please confirm that <b>${esc(to)}</b> is your email address so we can keep your account safe and reach you when it matters.`,
+      cta: "Confirm my email",
+      link,
+      note: `The link works once and expires in 24 hours. If you did not create a ${esc(product)} account, ignore this email.`,
+    }),
+  });
 export const sendPasswordReset = ({ to, name, link }) =>
   sendMail({
     to,

@@ -21,6 +21,7 @@ import { ENV } from "../config/env.js";
 import { route, fail, text } from "../middleware/http.js";
 import { sendWelcomeEmail } from "../services/emailService.js";
 import { applyVertical, brandingOf, startTrial, verticalKey, verticalOfHost } from "../services/vertical.js";
+import { markVerified, noteFirstLogin, sendVerification, verifyEmail } from "../services/emailVerification.js";
 import { GoogleSignInError, googleConfigured, identityFromCode, personFor, startSignIn } from "../services/googleAuth.js";
 import { sendStaffInvite } from "../services/mailer.js";
 import {
@@ -87,6 +88,9 @@ const userView = (user, tenant) => ({
       : "user",
   membershipRole: tenant.role,
   mustChangePassword: Boolean(user.must_change_password),
+  // the address was confirmed by a link, a Google account or an invitation; and whether the welcome guide should still be shown
+  emailVerified: Boolean(user.email_verified_at),
+  guideSeen: Boolean(user.guide_seen_at),
   company_name: tenant.name,
   plan: tenant.plan,
   sessions_limit: tenant.sessions_limit,
@@ -135,6 +139,9 @@ router.post(
     const trial = String(req.body.trial || "").toLowerCase() === "growth";
     if (vertical) await applyVertical({ tenantId: tenant.id, user, key: vertical, io: req.app.get("io") });
     else if (trial) await startTrial({ tenantId: tenant.id, user, source: "website" });
+    // signing up is signing in for the first time, and the address still has to be confirmed
+    await query("UPDATE users SET first_login_at=now() WHERE id=$1", [user.id]);
+    sendVerification(user, req.headers.origin).catch((e) => console.warn(`Verification mail skipped: ${e.message}`));
     res.status(201);
     await respondSession(res, user, { ...(vertical || trial ? await context(user) : tenant), role });
     sendWelcomeEmail({
@@ -164,6 +171,7 @@ router.post(
         "INSERT INTO audit_events(tenant_id,actor_id,event_type) VALUES($1,$2,'auth.login')",
         [tenant.id, user.id],
       );
+    await noteFirstLogin({ user, tenant, io: req.app.get("io") }).catch((e) => console.warn(`First sign-in note skipped: ${e.message}`));
     await respondSession(res, user, tenant);
   }),
 );
@@ -229,7 +237,10 @@ router.get(
       if (req.query.error) throw new GoogleSignInError(req.query.error === "access_denied" ? "cancelled" : "failed", String(req.query.error).slice(0, 80));
       const identity = await identityFromCode({ code: req.query.code, state: req.query.state, saved });
       const { user, created } = await personFor(identity);
+      // Google has already confirmed this address
+      await markVerified(user.id);
       const tenant = await context(user);
+      await noteFirstLogin({ user, tenant, io: req.app.get("io") }).catch(() => {});
       const { refreshToken } = await generateRefreshToken(user.id, tenant.id);
       res.cookie("refreshToken", refreshToken, cookieOptions);
       if (tenant.id)
@@ -254,6 +265,36 @@ router.post(
     if (id)
       await query("UPDATE refresh_tokens SET revoked=true WHERE id=$1", [id]);
     res.clearCookie("refreshToken", cookieOptions);
+    res.json({ status: "success" });
+  }),
+);
+// The link in the confirmation email. The same answer for a link that is wrong, expired or already used.
+router.post(
+  "/verify-email",
+  authRateLimiter,
+  route(async (req, res) => {
+    const { email } = await verifyEmail(text(req.body.token, "Link", 128));
+    res.json({ status: "success", email });
+  }),
+);
+router.post(
+  "/resend-verification",
+  authenticateToken,
+  authRateLimiter,
+  route(async (req, res) => {
+    if (req.apiKey) throw fail(403, "Interactive login required");
+    const out = await sendVerification(req.user, req.headers.origin);
+    if (out.reason === "too_many") throw fail(429, "We have sent you a few links already. Please check your inbox, or try again in an hour.");
+    res.json({ status: "success", sent: out.sent, alreadyVerified: out.reason === "not_needed" });
+  }),
+);
+// The welcome guide has been seen (or skipped): it is not shown again, on any device.
+router.post(
+  "/guide-seen",
+  authenticateToken,
+  route(async (req, res) => {
+    if (req.apiKey) throw fail(403, "Interactive login required");
+    await query("UPDATE users SET guide_seen_at=COALESCE(guide_seen_at,now()) WHERE id=$1", [req.user.id]);
     res.json({ status: "success" });
   }),
 );
@@ -597,6 +638,8 @@ router.post(
       await c.query("UPDATE invitations SET accepted_at=now() WHERE id=$1", [
         inv.id,
       ]);
+      // the invitation link went to this inbox, so the address is confirmed
+      await markVerified(userId, c);
     });
     res.json({
       status: "success",

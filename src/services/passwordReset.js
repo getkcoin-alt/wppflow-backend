@@ -79,7 +79,7 @@ export async function resetPassword(token, password) {
     if (!link || link.status !== "active")
       throw fail(400, "This link is invalid, expired or already used");
     await c.query(
-      "UPDATE users SET password_hash=$1,must_change_password=false,updated_at=now() WHERE id=$2",
+      "UPDATE users SET password_hash=$1,must_change_password=false,email_verified_at=COALESCE(email_verified_at,now()),updated_at=now() WHERE id=$2",
       [await hashPassword(password), link.user_id],
     );
     await c.query(
