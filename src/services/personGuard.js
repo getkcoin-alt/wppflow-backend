@@ -10,6 +10,11 @@ import { query } from "../db/index.js";
 // A rule that should not run (again), and says why. The engine records it as "skipped", not as a failure to retry.
 export class Skipped extends Error {}
 
+// More than this many automatic replies to one chat in an hour means two bots are talking to each other.
+export const REPLIES_PER_HOUR = 6;
+// A workflow talks more than a one-line rule: its own ceiling, which only a loop with another machine could reach.
+export const WORKFLOW_MESSAGES_PER_HOUR = 20;
+
 // Everything the system itself says in a chat. Anything else written by an "agent" is a person.
 export const AUTOMATIC_SENDERS = ["Riwo", "Automation", "Campaign"];
 

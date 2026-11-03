@@ -80,6 +80,7 @@ const REASONS = {
   pricing: "asked for pricing or a proposal",
   qualified: "answered all the questions",
   limit: "reached the limit of Riwo's replies",
+  unclear: "gave an answer Riwo could not understand",
 };
 
 // the step of the pipeline the lead should be in: the company's own choice, or the one that looks like a proposal

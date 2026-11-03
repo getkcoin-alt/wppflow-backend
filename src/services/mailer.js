@@ -158,6 +158,20 @@ export const sendStaffInvite = ({ to, name, company, link }) =>
       note: "The link works once and expires in 24 hours.",
     }),
   });
+// A workflow told the owners something happened in a chat (a friend wrote, a customer asked for a meeting).
+export const sendWorkflowAlert = ({ to, name, title, body, link }) =>
+  sendMail({
+    to,
+    subject: String(title).slice(0, 150),
+    text: `Hello ${name},\n\n${body}\n\nOpen the chat: ${link}\n\nSent by a Riwo workflow in your Scriwo inbox.`,
+    html: layout({
+      heading: esc(title),
+      intro: esc(body).replace(/\n/g, "<br>"),
+      cta: "Open the chat",
+      link,
+      note: "Sent by a Riwo workflow in your Scriwo inbox.",
+    }),
+  });
 const LEAD_FIELDS = [
   ["Name", "name"],
   ["Email", "email"],

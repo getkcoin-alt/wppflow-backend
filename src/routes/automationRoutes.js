@@ -18,6 +18,9 @@ import rateLimit from "express-rate-limit";
 import { readWebsite } from "../services/websiteReader.js";
 import { draftAgentFromWords, draftBusinessProfile } from "../services/aiService.js";
 import { hasKnowledge } from "../services/knowledgeService.js";
+import { draftWorkflow, reviseWorkflow, checkRule, present } from "../services/workflow/compile.js";
+import { simulateTurn } from "../services/workflow/simulate.js";
+import { recipeList } from "../services/workflow/recipes.js";
 const router = express.Router();
 router.use(
   authenticateToken,
@@ -141,6 +144,81 @@ const teammateOf = (tenantId) => async (name) =>
       [tenantId, name],
     )
   ).rowCount > 0;
+
+// ── Workflows: describe, change, check and try ─────────────────────────────────────────────────
+// None of these saves or switches anything on. The screen keeps the draft and the person saves it when they are happy.
+const workflowLimit = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `${req.tenantId}:workflow`,
+  validate: false,
+  message: { status: "error", message: "You've asked Riwo to build a lot just now. Please try again in a while." },
+});
+const tryLimit = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `${req.tenantId}:try`,
+  validate: false,
+  message: { status: "error", message: "You've tried the workflow a lot just now. Please try again in a while." },
+});
+router.get("/workflow/recipes", (req, res) => res.json({ status: "success", recipes: recipeList() }));
+
+router.post(
+  "/workflow/draft",
+  workflowLimit,
+  route(async (req, res) => {
+    const recipe = String(req.body?.recipe ?? "");
+    const instruction = String(req.body?.instruction ?? "").trim();
+    if (!recipe && instruction.length < 10) throw fail(400, "Describe in a sentence or two what should happen.");
+    if (instruction.length > 2000) throw fail(400, "Please keep it under 2,000 characters.");
+    const out = await draftWorkflow({ tenant: req.tenant, instruction, answers: req.body?.answers, hasKnowledge: await hasKnowledge(req.tenantId), teammate: teammateOf(req.tenantId), recipe });
+    res.json({ status: "success", ...out });
+  }),
+);
+router.post(
+  "/workflow/revise",
+  workflowLimit,
+  route(async (req, res) => {
+    const instruction = String(req.body?.instruction ?? "").trim();
+    if (instruction.length < 3) throw fail(400, "Say what to change.");
+    if (instruction.length > 1000) throw fail(400, "Please keep it under 1,000 characters.");
+    const teammate = teammateOf(req.tenantId);
+    const { rule } = await checkRule(req.body?.rule || {}, { teammate });
+    const out = await reviseWorkflow({ tenant: req.tenant, rule, instruction, hasKnowledge: await hasKnowledge(req.tenantId), teammate });
+    res.json({ status: "success", ...out });
+  }),
+);
+// The workflow as the screen has it (after the person edited a step), checked and completed: the same view as a draft.
+router.post(
+  "/workflow/check",
+  route(async (req, res) => {
+    const checked = await checkRule(req.body?.rule || {}, { teammate: teammateOf(req.tenantId) });
+    res.json({ status: "success", draft: present(checked) });
+  }),
+);
+router.post(
+  "/workflow/simulate",
+  tryLimit,
+  route(async (req, res) => {
+    const { rule } = await checkRule(req.body?.rule || {}, { teammate: teammateOf(req.tenantId) });
+    const list = (v, n) => (Array.isArray(v) ? v.slice(0, n) : []);
+    const transcript = list(req.body?.transcript, 30).map((i) => ({ from: i?.from === "customer" ? "customer" : "riwo", text: String(i?.text ?? "").slice(0, 900) }));
+    const out = await simulateTurn({
+      tenant: req.tenant,
+      rule,
+      state: req.body?.state || null,
+      text: String(req.body?.text ?? "").slice(0, 500),
+      labels: list(req.body?.labels, 20).map((l) => String(l).slice(0, 50)),
+      transcript,
+      name: String(req.body?.name || "Asha Rao").slice(0, 60),
+    });
+    res.json({ status: "success", ...out });
+  }),
+);
 
 router.post(
   "/",

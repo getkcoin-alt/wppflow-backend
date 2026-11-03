@@ -7,6 +7,7 @@ import { withDisclosure } from "./handoffService.js";
 import { isForeignNumber } from "./countries.js";
 import { knowledgeFor } from "./knowledgeService.js";
 import { Skipped, assertUnanswered, personAnswered } from "./personGuard.js";
+import { workflowBegins } from "./workflow/trigger.js";
 import { asksForCommercial, questionsOf, answeredNumbers, nextQuestion, withAnswer, withFacts, handOffToExecutive, ensureLead } from "./salesAssistant.js";
 
 // "Let Riwo chat": an automation rule that starts a short conversation with a customer and keeps it going until a person
@@ -142,11 +143,13 @@ export async function autoChatMode(rule, message, conv, isFirst) {
   if (state && Date.now() - new Date(state.updated_at).getTime() < RESTART_AFTER_DAYS * 86400000) return null;
   const c = rule.config || {};
   const begins =
-    rule.trigger_type === "foreign_number"
-      ? isForeignNumber(conv.phone, c.homeCodes || []) && (c.onlyNew === false || isFirst)
-      : rule.trigger_type === "first_message"
-        ? isFirst
-        : false;
+    rule.action_type === "workflow"
+      ? await workflowBegins(rule, message, conv, isFirst)
+      : rule.trigger_type === "foreign_number"
+        ? isForeignNumber(conv.phone, c.homeCodes || []) && (c.onlyNew === false || isFirst)
+        : rule.trigger_type === "first_message"
+          ? isFirst
+          : false;
   return begins ? "start" : null;
 }
 
@@ -155,7 +158,7 @@ export async function startAutoChat({ tenantId, conversationId, automationId, me
     `INSERT INTO automation_chats(tenant_id,conversation_id,automation_id,status,started_by_message_id)
      VALUES($1,$2,$3,'active',$4)
      ON CONFLICT (tenant_id,conversation_id,automation_id) DO UPDATE SET status='active',started_by_message_id=EXCLUDED.started_by_message_id,
-       handed_off_reason=NULL,heard_from=NULL,needs_person=false,step=0,requirements='[]'::jsonb,outcome=NULL,created_at=now(),updated_at=now()
+       handed_off_reason=NULL,heard_from=NULL,needs_person=false,step=0,requirements='[]'::jsonb,outcome=NULL,node=NULL,vars='{}'::jsonb,attempts=0,created_at=now(),updated_at=now()
      WHERE automation_chats.status<>'active' AND automation_chats.started_by_message_id IS DISTINCT FROM EXCLUDED.started_by_message_id`,
     [tenantId, conversationId, automationId, messageId],
   );

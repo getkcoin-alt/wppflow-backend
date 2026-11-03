@@ -2,10 +2,16 @@ import { fail } from "../middleware/http.js";
 import { unknownVariables, VARIABLES } from "./templating.js";
 import { cleanHomeCodes } from "./countries.js";
 import { normalizeSiteUrl } from "./websiteReader.js";
+import { cleanWorkflow, WORKFLOW } from "./workflow/schema.js";
+import { digitsOf } from "./personGuard.js";
 
 // What a rule is made of. A rule starts on a TRIGGER and does one ACTION; it can also send a confirmation reply.
-export const TRIGGERS = ["keyword", "first_message", "after_hours", "foreign_number"];
-export const ACTIONS = ["reply_text", "assign_agent", "add_tag", "opt_in", "opt_out", "create_lead", "ai_chat"];
+export const TRIGGERS = ["keyword", "first_message", "after_hours", "foreign_number", "returning"];
+export const ACTIONS = ["reply_text", "assign_agent", "add_tag", "opt_in", "opt_out", "create_lead", "ai_chat", "workflow"];
+// a workflow can begin in any of these ways ("returning": someone who writes again after a quiet spell, or for the first time)
+export const WORKFLOW_TRIGGERS = ["first_message", "returning", "foreign_number", "keyword", "after_hours"];
+// Test mode: a rule that only runs for a few numbers the owner listed, until it is switched on for everyone
+export const PILOT = { maxPhones: 10, minDigits: 8, maxDigits: 15 };
 
 // "Let Riwo chat": a fixed welcome, then short answers from text the company wrote, until a person replies. These are the
 // limits the rule is saved within, and the words used when the company has not written its own.
@@ -83,7 +89,7 @@ export function withinHours(hours, epochSeconds) {
   return hours.days.includes(day) && now >= minutes(hours.start) && now < minutes(hours.end);
 }
 
-function cleanHours(value) {
+export function cleanHours(value) {
   const h = value || {};
   const timezone = String(h.timezone || "").trim();
   try {
@@ -183,6 +189,13 @@ export async function cleanRule(body, { teammate }) {
     config.match = MATCHES.includes(input.match) ? input.match : "contains";
   }
   if (triggerType === "after_hours") config.hours = cleanHours(input.hours);
+  if (triggerType === "returning") {
+    const days = input.silentDays === undefined || input.silentDays === "" || input.silentDays === null ? WORKFLOW.silentDays.default : Number(input.silentDays);
+    if (!Number.isInteger(days) || days < WORKFLOW.silentDays.min || days > WORKFLOW.silentDays.max) throw fail(400, `Choose how many quiet days (${WORKFLOW.silentDays.min} to ${WORKFLOW.silentDays.max}) before someone counts as returning`);
+    config.silentDays = days;
+    // a customer who has never written is also welcomed, unless the owner says only people who come back
+    config.includeNew = input.includeNew !== false;
+  }
   if (triggerType === "foreign_number") {
     const home = cleanHomeCodes(input.homeCodes);
     if (home.error) throw fail(400, home.error);
@@ -239,10 +252,37 @@ export async function cleanRule(body, { teammate }) {
     config.sourceOptions = options;
   }
 
+  if (actionType === "workflow") {
+    if (!WORKFLOW_TRIGGERS.includes(triggerType)) throw fail(400, "A workflow can begin when someone writes for the first time, comes back after a quiet spell, writes from another country, sends a keyword, or writes after hours");
+    const { workflow } = await cleanWorkflow(input.workflow, { teammate, cleanHours });
+    config.workflow = workflow;
+    // what Riwo may talk about, needed only when a step lets it talk
+    const talks = Object.values(workflow.nodes).some((n) => n.type === "agent");
+    config.useKnowledge = input.useKnowledge === true;
+    const written = String(input.knowledge ?? "").trim();
+    if (talks && (!config.useKnowledge || written)) {
+      const knowledge = words(input.knowledge, "What Riwo may talk about", AUTO_CHAT.knowledgeMax);
+      if (knowledge.length < AUTO_CHAT.knowledgeMin)
+        throw fail(400, "Write a few sentences about your business for Riwo to answer from, or use your knowledge base. It will not answer anything that is not in them.");
+      config.knowledge = knowledge;
+    } else config.knowledge = written.slice(0, AUTO_CHAT.knowledgeMax);
+    config.handoff = String(input.handoff ?? "").trim() ? checkText(input.handoff, "The hand-over message", 500) : AUTO_CHAT.handoff;
+    // a step that hands over uses the same formal message, follow-up and pipeline step as the sales assistant
+    config.sales = cleanSales({ enabled: true, questions: [], formal: input.sales?.formal, followUpHours: input.sales?.followUpHours, stageName: input.sales?.stageName }, { agent: true });
+    config.maxReplies = AGENT.defaultReplies;
+  }
+  if (input.pilot && input.pilot.enabled === true) {
+    const phones = [...new Set((Array.isArray(input.pilot.phones) ? input.pilot.phones : []).map(digitsOf).filter(Boolean))];
+    if (!phones.length) throw fail(400, "Test mode needs at least one number to run for");
+    if (phones.length > PILOT.maxPhones) throw fail(400, `Test mode can run for up to ${PILOT.maxPhones} numbers`);
+    if (phones.some((p) => p.length < PILOT.minDigits || p.length > PILOT.maxDigits)) throw fail(400, "A test number must be a full phone number with its country code");
+    config.pilot = { enabled: true, phones };
+  }
+
   // A confirmation sent in addition to the action ("You're unsubscribed", "A manager will call you").
-  if (actionType !== "reply_text" && actionType !== "ai_chat" && String(input.reply ?? "").trim())
+  if (actionType !== "reply_text" && actionType !== "ai_chat" && actionType !== "workflow" && String(input.reply ?? "").trim())
     config.reply = checkText(input.reply, "The confirmation", 4000);
-  if (actionType === "ai_chat") {
+  if (actionType === "ai_chat" || actionType === "workflow") {
     // the chat itself says when it starts and ends, so there is nothing to wait for
   } else if (input.cooldownHours !== undefined && input.cooldownHours !== null && input.cooldownHours !== "") {
     const hours = Number(input.cooldownHours);

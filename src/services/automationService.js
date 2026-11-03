@@ -9,7 +9,8 @@ import { createLeadFromChat } from "./leadService.js";
 import { matchesKeywords, withinHours, sendsReply } from "./automationRules.js";
 import { isForeignNumber } from "./countries.js";
 import { autoChatMode, runAutoChatTurn, startSales, startAutoChat } from "./autoChat.js";
-import { Skipped, assertUnanswered, isOwnNumber } from "./personGuard.js";
+import { Skipped, assertUnanswered, isOwnNumber, sameNumber, REPLIES_PER_HOUR } from "./personGuard.js";
+import { runWorkflow } from "./workflow/executor.js";
 
 export const automationView = (a) => ({
   ...a,
@@ -23,15 +24,13 @@ export const automationView = (a) => ({
   templateId: a.template_id || null,
 });
 
-// More than this many automatic replies to one chat in an hour means two bots are talking to each other.
-const REPLIES_PER_HOUR = 6;
 
 // Permission and withdrawal first, then questions, then the "away" and "welcome" messages, so a customer who
 // writes "price" after hours gets the price, and a new customer writing at night is told you are closed.
 // A rule for people from abroad is more specific than "someone writes for the first time" or "we are closed", so it goes
 // before them: a stranger from another country is greeted for who they are.
 const order = (rule) =>
-  rule.action_type === "opt_in" || rule.action_type === "opt_out" ? 0 : rule.trigger_type === "keyword" ? 1 : rule.trigger_type === "foreign_number" ? 1.5 : rule.trigger_type === "after_hours" ? 2 : 3;
+  rule.action_type === "opt_in" || rule.action_type === "opt_out" ? 0 : rule.trigger_type === "keyword" ? 1 : rule.trigger_type === "foreign_number" ? 1.5 : rule.trigger_type === "returning" ? 1.7 : rule.trigger_type === "after_hours" ? 2 : 3;
 
 async function isFirstMessage(message) {
   const { rows } = await query(
@@ -45,7 +44,7 @@ async function isFirstMessage(message) {
 // Returns what the rule should do with this message: false for nothing, true to run it, or (for a rule that lets Riwo chat)
 // "start" for the first message of a chat and "continue" for the later ones.
 async function triggered(rule, message, conv) {
-  if (rule.action_type === "ai_chat") return (await autoChatMode(rule, message, conv, await isFirstMessage(message))) || false;
+  if (rule.action_type === "ai_chat" || rule.action_type === "workflow") return (await autoChatMode(rule, message, conv, await isFirstMessage(message))) || false;
   if (rule.trigger_type === "foreign_number")
     return isForeignNumber(conv.phone, rule.config?.homeCodes || []) && (rule.config?.onlyNew === false || (await isFirstMessage(message)));
   if (rule.trigger_type === "keyword") return matchesKeywords(rule.trigger_condition, message.text, rule.config?.match);
@@ -144,6 +143,14 @@ async function perform(rule, { message, conv, contact, company, tenant, mode, ex
         return; // the welcome went out with the first question, or the hand-off was the answer
       }
       break;
+    case "workflow":
+      if (mode === "start") {
+        await assertUnanswered(message); // a person is already in this chat: the flow never starts
+        await startAutoChat({ tenantId, conversationId: conv.id, automationId: rule.id, messageId: message.id });
+      }
+      // the flow says its own words, step by step; there is no extra reply
+      await runWorkflow({ rule, message, conv, contact, tenant, execution, io, mode });
+      return;
     default:
       throw new Error("Unsupported automation action");
   }
@@ -190,6 +197,8 @@ export async function pumpAutomations(io) {
         : null;
       let replied = false;
       for (const rule of rules) {
+        // test mode: the rule is built but only runs for the numbers its owner listed
+        if (rule.config?.pilot?.enabled && !(rule.config.pilot.phones || []).some((p) => sameNumber(p, conv.phone))) continue;
         const mode = await triggered(rule, message, conv);
         if (!mode || (await coolingDown(rule, message))) continue;
         const id = crypto.randomUUID();
