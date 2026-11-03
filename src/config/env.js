@@ -42,6 +42,8 @@ export const ENV = {
       "https://scriwo.com",
       "https://www.scriwo.com",
       "https://app.scriwo.com",
+      // an industry's own address serves the same app (see services/vertical.js), so its browser calls and live updates are allowed too
+      "https://homes.scriwo.com",
     ]),
   ].filter(Boolean),
   ENABLE_DEBUG_ROUTES: process.env.ENABLE_DEBUG_ROUTES === "true",

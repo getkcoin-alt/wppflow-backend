@@ -55,5 +55,6 @@ test("Mail is delivered through the Resend HTTP API", async (t) => {
 test("the production domains are always allowed origins and links point at the app domain", async () => {
   assert.ok(ENV.ALLOWED_ORIGINS.includes("https://scriwo.com"));
   assert.ok(ENV.ALLOWED_ORIGINS.includes("https://www.scriwo.com"));
+  assert.ok(ENV.ALLOWED_ORIGINS.includes("https://homes.scriwo.com"), "the property address serves the same app, so a browser there must be allowed");
   assert.ok(!ENV.APP_URL.endsWith("/"), "no double slash in invite links");
 });

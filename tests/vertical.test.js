@@ -116,3 +116,15 @@ test("Scriwo Homes: signing up on the homes address gives a property workspace w
     assert.equal(await applyVertical({ tenantId: o.tenant.id, user: o.user, key: "nonsense" }), false);
   });
 });
+
+test("A browser on the homes address is allowed to sign up (the server answered 500 to its Origin before)", async (t) => {
+  t.after(async () => {
+    await closeSessions(io);
+    io.close();
+  });
+  const res = await request(app).post("/api/auth/signup").set("Origin", "https://homes.scriwo.com").send({ name: "Origin Olga", email: "olga@homes.test", password: "Password@1234", companyName: "Olga Realty", vertical: "homes" });
+  assert.equal(res.status, 201, JSON.stringify(res.body));
+  assert.equal(res.headers["access-control-allow-origin"], "https://homes.scriwo.com");
+  const other = await request(app).post("/api/auth/signup").set("Origin", "https://evil.example").send({ name: "Eve", email: "eve@homes.test", password: "Password@1234", companyName: "Eve" });
+  assert.notEqual(other.status, 201, "an address that is not ours is still refused");
+});
