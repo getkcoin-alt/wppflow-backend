@@ -730,6 +730,13 @@ test("Real API, database and dispatcher regression suite", async (t) => {
         "INSERT INTO automations(id,tenant_id,name,trigger_condition,action_summary,is_enabled) VALUES($1,$2,'Help reply','help','We can help',true)",
         [rule, tenantId],
       );
+      // The team has written in this chat since the earlier "Help please", and a person who has answered stops an automatic reply
+      // (tests/auto-guards.test.js). So the customer asks again, and nobody has answered this one.
+      await handleIncomingMessage({
+        tenantId,
+        sessionName: "primary",
+        msg: { providerMessageId: "help-again", remoteId: "15550000001@c.us", text: "Help please", timestampEpoch: 1800000100 },
+      });
       await pumpAutomations();
       await pumpAutomations();
       assert.equal(

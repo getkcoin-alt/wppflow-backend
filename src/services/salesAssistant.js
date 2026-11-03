@@ -1,5 +1,6 @@
 import { query } from "../db/index.js";
 import { sendTextMessage } from "./messageService.js";
+import { assertUnansweredById } from "./personGuard.js";
 import { createNotifications } from "./notificationService.js";
 import { emitForConversation } from "./realtime.js";
 import { chatTitle } from "./personName.js";
@@ -109,6 +110,8 @@ export async function ensureLead({ tenantId, conv, name, requirements, io }) {
 // Marks the chat, tells the customer, opens the lead, notes what was learnt and makes the team's follow-up.
 // Safe to run twice for the same message: the message and the note carry the execution's key, and the lead is never doubled.
 export async function handOffToExecutive({ rule, state, conv, contact, execution, io, reason, requirements, company = "", lastText = "", since = null }) {
+  // "I will take over" is not said when a person already has: they are in the chat
+  await assertUnansweredById(conv.tenant_id, execution?.message_id);
   const tenantId = state.tenant_id;
   const sales = rule.config.sales;
   const name = contact?.name || conv.contact_name;

@@ -6,6 +6,7 @@ import { createNotifications } from "./notificationService.js";
 import { withDisclosure } from "./handoffService.js";
 import { isForeignNumber } from "./countries.js";
 import { knowledgeFor } from "./knowledgeService.js";
+import { Skipped, assertUnanswered, personAnswered } from "./personGuard.js";
 import { asksForCommercial, questionsOf, answeredNumbers, nextQuestion, withAnswer, withFacts, handOffToExecutive, ensureLead } from "./salesAssistant.js";
 
 // "Let Riwo chat": an automation rule that starts a short conversation with a customer and keeps it going until a person
@@ -22,7 +23,7 @@ const ALIVE_HOURS = 24;
 const RESTART_AFTER_DAYS = 7;
 
 // A rule that should not run again, and says why. The engine records it as "skipped", not as a failure to retry.
-export class Skipped extends Error {}
+export { Skipped };
 
 // What Riwo may talk about for this message: the company's knowledge base (its profile, notes and the pages that match what
 // the customer wrote), and the text written in the rule. The answer is checked against exactly this.
@@ -108,13 +109,16 @@ const handOff = (state, reason) =>
     [state.tenant_id, state.conversation_id, state.automation_id, reason],
   );
 
-// Has someone other than the automation spoken to this customer since the chat began? A private note is not speaking to them.
+// Has someone other than the automation spoken to this customer since the message that started the chat? A private note is not
+// speaking to them. The count starts at that message, not at the moment the rule got to it: a person who answered in between
+// has already taken the chat.
 const personSpoke = async (state) =>
   (
     await query(
-      `SELECT 1 FROM messages WHERE tenant_id=$1 AND conversation_id=$2 AND sender='agent' AND type<>'internal_note'
-       AND (agent_name IS NULL OR agent_name<>ALL($4::text[])) AND created_at>$3 LIMIT 1`,
-      [state.tenant_id, state.conversation_id, state.created_at, AUTO_SENDERS],
+      `SELECT 1 FROM messages m WHERE m.tenant_id=$1 AND m.conversation_id=$2 AND m.sender='agent' AND m.type<>'internal_note'
+       AND (m.agent_name IS NULL OR m.agent_name<>ALL($4::text[]))
+       AND m.created_at>LEAST($3::timestamptz,COALESCE((SELECT s.created_at FROM messages s WHERE s.id=$5 AND s.tenant_id=$1),$3::timestamptz)) LIMIT 1`,
+      [state.tenant_id, state.conversation_id, state.created_at, AUTO_SENDERS, state.started_by_message_id],
     )
   ).rowCount > 0;
 
@@ -199,11 +203,19 @@ export async function runAutoChatTurn({ rule, message, conv, contact, tenant, ex
   if (!state || state.status !== "active") throw new Skipped("The conversation had already been handed to a person");
   const key = `automation:${execution.id}:ai`;
   if ((await query("SELECT 1 FROM messages WHERE tenant_id=$1 AND idempotency_key=$2", [tenantId, key])).rowCount) return;
+  // a teammate (or the phone's owner) got there first: nothing is asked of the model, and the chat is handed back for good
+  if (await personAnswered(message)) {
+    await handOff(state, "A teammate replied");
+    throw new Skipped("A person had already answered this message");
+  }
   const config = rule.config || {};
   const ruleRef = `${config.sales?.enabled ? "sales assistant" : "Riwo chat"}: rule ${rule.id}`;
   const modelInfo = { provider: "", model: "" }; // filled in when the model has been asked, so the record says which one wrote what
-  const send = (text) =>
-    sendTextMessage({ tenantId, conversationId: conv.id, text: withDisclosure(text), idempotencyKey: key, agentName: RIWO, io, audit: { source: config.sales?.enabled ? "sales_assistant" : "riwo_chat", ruleRef, triggerMessageId: message.id, provider: modelInfo.provider, model: modelInfo.model } });
+  // a person may have answered while the model was thinking: that is checked again at the moment of sending
+  const send = async (text) => {
+    await assertUnanswered(message);
+    return sendTextMessage({ tenantId, conversationId: conv.id, text: withDisclosure(text), idempotencyKey: key, agentName: RIWO, io, audit: { source: config.sales?.enabled ? "sales_assistant" : "riwo_chat", ruleRef, triggerMessageId: message.id, provider: modelInfo.provider, model: modelInfo.model } });
+  };
   const handoffText = config.handoff;
   const bump = () => query("UPDATE automation_chats SET updated_at=now() WHERE tenant_id=$1 AND conversation_id=$2 AND automation_id=$3", [tenantId, conv.id, rule.id]);
 

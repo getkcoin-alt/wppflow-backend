@@ -8,7 +8,8 @@ import { personalise } from "./templating.js";
 import { createLeadFromChat } from "./leadService.js";
 import { matchesKeywords, withinHours, sendsReply } from "./automationRules.js";
 import { isForeignNumber } from "./countries.js";
-import { autoChatMode, runAutoChatTurn, startSales, startAutoChat, Skipped } from "./autoChat.js";
+import { autoChatMode, runAutoChatTurn, startSales, startAutoChat } from "./autoChat.js";
+import { Skipped, assertUnanswered, isOwnNumber } from "./personGuard.js";
 
 export const automationView = (a) => ({
   ...a,
@@ -78,8 +79,10 @@ async function tooManyReplies(message) {
 async function perform(rule, { message, conv, contact, company, tenant, mode, execution, io }) {
   const tenantId = message.tenant_id;
   const vars = { name: contact?.name || conv.contact_name, company };
-  const say = (text, suffix = "") =>
-    sendTextMessage({
+  // never after a person has answered this message, however late the rule got to it
+  const say = async (text, suffix = "") => {
+    await assertUnanswered(message);
+    return sendTextMessage({
       tenantId,
       conversationId: conv.id,
       text: personalise(text, vars),
@@ -88,6 +91,7 @@ async function perform(rule, { message, conv, contact, company, tenant, mode, ex
       io,
       audit: { source: "rule", ruleRef: `${rule.name || rule.action_type}: rule ${rule.id}`, triggerMessageId: message.id },
     });
+  };
   switch (rule.action_type) {
     case "reply_text":
       await say(rule.action_summary);
@@ -127,6 +131,7 @@ async function perform(rule, { message, conv, contact, company, tenant, mode, ex
         await runAutoChatTurn({ rule, message, conv, contact, tenant, execution, io });
         return; // the welcome is only for the first message
       }
+      await assertUnanswered(message); // a person is already in this chat: Riwo never starts
       // the chat is marked as held before the welcome goes out, so a customer's quick answer is not missed
       await startAutoChat({ tenantId, conversationId: conv.id, automationId: rule.id, messageId: message.id });
       if (rule.config?.agent?.enabled) {
@@ -142,7 +147,11 @@ async function perform(rule, { message, conv, contact, company, tenant, mode, ex
     default:
       throw new Error("Unsupported automation action");
   }
-  if (rule.config?.reply) await say(rule.config.reply, ":reply");
+  // an extra reply is a courtesy: if a person has answered, the action above still counts as done
+  if (rule.config?.reply)
+    await say(rule.config.reply, ":reply").catch((e) => {
+      if (!(e instanceof Skipped)) throw e;
+    });
 }
 
 export async function pumpAutomations(io) {
@@ -169,8 +178,10 @@ export async function pumpAutomations(io) {
       const tenant = (await query("SELECT * FROM tenants WHERE id=$1", [event.tenant_id])).rows[0];
       // A company whose plan doesn't include automations keeps its rules but they don't run. A group chat is
       // never answered automatically: one reply would go to everyone in it.
+      // a chat with one of the company's own numbers (a note to yourself, or two of your numbers) is not a customer
+      const own = conv && !conv.is_group ? await isOwnNumber(event.tenant_id, conv.phone) : false;
       const rules =
-        conv && !conv.is_group && tenant && planAllows(tenant, "automations")
+        conv && !conv.is_group && !own && tenant && planAllows(tenant, "automations")
           ? (await query("SELECT * FROM automations WHERE tenant_id=$1 AND is_enabled=true ORDER BY created_at, id", [event.tenant_id])).rows
           : [];
       rules.sort((a, b) => order(a) - order(b));
