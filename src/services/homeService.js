@@ -4,6 +4,7 @@ import { dueTasks } from "./leadService.js";
 import { numberHealth } from "./numberHealth.js";
 import { formatConversation } from "./conversationFormat.js";
 import { chatTitle, hideId } from "./personName.js";
+import { entitledPlan } from "./plans.js";
 import { latestBrief } from "./aiBriefService.js";
 
 // What "Today" shows: what needs this person now, found with plain rules (no AI is asked, so it is quick and free), most
@@ -94,24 +95,50 @@ async function numberProblems(req) {
     }));
 }
 
-// First-run help for the owners and administrators of a workspace that is not set up yet.
+// First value is a human reply from this app with a delivery receipt, not imported history,
+// a note, a queued/failed send or a bot. This snapshot is derived from tenant-owned records;
+// no customer text or phone number is copied to a third-party analytics service.
 async function setupSteps(req) {
   const { rows } = await query(
     `SELECT
-      (SELECT count(*)::int FROM whatsapp_sessions WHERE tenant_id=$1 AND status='CONNECTED') AS connected,
-      (SELECT count(*)::int FROM canned_replies WHERE tenant_id=$1) AS replies,
+      EXISTS(SELECT 1 FROM whatsapp_sessions WHERE tenant_id=$1 AND status='CONNECTED') AS connected,
       (SELECT count(*)::int FROM memberships WHERE tenant_id=$1 AND status='active') AS people,
-      (SELECT count(*)::int FROM automations WHERE tenant_id=$1) AS automations`,
+      (SELECT count(*)::int FROM canned_replies WHERE tenant_id=$1) AS replies,
+      (SELECT count(*)::int FROM automations WHERE tenant_id=$1) AS automations,
+      (SELECT min(m.created_at) FROM messages m
+        JOIN conversations c ON c.id=m.conversation_id AND c.tenant_id=m.tenant_id
+        WHERE m.tenant_id=$1 AND m.sender='agent' AND m.sent_by_user_id IS NOT NULL
+          AND m.type NOT IN ('internal_note','revoked') AND m.status IN ('delivered','read')
+          AND NOT c.is_group AND c.provider_chat_id !~ '@(broadcast|newsletter)$'
+          AND EXISTS(SELECT 1 FROM outbox_events o WHERE o.tenant_id=m.tenant_id
+            AND o.aggregate_id=m.id AND o.event_type='message.outgoing')
+          AND EXISTS(SELECT 1 FROM messages incoming WHERE incoming.tenant_id=m.tenant_id
+            AND incoming.conversation_id=m.conversation_id AND incoming.sender='customer'
+            AND incoming.type NOT IN ('internal_note','revoked')
+            AND incoming.timestamp_epoch<=m.timestamp_epoch)) AS first_reply_at`,
     [req.tenantId],
   );
   const r = rows[0];
   const steps = [
-    { key: "connect", label: "Connect your WhatsApp number", done: r.connected > 0 },
+    { key: "connect", label: "Connect your WhatsApp number", done: r.connected },
+    { key: "reply", label: "Handle your first enquiry", done: Boolean(r.first_reply_at) },
+  ];
+  // A solo plan can finish onboarding without an upgrade. A pending invitation is not
+  // counted as collaboration: another person must have accepted and joined the company.
+  const seats = entitledPlan(req.tenant).seats;
+  if (seats === null || seats > 1)
+    steps.push({ key: "team", label: "Bring a teammate into the inbox", done: r.people > 1 });
+  const legacySteps = [
+    { key: "connect", label: "Connect your WhatsApp number", done: r.connected },
     { key: "replies", label: "Save a few quick replies", done: r.replies > 0 },
     { key: "automation", label: "Turn on a welcome message", done: r.automations > 0 },
     { key: "team", label: "Invite a teammate", done: r.people > 1 },
   ];
-  return { steps, done: steps.filter((s) => s.done).length, total: steps.length };
+  return {
+    legacy: { steps: legacySteps, done: legacySteps.filter((s) => s.done).length, total: legacySteps.length },
+    steps, done: steps.filter((s) => s.done).length, total: steps.length,
+    firstReplyAt: r.first_reply_at ? new Date(r.first_reply_at).toISOString() : null,
+  };
 }
 
 export async function homeFor(req, { until } = {}) {
@@ -145,7 +172,12 @@ export async function homeFor(req, { until } = {}) {
     replyTargetMinutes: waiting.sla,
     needsYou: items.slice(0, MAX_ITEMS),
     more: Math.max(0, items.length - MAX_ITEMS),
-    setup: setup && setup.done < setup.total ? setup : null,
+    setup: setup && setup.legacy.done < setup.legacy.total ? setup.legacy : null,
+    // Kept after setup is complete, so first-value progress remains measurable.
+    activation: setup ? {
+      hasDeliveredReply: Boolean(setup.firstReplyAt), firstReplyAt: setup.firstReplyAt,
+      setup: setup.done < setup.total ? { steps: setup.steps, done: setup.done, total: setup.total } : null,
+    } : null,
     // the morning brief, for owners and administrators
     brief,
   };
