@@ -88,7 +88,7 @@ test("A change is reported in plain lines, and the steps made automatically are 
   assert.ok(lines.includes("Added: Which city are you in?"));
   assert.ok(lines.some((l) => l.startsWith("Removed: Add the label")));
   assert.ok(lines.some((l) => l.startsWith("Changed: So good to hear from you")));
-  assert.ok(lines.some((l) => l.startsWith("Changed: Is this about work")), "its arrow changed");
+  assert.ok(!lines.some((l) => l.startsWith("Changed: Is this about work")), "a question whose only change is where it goes on to (because a step was added) is not listed as changed");
   assert.ok(!lines.some((l) => /Finish/.test(l)));
   assert.deepEqual(diffWorkflow(before, before), []);
 });
@@ -106,7 +106,7 @@ test("Describing a workflow in your own words: Riwo asks, drafts, repairs, and n
     asked.push(params);
     const sys = params.system || "";
     let body;
-    if (/You build WhatsApp workflows/.test(sys)) body = replies.shift() ?? { rule: {} };
+    if (/You (build|change) WhatsApp workflows/.test(sys)) body = replies.shift() ?? { rule: {} };
     else if (/which of the listed answers it means/.test(sys)) body = { choice: classifyAs(String(params.messages[0].content).match(/<reply>([\s\S]*?)<\/reply>/)?.[1] || "") };
     else body = agentSays(params);
     return { content: [{ type: "text", text: typeof body === "string" ? body : JSON.stringify(body) }], stop_reason: "end_turn", usage: { input_tokens: 400, output_tokens: 200 } };
@@ -227,9 +227,10 @@ test("Describing a workflow in your own words: Riwo asks, drafts, repairs, and n
     const res = await request(app).post("/api/automations/workflow/revise").set(owner).send({ rule, instruction: "Also ask friends which city they are in" });
     assert.equal(res.status, 200, JSON.stringify(res.body));
     assert.deepEqual(res.body.diff.filter((l) => /city/.test(l)), ["Added: Which city are you in?"]);
-    assert.ok(res.body.diff.some((l) => /^Changed: Is this about work/.test(l)));
+    assert.ok(!res.body.diff.some((l) => /^Changed: Is this about work/.test(l)), "the question's own words did not change, only where it goes on to");
     const prompt = asked.at(-1).messages[0].content;
-    assert.match(prompt, /You are CHANGING a workflow/);
+    assert.match(asked.at(-1).system, /You change WhatsApp workflows/);
+    assert.match(prompt, /<current_workflow>\nStarts when: returning\nFirst step: n1\nn1 branch on label "Family & friends": yes -> n2, no -> n4/);
     assert.match(prompt, /<owner_change>\nAlso ask friends which city they are in/);
     assert.ok(res.body.draft.rule.config.workflow.nodes.n8);
     assert.equal(res.body.draft.rule.config.sales.formal, "Dear {{first_name}}, {{executive}} will be with you shortly.");

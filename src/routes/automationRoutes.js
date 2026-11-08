@@ -183,12 +183,17 @@ router.post(
   "/workflow/revise",
   workflowLimit,
   route(async (req, res) => {
+    // either words for Riwo to turn into a change, or "add a question" (a form: the question, where it goes, whether to tell the team)
+    const asked = req.body?.addQuestion && typeof req.body.addQuestion === "object" ? req.body.addQuestion : null;
+    const addQuestion = asked ? { question: String(asked.question ?? ""), before: asked.before ? String(asked.before).slice(0, 30) : undefined, tell: asked.tell !== false } : null;
     const instruction = String(req.body?.instruction ?? "").trim();
-    if (instruction.length < 3) throw fail(400, "Say what to change.");
-    if (instruction.length > 1000) throw fail(400, "Please keep it under 1,000 characters.");
+    if (!addQuestion) {
+      if (instruction.length < 3) throw fail(400, "Say what to change.");
+      if (instruction.length > 1000) throw fail(400, "Please keep it under 1,000 characters.");
+    }
     const teammate = teammateOf(req.tenantId);
     const { rule } = await checkRule(req.body?.rule || {}, { teammate });
-    const out = await reviseWorkflow({ tenant: req.tenant, rule, instruction, hasKnowledge: await hasKnowledge(req.tenantId), teammate });
+    const out = await reviseWorkflow({ tenant: req.tenant, rule, instruction, addQuestion, hasKnowledge: await hasKnowledge(req.tenantId), teammate });
     res.json({ status: "success", ...out });
   }),
 );

@@ -50,7 +50,7 @@ function text(value, label, max, { required = false } = {}) {
   return t;
 }
 
-const slug = (v, fallback) => {
+export const slug = (v, fallback) => {
   const s = String(v ?? "").toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 24);
   return ID.test(s) ? s : fallback;
 };
@@ -109,8 +109,10 @@ function cleanNode(id, raw, { allowed, cleanHours }) {
       node.saveAs = slug(raw.saveAs, `choice_${id}`);
       node.showOptions = raw.showOptions !== false;
       node.retry = words(raw.retry, WORKFLOW.maxQuestion, "The second try");
+      // `next` is an answer -> step map; a single step name means every answer goes on to that step
+      const same = typeof raw.next === "string" && raw.next ? raw.next : null;
       const map = raw.next && typeof raw.next === "object" ? raw.next : {};
-      node.next = Object.fromEntries(options.map((o) => [o.key, map[o.key] ? String(map[o.key]) : null]));
+      node.next = Object.fromEntries(options.map((o) => [o.key, map[o.key] ? String(map[o.key]) : same]));
       node.onUnsure = raw.onUnsure ? String(raw.onUnsure) : null;
       break;
     }
@@ -199,7 +201,7 @@ export function edgesOf(node) {
   }
 }
 // the same step with every place it can go passed through `f` (used to fill gaps and to rename)
-function mapEdges(node, f) {
+export function mapEdges(node, f) {
   const n = { ...node };
   switch (node.type) {
     case "ask":

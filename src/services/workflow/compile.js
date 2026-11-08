@@ -3,6 +3,7 @@ import { cleanRule, cleanHours } from "../automationRules.js";
 import { draftWorkflowFromWords, reviseWorkflowFromWords, unavailableReason } from "../aiService.js";
 import { cleanWorkflow, guardrailsOf, outlineOf, summaryOf } from "./schema.js";
 import { recipeById, recipeFor, recipeList } from "./recipes.js";
+import { applyEdits, questionEdits } from "./edits.js";
 
 // From the owner's words to a workflow that can be shown, tried and saved. The model writes a draft; this file turns it into the
 // body of a rule, checks it with exactly the code that checks a rule saved by hand (repairing once if that finds a mistake), and
@@ -102,7 +103,7 @@ export function present(checked, { understood = "", source = "ai", note = "" } =
 // a model that wrote nothing usable is asked once more; one that is not there at all is not asked again
 const unreadable = (e) => e?.status === 502 && /couldn't turn that/.test(e.message || "");
 
-async function viaModel(ask, ctx) {
+async function viaModel(ask, ctx, resolve = (out) => out.draft) {
   let repair = "";
   for (let attempt = 0; attempt < 2; attempt++) {
     let out;
@@ -110,14 +111,15 @@ async function viaModel(ask, ctx) {
       out = await ask(repair);
     } catch (error) {
       if (unreadable(error) && attempt === 0) {
-        repair = "It was not the JSON object described.";
+        repair = "Your reply was not a JSON object in the form described, so nothing could be read from it. Reply with the JSON object only, with nothing before or after it.";
         continue;
       }
-      return { failed: error.message };
+      return { failed: error.message, unreadable: unreadable(error) };
     }
     if (out.clarify) return { clarify: out.clarify };
     try {
-      return { checked: await checkDraft(out.draft, ctx), understood: out.draft.understood };
+      const draft = resolve(out);
+      return { checked: await checkDraft(draft, ctx), understood: draft.understood };
     } catch (error) {
       repair = error.message;
     }
@@ -150,15 +152,26 @@ export async function draftWorkflow({ tenant, instruction, answers = [], hasKnow
 const stable = (v) => (v && typeof v === "object" ? (Array.isArray(v) ? v.map(stable) : Object.fromEntries(Object.keys(v).sort().map((k) => [k, stable(v[k])]))) : v);
 const isAuto = (id) => /^(end_auto|handoff_unclear)\d*$/.test(id);
 
-// What changed between two versions of a flow, in plain lines. The steps made automatically are not listed.
+// What changed between two versions of a flow, in plain lines. The steps made automatically are not listed. A step whose only
+// change is where it goes next is left out when a step was added or removed (that is what moved its arrows), and said on its own
+// when nothing else changed.
+const EDGES = ["next", "onUnsure", "yes", "no", "cases", "otherwise"];
+const contentOf = (n) => Object.fromEntries(Object.entries(n).filter(([k]) => !EDGES.includes(k)));
 export function diffWorkflow(before, after) {
   const lines = [];
   const b = before?.nodes || {};
   const a = after?.nodes || {};
-  for (const id of Object.keys(a)) if (!b[id] && !isAuto(id)) lines.push(`Added: ${summaryOf(a[id])}`);
-  for (const id of Object.keys(b)) if (!a[id] && !isAuto(id)) lines.push(`Removed: ${summaryOf(b[id])}`);
-  for (const id of Object.keys(a)) if (b[id] && !isAuto(id) && JSON.stringify(stable(b[id])) !== JSON.stringify(stable(a[id]))) lines.push(`Changed: ${summaryOf(a[id])}`);
-  if (before?.start && after?.start && before.start !== after.start) lines.push("Changed where the flow starts");
+  let moved = false;
+  for (const id of Object.keys(a)) if (!b[id] && !isAuto(id)) (lines.push(`Added: ${summaryOf(a[id])}`), (moved = true));
+  for (const id of Object.keys(b)) if (!a[id] && !isAuto(id)) (lines.push(`Removed: ${summaryOf(b[id])}`), (moved = true));
+  const rewired = [];
+  for (const id of Object.keys(a)) {
+    if (!b[id] || isAuto(id)) continue;
+    if (JSON.stringify(stable(contentOf(b[id]))) !== JSON.stringify(stable(contentOf(a[id])))) lines.push(`Changed: ${summaryOf(a[id])}`);
+    else if (JSON.stringify(stable(b[id])) !== JSON.stringify(stable(a[id]))) rewired.push(`Changed where this goes next: ${summaryOf(a[id])}`);
+  }
+  if (!moved) lines.push(...rewired);
+  if (before?.start && after?.start && before.start !== after.start && !moved) lines.push("Changed where the flow starts");
   return lines;
 }
 
@@ -170,14 +183,58 @@ const triggerOf = (rule) => ({
   hours: rule.config.hours,
 });
 
-// "Change something": the owner says what to change, in words; Riwo returns the whole workflow again and the lines that changed.
-export async function reviseWorkflow({ tenant, rule, instruction, hasKnowledge = false, teammate }) {
-  const reason = unavailableReason(tenant);
-  if (reason) throw fail(503, "Riwo isn't available right now, so it can't change the workflow from your words. You can still edit each step by hand.");
+// the trigger as a draft carries it
+const draftTrigger = (t = {}) => ({ type: t.type || "first_message", silentDays: t.silent_days, includeNew: t.include_new !== false, keywords: t.keywords || [], hours: t.hours });
+
+// A draft made by applying edits to the flow as it is: what the edits did not mention is exactly as it was
+function draftFromEdits(current, edits, understood = "") {
+  if (!Array.isArray(edits) || !edits.length) throw fail(400, "You gave no edits. Make the change the owner asked for.");
+  const state = applyEdits(current, edits);
+  return { name: state.name, trigger: draftTrigger(state.trigger), workflow: state.workflow, understood };
+}
+
+// A draft the model wrote as a whole: the rule keeps its name, and its trigger unless the model said otherwise
+function draftFromRewrite(draft, current) {
+  const base = { ...draft, name: current.name };
+  if (!draft.trigger?.explicit) return { ...base, trigger: draftTrigger(current.trigger) };
+  const t = draft.trigger;
+  // a model that kept a keyword trigger may have left its words out
+  return t.type === "keyword" && current.trigger.type === "keyword" && !t.keywords?.length ? { ...base, trigger: { ...t, keywords: current.trigger.keywords } } : base;
+}
+
+const startsOf = (rule) => `${rule.triggerType}|${rule.triggerCondition}|${JSON.stringify(rule.config.silentDays ?? "")}|${JSON.stringify(rule.config.hours ?? "")}`;
+
+// "Change something": the owner says what to change, in words (Riwo makes small edits to the flow) or fills in "add a question"
+// (no model at all). What comes back is the whole flow, the lines that changed, and nothing is replaced until the owner agrees.
+export async function reviseWorkflow({ tenant, rule, instruction = "", addQuestion = null, hasKnowledge = false, teammate }) {
   const keep = { pilot: rule.config.pilot, sales: rule.config.sales, handoff: rule.config.handoff };
   const current = { name: rule.name, trigger: triggerOf(rule), workflow: rule.config.workflow };
-  const out = await viaModel((repair) => reviseWorkflowFromWords({ tenant, current, instruction, hasKnowledge, repair }), { hasKnowledge, teammate, keep });
-  if (out.clarify) return { clarify: out.clarify };
-  if (!out.checked) throw fail(422, `Riwo couldn't make that change${out.failed ? `: ${out.failed}` : ""}. Try saying it differently.`);
-  return { draft: present(out.checked, { understood: out.understood }), diff: diffWorkflow(rule.config.workflow, out.checked.rule.config.workflow) };
+  const ctx = { hasKnowledge, teammate, keep };
+  let checked;
+  let understood = "";
+  if (addQuestion) {
+    const edits = questionEdits(current, addQuestion);
+    const draft = draftFromEdits(current, edits, `Adds the question “${String(addQuestion.question).trim().slice(0, 120)}”.`);
+    checked = await checkDraft(draft, ctx);
+    understood = draft.understood;
+  } else {
+    const reason = unavailableReason(tenant);
+    if (reason) throw fail(503, "Riwo isn't available right now, so it can't change the workflow from your words. You can add a question below, or edit each step by hand.");
+    const out = await viaModel(
+      (repair) => reviseWorkflowFromWords({ tenant, current, instruction, hasKnowledge, repair }),
+      ctx,
+      (answer) => (answer.edits ? draftFromEdits(current, answer.edits, answer.understood) : draftFromRewrite(answer.draft, current)),
+    );
+    if (out.clarify) return { clarify: out.clarify };
+    if (!out.checked) {
+      const hint = "Say it another way, or add the question yourself below.";
+      throw fail(422, out.unreadable || !out.failed ? `Riwo couldn't turn that into a change this time. ${hint}` : `Riwo couldn't make that change: ${out.failed.replace(/[.\s]+$/, "")}. ${hint}`);
+    }
+    checked = out.checked;
+    understood = out.understood;
+  }
+  const diff = [];
+  if (startsOf(rule) !== startsOf(checked.rule)) diff.push(`Changed when it starts. ${whenOf(checked.rule)}`);
+  diff.push(...diffWorkflow(rule.config.workflow, checked.rule.config.workflow));
+  return { draft: present(checked, { understood }), diff };
 }
