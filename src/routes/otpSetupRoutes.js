@@ -1,8 +1,10 @@
+import crypto from "node:crypto";
 import express from "express";
 import rateLimit from "express-rate-limit";
-import { query } from "../db/index.js";
+import { query, withTransaction } from "../db/index.js";
 import { authenticateToken, requireTenantContext, requireRole } from "../middleware/auth.js";
 import { route, fail } from "../middleware/http.js";
+import { resolveWebhook, encryptSecret, recordWebhook } from "../services/webhookService.js";
 import { otpEnabled, OTP } from "../services/otp/config.js";
 import { createOtpKey, listOtpKeys, revokeOtpKey, otpError } from "../services/otp/keys.js";
 import { TEMPLATES, LOCALES, LOCALE_NAMES, renderOtp, brandProblem, cleanBrand } from "../services/otp/templates.js";
@@ -127,6 +129,59 @@ router.post(
 router.get(
   "/test/:id",
   route(async (req, res) => res.json({ status: "success", request: await statusOf(req.tenantId, req.params.id) })),
+);
+
+// One address that is told when a code is sent, delivered, checked or fails: signed like every Scriwo webhook, set up on any plan,
+// and it hears nothing but OTP events (the Business-plan webhooks keep hearing what they heard before).
+router.put(
+  "/webhook",
+  route(async (req, res) => {
+    const raw = req.body && typeof req.body === "object" ? req.body.url : "";
+    let resolved;
+    try {
+      resolved = await resolveWebhook(String(raw ?? "").trim().slice(0, 2000));
+    } catch (error) {
+      throw otpError(400, "invalid_webhook", error.message, "Use a public https address, for example https://example.com/otp-events");
+    }
+    const secret = crypto.randomBytes(32).toString("hex");
+    const id = crypto.randomUUID();
+    await withTransaction(async (c) => {
+      await c.query("UPDATE webhook_endpoints SET enabled=false WHERE tenant_id=$1 AND scope='otp' AND enabled", [req.tenantId]);
+      await c.query("INSERT INTO webhook_endpoints(id,tenant_id,url,secret,scope) VALUES($1,$2,$3,$4,'otp')", [id, req.tenantId, resolved.url.href, encryptSecret(secret)]);
+    });
+    await audit(req, "otp.webhook_set", { host: resolved.url.hostname });
+    res.status(201).json({ status: "success", webhook: { id, url: resolved.url.href }, secret, message: "Save the signing secret now. It is shown once." });
+  }),
+);
+router.delete(
+  "/webhook",
+  route(async (req, res) => {
+    const done = await query("UPDATE webhook_endpoints SET enabled=false WHERE tenant_id=$1 AND scope='otp' AND enabled", [req.tenantId]);
+    if (!done.rowCount) throw fail(404, "There is no OTP webhook to remove.");
+    await audit(req, "otp.webhook_removed");
+    res.json({ status: "success" });
+  }),
+);
+router.post(
+  "/webhook/test",
+  testLimiter,
+  route(async (req, res) => {
+    const there = await query("SELECT 1 FROM webhook_endpoints WHERE tenant_id=$1 AND scope='otp' AND enabled", [req.tenantId]);
+    if (!there.rowCount) throw otpError(400, "no_webhook", "No webhook address is set up yet.", "Add the address first.");
+    await recordWebhook(req.tenantId, "otp.test", { synthetic: true, createdAt: new Date().toISOString(), note: "A test event from Scriwo. No code was sent." });
+    res.status(202).json({ status: "success", message: "A test event was queued." });
+  }),
+);
+router.get(
+  "/webhook/deliveries",
+  route(async (req, res) => {
+    const { rows } = await query(
+      `SELECT d.id,d.event,d.status,d.attempts,d.response_status,d.error,d.created_at FROM webhook_deliveries d JOIN webhook_endpoints e ON e.id=d.endpoint_id
+       WHERE d.tenant_id=$1 AND e.scope='otp' ORDER BY d.created_at DESC LIMIT 20`,
+      [req.tenantId],
+    );
+    res.json({ status: "success", deliveries: rows });
+  }),
 );
 
 router.get(

@@ -3,7 +3,7 @@ import { query, withTransaction } from "../../db/index.js";
 import { defaultWhatsAppProvider as provider } from "../whatsapp/WhatsAppProvider.js";
 import { normalizePhone, PHONE_HELP } from "../phone.js";
 import { sameNumber } from "../personGuard.js";
-import { OTP, otpEnabled, allowanceOf, hmac, sameHex, dayStart, monthStart, nextDay, nextMonth } from "./config.js";
+import { OTP, otpEnabled, allowanceOf, hmac, sameHex, visitorHashOf, dayStart, monthStart, nextDay, nextMonth } from "./config.js";
 import { otpError } from "./keys.js";
 import { TEMPLATES, TEMPLATE_KEYS, LOCALES, templateOf, renderOtp, cleanBrand, brandProblem, maskPhone } from "./templates.js";
 import { expectEcho, noteOtpSent, textHash, hasRecentOtp } from "./guard.js";
@@ -232,7 +232,7 @@ export async function sendOtp({ tenantId, key = null, source = "api", phone: raw
   }
   const cfg = effective(settings, { template, locale });
   const id = newId();
-  const visitorHash = visitor ? crypto.createHash("sha256").update(`otp-visitor:${visitor}`).digest("hex").slice(0, 32) : null;
+  const visitorHash = visitorHashOf(visitor);
 
   // a test key sends nothing and always uses the same code, so a developer can build without a phone or using any allowance
   if (mode === "test") {

@@ -232,11 +232,11 @@ router.get(
   requireFeature("api"),
   route(async (req, res) => {
     const endpoints = await query(
-      "SELECT id,url,enabled,created_at FROM webhook_endpoints WHERE tenant_id=$1",
+      "SELECT id,url,enabled,created_at FROM webhook_endpoints WHERE tenant_id=$1 AND scope='all'",
       [req.tenantId],
     );
     const logs = await query(
-      "SELECT id,event,status,attempts,response_status,error,created_at FROM webhook_deliveries WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT 100",
+      "SELECT id,event,status,attempts,response_status,error,created_at FROM webhook_deliveries WHERE tenant_id=$1 AND event NOT LIKE 'otp.%' ORDER BY created_at DESC LIMIT 100",
       [req.tenantId],
     );
     res.json({

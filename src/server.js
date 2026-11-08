@@ -39,6 +39,7 @@ import notificationRoutes from "./routes/notificationRoutes.js";
 import emailRoutes from "./routes/emailRoutes.js";
 import publicRoutes from "./routes/publicRoutes.js";
 import otpRoutes from "./routes/otpRoutes.js";
+import otpWidgetRoutes from "./routes/otpWidgetRoutes.js";
 import otpSetupRoutes from "./routes/otpSetupRoutes.js";
 import { errorHandler } from "./middleware/http.js";
 import { restoreSessions, closeSessions } from "./services/sessionService.js";
@@ -66,6 +67,10 @@ app.use((req, res, next) => {
 // The public website's contact form. It carries no cookies or tokens, and the website calls it
 // through its own domain, so it sits before the origin check: preview and future domains keep working.
 app.use("/api/public", express.json({ limit: "16kb" }), publicRoutes);
+
+// The drop-in OTP widget runs on other people's websites, so it answers any origin itself (the key says who may ask) and sits
+// before the origin check below. Its body is plain text holding JSON, so browsers send it without a preflight.
+app.use("/api/otp/widget", express.text({ type: "*/*", limit: "4kb" }), otpWidgetRoutes);
 
 // Razorpay's webhook: no cookies, no origin, and the signature covers the exact bytes, so it reads the body raw and
 // comes before the JSON parser below.

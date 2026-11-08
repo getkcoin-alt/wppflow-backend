@@ -4,6 +4,7 @@ import { route } from "../middleware/http.js";
 import { requireOtpKey } from "../services/otp/keys.js";
 import { sendOtp, verifyOtp, statusOf } from "../services/otp/otpService.js";
 import { OTP } from "../services/otp/config.js";
+import { consumeProof } from "../services/otp/proof.js";
 
 // The OTP API a company's own server calls: send a code, check a code. Secret keys only (otp_sk_...); a key can do nothing else
 // in Scriwo, and nothing else in Scriwo accepts it.
@@ -59,6 +60,15 @@ router.post(
     const b = req.body && typeof req.body === "object" ? req.body : {};
     const { row, ...body } = await verifyOtp({ tenantId: req.tenantId, key: req.otpKey, id: b.id, phone: b.phone, code: b.code });
     res.json({ status: "success", ...body });
+  }),
+);
+
+// A page that used the widget hands its server the proof the widget gave it; this says whether it is genuine, once. { proof }
+router.post(
+  "/proof/verify",
+  route(async (req, res) => {
+    const b = req.body && typeof req.body === "object" ? req.body : {};
+    res.json({ status: "success", ...(await consumeProof({ tenantId: req.tenantId, proof: b.proof })) });
   }),
 );
 

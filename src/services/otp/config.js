@@ -41,6 +41,9 @@ export const sameHex = (a, b) => {
   return x.length > 0 && x.length === y.length && crypto.timingSafeEqual(x, y);
 };
 
+// a visitor is kept only as a short hash, enough to count what one device asked for
+export const visitorHashOf = (visitor) => (visitor ? crypto.createHash("sha256").update(`otp-visitor:${visitor}`).digest("hex").slice(0, 32) : null);
+
 export const dayStart = (now = new Date()) => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 export const monthStart = (now = new Date()) => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
 export const nextDay = (now = new Date()) => new Date(dayStart(now).getTime() + 86400000);
