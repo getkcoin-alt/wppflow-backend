@@ -16,6 +16,8 @@ import {
 } from "./mediaService.js";
 import { backfillPreviews } from "./previewService.js";
 import { recordAutomated, AUTOMATED_SENDERS } from "./auditTrail.js";
+import { isOtpMessage } from "./otp/guard.js";
+import { noteOtpAck } from "./otp/otpService.js";
 
 export function formatMessage(m) {
   return m
@@ -290,6 +292,9 @@ export async function handleIncomingMessage({
   // Status updates, channels and WhatsApp's own system notices are not team conversations.
   if (/@(broadcast|newsletter)$/.test(msg.remoteId)) return null;
   if (IGNORED_TYPES.has(msg.rawType)) return null;
+  // A one-time code sent from this number for a company's website or app is not a conversation: it never becomes a chat, a
+  // contact or a stored message (the code is in it).
+  if (msg.fromMe && (await isOtpMessage({ tenantId, sessionName, providerMessageId: msg.providerMessageId, text: msg.text, fromMe: true }))) return null;
   const isGroup = Boolean(msg.isGroup) || msg.remoteId.endsWith("@g.us");
   const inserted = await withTransaction(async (c) => {
     if (msg.rawType === "revoked" || msg.type === "revoked") {
@@ -510,6 +515,8 @@ export async function handleIncomingMessage({
 export async function handleAckEvent({ tenantId, ackData, io = null }) {
   const { providerMessageId, ack } = ackData;
   if (!providerMessageId || !Number.isInteger(ack)) return null;
+  // delivery receipts for one-time codes belong to the OTP log, not to a chat (and must not pile up as unmatched receipts)
+  if (await noteOtpAck({ tenantId, providerMessageId, ack })) return null;
   const m = await withTransaction(async (c) => {
     const result = await c.query(
       `UPDATE messages SET ack=GREATEST(ack,$1),status=CASE WHEN $1<0 THEN 'failed' WHEN $1>=3 THEN 'read' WHEN $1=2 THEN 'delivered' WHEN $1=1 THEN 'sent' ELSE 'sending' END,updated_at=now()

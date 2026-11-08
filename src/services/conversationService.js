@@ -7,6 +7,7 @@ import { emitForConversation, emitForSession } from "./realtime.js";
 import { formatConversation } from "./conversationFormat.js";
 import { chatMatch } from "./chatMatch.js";
 import { scheduleLidResolution } from "./lidService.js";
+import { isOtpMessage } from "./otp/guard.js";
 export { formatConversation };
 
 // The labels of the person each chat is with, so the list can show and filter by them. Groups have no contact.
@@ -208,6 +209,8 @@ export async function syncConversations({
   let upsertedCount = 0;
 
   for (const remote of remoteConversations) {
+    // a chat whose latest message is one of our one-time codes is the code's recipient, not a conversation: leave it out
+    if (!remote.isGroup && remote.lastMessage?.fromMe && remote.lastMessage?.text && (await isOtpMessage({ tenantId, sessionName, text: remote.lastMessage.text, fromMe: true }))) continue;
     const providerChatId = String(remote.id || remote.phone);
     const convId = `conv_${crypto.randomUUID()}`;
 

@@ -84,7 +84,9 @@ export async function recordWebhook(
   client = { query },
 ) {
   await client.query(
-    `INSERT INTO webhook_deliveries(id,tenant_id,endpoint_id,event,payload) SELECT gen_random_uuid(),tenant_id,id,$2,$3 FROM webhook_endpoints WHERE tenant_id=$1 AND enabled=true`,
+    // An endpoint set up for OTP events ('otp') hears only those; every other endpoint ('all') hears everything but those, so
+    // nothing that exists today starts receiving a new kind of event.
+    `INSERT INTO webhook_deliveries(id,tenant_id,endpoint_id,event,payload) SELECT gen_random_uuid(),tenant_id,id,$2,$3 FROM webhook_endpoints WHERE tenant_id=$1 AND enabled=true AND ((scope='otp') = ($2::text LIKE 'otp.%'))`,
     [tenantId, event, JSON.stringify(payload)],
   );
 }

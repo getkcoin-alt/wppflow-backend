@@ -38,6 +38,8 @@ import aiRoutes from "./routes/aiRoutes.js";
 import notificationRoutes from "./routes/notificationRoutes.js";
 import emailRoutes from "./routes/emailRoutes.js";
 import publicRoutes from "./routes/publicRoutes.js";
+import otpRoutes from "./routes/otpRoutes.js";
+import otpSetupRoutes from "./routes/otpSetupRoutes.js";
 import { errorHandler } from "./middleware/http.js";
 import { restoreSessions, closeSessions } from "./services/sessionService.js";
 import { sweepOrphanBrowsers } from "./services/whatsapp/browserProcess.js";
@@ -244,6 +246,9 @@ app.use("/api/leads", leadRoutes);
 app.use("/api/solutions/real_estate", realEstateRoutes);
 app.use("/api/solutions", solutionRoutes);
 app.use("/api/workspace", workspaceRoutes);
+// Free OTP: the calls a company's server makes (its own keys), and the setup page in Developers
+app.use("/api/otp", otpRoutes);
+app.use("/api/otp-setup", otpSetupRoutes);
 app.use("/api/home", homeRoutes);
 app.use("/api/export", exportRouter);
 app.use("/api/knowledge", knowledgeRoutes);

@@ -11,6 +11,7 @@ import { pumpAiPrep } from "./aiPrepService.js";
 import { pumpAutopilot } from "./autopilotService.js";
 import { pumpAiBrief } from "./aiBriefService.js";
 import { pumpKnowledge } from "./knowledgeService.js";
+import { pumpOtp } from "./otp/otpService.js";
 let timer, running;
 export function startDomainJobs(io) {
   timer = setInterval(() => {
@@ -29,6 +30,7 @@ export function startDomainJobs(io) {
       pumpAutopilot(io),
       pumpAiBrief(io),
       pumpKnowledge(),
+      pumpOtp(),
     ])
       .then((results) => {
         for (const r of results)
