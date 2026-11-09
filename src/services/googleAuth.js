@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { query } from "../db/index.js";
 import { ENV } from "../config/env.js";
 import { registerTenantAndUser } from "./authService.js";
+import { verticalOfHost } from "./vertical.js";
 
 // "Continue with Google". The ordinary authorisation-code flow, run by this server:
 //   1. /api/auth/google/start sends the browser to Google with a one-time state, a nonce and a PKCE challenge, all also kept in
@@ -15,7 +16,26 @@ import { registerTenantAndUser } from "./authService.js";
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 export const googleConfigured = () => Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
-export const redirectUri = () => process.env.GOOGLE_REDIRECT_URI || `${ENV.APP_URL}/api/auth/google/callback`;
+// The address a sign-in comes back to. A person's sign-in state (the cookies that tie the return to the start) belongs to the address
+// they started on, so they must come back to that same one: an industry's own address (homes.scriwo.com) returns to itself, anything
+// else to the app's address. Only the app's own addresses count, so nothing a person types, or edits in a cookie, can send them or
+// Google anywhere else.
+export function returnOrigin(candidate) {
+  let url;
+  try {
+    url = new URL(String(candidate || ""));
+  } catch {
+    return ENV.APP_URL;
+  }
+  if (url.origin === ENV.APP_URL) return ENV.APP_URL;
+  return ENV.ALLOWED_ORIGINS.includes(url.origin) && verticalOfHost(url.hostname) ? url.origin : ENV.APP_URL;
+}
+// What Google is told, and must be told again when the code is exchanged. Every address that can start a sign-in has to be registered
+// with Google as an authorised redirect URI. GOOGLE_REDIRECT_URI, when set, is the app's own address's.
+export const redirectUri = (origin) => {
+  const to = returnOrigin(origin);
+  return to === ENV.APP_URL && process.env.GOOGLE_REDIRECT_URI ? process.env.GOOGLE_REDIRECT_URI : `${to}/api/auth/google/callback`;
+};
 
 let doFetch = (url, init) => fetch(url, init);
 export const setGoogleFetch = (fake) => {
@@ -37,14 +57,14 @@ export function cleanIntent({ plan, interval } = {}) {
 }
 
 // The cookies and the address that start a sign-in.
-export function startSignIn(intent) {
+export function startSignIn(intent, origin) {
   const state = b64url(crypto.randomBytes(24));
   const nonce = b64url(crypto.randomBytes(24));
   const verifier = b64url(crypto.randomBytes(48));
   const url = new URL(AUTH_URL);
   url.search = new URLSearchParams({
     client_id: process.env.GOOGLE_CLIENT_ID,
-    redirect_uri: redirectUri(),
+    redirect_uri: redirectUri(origin),
     response_type: "code",
     scope: "openid email profile",
     state,
@@ -53,7 +73,7 @@ export function startSignIn(intent) {
     code_challenge_method: "S256",
     prompt: "select_account",
   }).toString();
-  return { url: url.toString(), cookie: { state, nonce, verifier, ...cleanIntent(intent) } };
+  return { url: url.toString(), cookie: { state, nonce, verifier, redirect: returnOrigin(origin), ...cleanIntent(intent) } };
 }
 
 const same = (a, b) => {
@@ -82,7 +102,8 @@ export async function identityFromCode({ code, state, saved }) {
         code,
         client_id: process.env.GOOGLE_CLIENT_ID,
         client_secret: process.env.GOOGLE_CLIENT_SECRET,
-        redirect_uri: redirectUri(),
+        // the same address Google was told when the sign-in started (checked again: the cookie is the browser's to edit)
+        redirect_uri: redirectUri(saved.redirect),
         grant_type: "authorization_code",
         code_verifier: saved.verifier,
       }),

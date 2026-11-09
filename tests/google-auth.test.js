@@ -92,6 +92,51 @@ test("Continue with Google", async (t) => {
     assert.notEqual(second.target.searchParams.get("state"), p.state, "every sign-in has its own state");
   });
 
+  await t.test("a sign-in started on an industry's own address comes back to that address, where its cookies are, and Google is told the same address twice", async () => {
+    const HOMES = "https://homes.scriwo.com";
+    const r = await visit({ query: `?origin=${encodeURIComponent(HOMES)}`, over: { sub: "g-homes-1", email: "agent@homes-test.example", name: "Hana Agent" } });
+    assert.equal(r.target.searchParams.get("redirect_uri"), `${HOMES}/api/auth/google/callback`, "Google is told to send the person back to where they started");
+    assert.equal(sent.at(-1).body.redirect_uri, `${HOMES}/api/auth/google/callback`, "and the exchange of the code repeats exactly that");
+    assert.equal(r.to.origin, HOMES, "and the browser ends up there, with the sign-in cookie");
+    assert.equal(r.params.google, "new");
+    assert.match(r.refresh, /HttpOnly/i);
+  });
+
+  await t.test("only the app's own addresses can be asked for: anything else comes back to the app", async () => {
+    for (const origin of ["https://evil.example", "https://homes.scriwo.com.evil.example", "http://homes.scriwo.com", "https://www.scriwo.com", "https://scriwo.com", "javascript:alert(1)", "not an address", "//evil.example", ""]) {
+      const r = await visit({ query: `?origin=${encodeURIComponent(origin)}`, over: { sub: `g-odd-${origin.length}`, email: `odd${origin.length}@gmail.test`, name: `Odd ${origin.length}` } });
+      assert.equal(r.target.searchParams.get("redirect_uri"), `${ENV.APP_URL}/api/auth/google/callback`, `start from "${origin}"`);
+      assert.equal(sent.at(-1).body.redirect_uri, `${ENV.APP_URL}/api/auth/google/callback`, `exchange for "${origin}"`);
+      assert.equal(r.to.origin, ENV.APP_URL, `back from "${origin}"`);
+    }
+  });
+
+  await t.test("the cookie is the browser's to edit, so the address in it is checked again and cannot send anyone elsewhere", async () => {
+    freshLimit();
+    const start = await request(app).get("/api/auth/google/start");
+    const jar = start.headers["set-cookie"].find((c) => c.startsWith("googleSignIn=")).split(";")[0];
+    const saved = JSON.parse(Buffer.from(jar.split("=")[1], "base64url").toString());
+    assert.equal(saved.redirect, ENV.APP_URL, "the cookie keeps the address the sign-in started on");
+    const forged = `googleSignIn=${Buffer.from(JSON.stringify({ ...saved, redirect: "https://evil.example" })).toString("base64url")}`;
+    reply = () => ({ body: { id_token: jwt(claims({ sub: "g-forged", email: "forged@gmail.test", name: "Forged Cookie" }, saved.nonce)), access_token: "x" } });
+    freshLimit();
+    const back = await request(app).get(`/api/auth/google/callback?code=c&state=${saved.state}`).set("Cookie", [forged]);
+    assert.equal(sent.at(-1).body.redirect_uri, `${ENV.APP_URL}/api/auth/google/callback`);
+    assert.equal(new URL(back.headers.location).origin, ENV.APP_URL);
+  });
+
+  await t.test("GOOGLE_REDIRECT_URI is the app's own address's; an industry's address is still its own", async () => {
+    process.env.GOOGLE_REDIRECT_URI = "https://staging.example/api/auth/google/callback";
+    try {
+      const home = await visit({ query: `?origin=${encodeURIComponent("https://homes.scriwo.com")}`, skipCallback: true });
+      assert.equal(home.target.searchParams.get("redirect_uri"), "https://homes.scriwo.com/api/auth/google/callback");
+      const plain = await visit({ skipCallback: true });
+      assert.equal(plain.target.searchParams.get("redirect_uri"), "https://staging.example/api/auth/google/callback");
+    } finally {
+      delete process.env.GOOGLE_REDIRECT_URI;
+    }
+  });
+
   await t.test("a new person gets a Free workspace and is signed in, and the plan they chose is carried back to the app", async () => {
     const r = await visit({ query: "?plan=growth&interval=yearly" });
     assert.equal(r.back.status, 302);

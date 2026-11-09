@@ -22,7 +22,7 @@ import { route, fail, text } from "../middleware/http.js";
 import { sendWelcomeEmail } from "../services/emailService.js";
 import { applyVertical, brandingOf, startTrial, verticalKey, verticalOfHost } from "../services/vertical.js";
 import { markVerified, noteFirstLogin, sendVerification, verifyEmail } from "../services/emailVerification.js";
-import { GoogleSignInError, googleConfigured, identityFromCode, personFor, startSignIn } from "../services/googleAuth.js";
+import { GoogleSignInError, googleConfigured, identityFromCode, personFor, returnOrigin, startSignIn } from "../services/googleAuth.js";
 import { sendStaffInvite } from "../services/mailer.js";
 import {
   requestPasswordReset,
@@ -204,16 +204,17 @@ router.get("/providers", (req, res) => res.json({ status: "success", google: goo
 
 const GOOGLE_COOKIE = "googleSignIn";
 const googleCookieOptions = { ...cookieOptions, maxAge: 10 * 60 * 1000 };
-const backToApp = (res, params) => {
+// Back to the address the person started on (see returnOrigin), where their sign-in cookies are.
+const backToApp = (res, params, origin) => {
   res.clearCookie(GOOGLE_COOKIE, { ...googleCookieOptions, maxAge: undefined });
-  res.redirect(`${ENV.APP_URL}/?${new URLSearchParams(params).toString()}`);
+  res.redirect(`${returnOrigin(origin)}/?${new URLSearchParams(params).toString()}`);
 };
 router.get(
   "/google/start",
   authRateLimiter,
   route(async (req, res) => {
-    if (!googleConfigured()) return backToApp(res, { google_error: "unavailable" });
-    const { url, cookie } = startSignIn({ plan: req.query.plan, interval: req.query.interval });
+    if (!googleConfigured()) return backToApp(res, { google_error: "unavailable" }, req.query.origin);
+    const { url, cookie } = startSignIn({ plan: req.query.plan, interval: req.query.interval }, req.query.origin);
     cookie.vertical = verticalKey(req.query.vertical) || "";
     cookie.trial = String(req.query.trial || "").toLowerCase() === "growth" ? "growth" : "";
     res.cookie(GOOGLE_COOKIE, Buffer.from(JSON.stringify(cookie)).toString("base64url"), googleCookieOptions);
@@ -249,12 +250,12 @@ router.get(
       else if (created && tenant.id && saved?.trial === "growth") await startTrial({ tenantId: tenant.id, user, source: "website" });
       if (created)
         sendWelcomeEmail({ to: user.email, name: user.name, workspaceName: tenant.name }).catch((e) => console.warn(`Welcome email dispatch skipped: ${e.message}`));
-      return backToApp(res, { google: created ? "new" : "ok", ...(intent.plan ? { plan: intent.plan } : {}), ...(intent.interval ? { interval: intent.interval } : {}) });
+      return backToApp(res, { google: created ? "new" : "ok", ...(intent.plan ? { plan: intent.plan } : {}), ...(intent.interval ? { interval: intent.interval } : {}) }, saved?.redirect);
     } catch (error) {
       if (!(error instanceof GoogleSignInError)) throw error;
       // the reason is for the server's log; the person is given one of a few plain words
       console.warn(`Google sign-in refused (${error.code}): ${error.message}`);
-      return backToApp(res, { google_error: error.code, ...(intent.plan ? { plan: intent.plan } : {}), ...(intent.interval ? { interval: intent.interval } : {}) });
+      return backToApp(res, { google_error: error.code, ...(intent.plan ? { plan: intent.plan } : {}), ...(intent.interval ? { interval: intent.interval } : {}) }, saved?.redirect);
     }
   }),
 );
