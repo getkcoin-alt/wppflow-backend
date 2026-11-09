@@ -7,6 +7,7 @@ import { query } from "../src/db/index.js";
 import { ENV } from "../src/config/env.js";
 import { registerTenantAndUser } from "../src/services/authService.js";
 import { setGoogleFetch, cleanIntent } from "../src/services/googleAuth.js";
+import { TRIAL_DAYS } from "../src/services/vertical.js";
 import { authRateLimiter } from "../src/middleware/rateLimiter.js";
 import { closeSessions } from "../src/services/sessionService.js";
 
@@ -100,6 +101,46 @@ test("Continue with Google", async (t) => {
     assert.equal(r.to.origin, HOMES, "and the browser ends up there, with the sign-in cookie");
     assert.equal(r.params.google, "new");
     assert.match(r.refresh, /HttpOnly/i);
+  });
+
+  await t.test("a new agency that comes through Google on the Homes address gets the property workspace and the 14-day trial, once; on the app's address it gets the ordinary Free one", async () => {
+    const day = 86400000;
+    const onHomes = `?origin=${encodeURIComponent("https://homes.scriwo.com")}&vertical=homes`;
+    const agency = { sub: "g-homes-agency", email: "agency@homes-test.example", name: "Amal Agency" };
+    const workspacesOf = async (email) => {
+      const [u] = await users(email);
+      return (await query("SELECT t.* FROM memberships m JOIN tenants t ON t.id=m.tenant_id WHERE m.user_id=$1", [u.id])).rows;
+    };
+
+    const r = await visit({ query: onHomes, over: agency });
+    assert.equal(r.params.google, "new");
+    assert.equal(r.to.origin, "https://homes.scriwo.com");
+    const [ws, ...others] = await workspacesOf(agency.email);
+    assert.equal(others.length, 0, "one workspace");
+    assert.deepEqual([ws.plan, ws.sessions_limit], ["Growth", 3], "the trial, not the Free plan");
+    assert.equal(Math.round((new Date(ws.period_end).getTime() - new Date(ws.period_start).getTime()) / day), TRIAL_DAYS);
+    assert.deepEqual((await query("SELECT solution_key,enabled FROM tenant_solutions WHERE tenant_id=$1", [ws.id])).rows.map((s) => [s.solution_key, s.enabled]), [["real_estate", true]], "the real-estate layer is on");
+    const stages = (await query("SELECT s.name FROM pipeline_stages s JOIN pipelines p ON p.id=s.pipeline_id WHERE s.tenant_id=$1 ORDER BY s.position", [ws.id])).rows.map((x) => x.name);
+    assert.deepEqual(stages, ["New enquiry", "Contacted", "Viewing booked", "Offer made", "Negotiation", "Deal closed", "Lost"], "the property pipeline");
+    freshLimit();
+    const me = await request(app).post("/api/auth/refresh").set("Cookie", [r.refresh.split(";")[0]]);
+    assert.equal(me.status, 200);
+    assert.equal(me.body.tenant.plan, "Growth", "and the page they land on shows it");
+
+    // coming back is a sign-in, not a second set-up: the trial does not restart and nothing is added
+    const again = await visit({ query: onHomes, over: agency });
+    assert.equal(again.params.google, "ok");
+    const [after] = await workspacesOf(agency.email);
+    assert.equal(String(after.period_end), String(ws.period_end));
+    assert.equal((await query("SELECT count(*)::int AS n FROM audit_events WHERE tenant_id=$1 AND event_type='vertical.applied'", [ws.id])).rows[0].n, 1);
+    assert.equal((await query("SELECT count(*)::int AS n FROM pipelines WHERE tenant_id=$1", [ws.id])).rows[0].n, 1);
+
+    // started on the app's own address: the ordinary workspace, with no trial and no property layer
+    const plain = await visit({ over: { sub: "g-plain-agency", email: "plain@homes-test.example", name: "Pia Plain" } });
+    assert.equal(plain.params.google, "new");
+    const [free] = await workspacesOf("plain@homes-test.example");
+    assert.deepEqual([free.plan, free.sessions_limit, free.period_end], ["Free", 1, null]);
+    assert.equal((await query("SELECT count(*)::int AS n FROM tenant_solutions WHERE tenant_id=$1 AND enabled", [free.id])).rows[0].n, 0);
   });
 
   await t.test("only the app's own addresses can be asked for: anything else comes back to the app", async () => {
