@@ -83,6 +83,7 @@ test("the platform admin deletes a company, and everything of it goes", async (t
   const fill = async (c, { files = 0 } = {}) => {
     const { tenantId, owner, ownerRow } = c;
     await query("INSERT INTO whatsapp_sessions(id,tenant_id,session_name,status,phone) VALUES(gen_random_uuid()::text,$1,'main-line','CONNECTED','971500000000')", [tenantId]);
+    await query("INSERT INTO whatsapp_session_events(tenant_id,session_name,event,cause) VALUES($1,'main-line','disconnected','browserClose')", [tenantId]);
     for (const phone of ["971501110001", "971501110002"]) {
       await handleIncomingMessage({ tenantId, sessionName: "main-line", msg: { providerMessageId: `del_${tenantId}_${phone}_${++n}`, fromMe: false, remoteId: `${phone}@c.us`, rawType: "chat", type: "text", text: "hello", timestampEpoch: Math.floor(Date.now() / 1000) + n, senderName: `Cust ${phone.slice(-3)}`, ack: 2 } });
     }

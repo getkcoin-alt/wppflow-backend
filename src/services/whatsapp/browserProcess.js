@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { ENV } from "../../config/env.js";
 
 // Each WhatsApp number runs in its own Chromium profile folder. A browser that outlives its session
 // (a pairing that was cancelled while the QR code was showing, a worker that was restarted) keeps that
@@ -72,10 +73,10 @@ const rootAncestorOf = (pid) => {
   return { masterPid: curr, parentNode: 1 };
 };
 
-function kill(pids) {
+function kill(pids, signal = "SIGKILL") {
   for (const pid of pids) {
     try {
-      process.kill(pid, "SIGKILL");
+      process.kill(pid, signal);
     } catch {
       /* already gone */
     }
@@ -96,13 +97,25 @@ export function browsersUsing(profileDir) {
   );
 }
 
-// Stops every browser using this profile folder and waits until they are gone.
-export async function stopBrowsers(profileDir, { timeoutMs = 4000 } = {}) {
-  const victims = browsersUsing(profileDir);
+// Asks every process in the list to quit (SIGTERM, which lets Chromium finish writing its profile: WhatsApp's login keys live in
+// it, and a browser killed in the middle of a write can lose them, which means a new QR code), waits up to graceMs, and only then
+// forces what is still running (SIGKILL). Returns how many it had to ask.
+async function stopGently(find, { graceMs = ENV.BROWSER_TERM_GRACE_MS, timeoutMs = 4000 } = {}) {
+  const victims = find();
   if (!victims.length) return 0;
-  kill(victims.map((p) => p.pid));
-  await untilGone(() => browsersUsing(profileDir), timeoutMs);
+  kill(victims.map((p) => p.pid), "SIGTERM");
+  await untilGone(find, graceMs);
+  const stubborn = find();
+  if (stubborn.length) {
+    kill(stubborn.map((p) => p.pid), "SIGKILL");
+    await untilGone(find, timeoutMs);
+  }
   return victims.length;
+}
+
+// Stops every browser using this profile folder and waits until they are gone.
+export function stopBrowsers(profileDir, options = {}) {
+  return stopGently(() => browsersUsing(profileDir), options);
 }
 
 // A killed browser can leave its lock files behind; the next launch would still think it is running.
@@ -123,10 +136,5 @@ export async function sweepOrphanBrowsers(tokenRoot) {
     return !isLiveNode(parentNode);
   });
   if (!orphans.length) return 0;
-  kill(orphans.map((p) => p.pid));
-  await untilGone(
-    () => readProcesses().filter((p) => orphans.some((o) => o.pid === p.pid)),
-    4000,
-  );
-  return orphans.length;
+  return stopGently(() => readProcesses().filter((p) => orphans.some((o) => o.pid === p.pid)));
 }

@@ -46,4 +46,6 @@ Use one API/Chromium worker initially. Database leases prevent a second worker o
 
 Store orders/LTV, billing/plan administration, email delivery, calls, reactions, editing/deleting WhatsApp messages and exact WhatsApp visual parity are not implemented. Their data is not fabricated. Media content checks are not antivirus scanning; configure bucket lifecycle/quarantine and an actual malware scanner before accepting untrusted public uploads.
 
+How linked WhatsApp numbers are kept connected (restarts, deploys, crashes, memory), what is recorded when one drops, the settings, and what nobody can prevent: [session stability](docs/session-stability.md).
+
 See [release checklist](docs/release.md) before upgrading an existing installation. Production migrations are manual by default and destructive rollback is disabled.

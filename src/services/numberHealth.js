@@ -1,13 +1,17 @@
 import { query } from "../db/index.js";
+import { ENV } from "../config/env.js";
 import { defaultWhatsAppProvider as provider } from "./whatsapp/WhatsAppProvider.js";
 import { createNotifications } from "./notificationService.js";
+import { restartTenantSession } from "./sessionService.js";
+import { pruneSessionEvents } from "./sessionEvents.js";
 
 // How each linked WhatsApp number is doing: whether it answers when asked, how long it has been connected or down,
 // how many messages went wrong or are stuck, and who is told when it stays bad. Read by the Numbers screen, the
 // platform console and the alert job.
 export const THRESHOLDS = {
   heartbeatEverySeconds: 60,
-  unresponsiveAfter: 3, // checks in a row that went unanswered
+  unresponsiveAfter: 3, // checks in a row that went unanswered: shown as a problem. The server restarts the number's browser by itself at this point
+  alertAfter: 5, // ... and people are told only when that did not help (an alert about something already being fixed teaches them to ignore alerts)
   downMinutes: 30, // a linked number still not connected after this long
   failedSendsPerHour: 5,
   failedShare: 0.5, // of the sends in that hour
@@ -50,9 +54,9 @@ export function judge(r, nowMs = Date.now()) {
     problems.push({
       code: "unresponsive",
       text: `Did not answer the last ${r.heartbeatFailures} checks${r.heartbeatError ? ` (${r.heartbeatError})` : ""}.`,
-      alert: true,
+      alert: r.heartbeatFailures >= THRESHOLDS.alertAfter,
       title: `${r.label} stopped answering`,
-      body: `WhatsApp did not respond to the last ${r.heartbeatFailures} checks. Open Numbers to see its health; if it stays like this, disconnect it and link it again.`,
+      body: `WhatsApp did not respond to the last ${r.heartbeatFailures} checks, and restarting its browser automatically did not help. Open Numbers to see its health; if it stays like this, disconnect it and link it again.`,
     });
   }
   const f = r.sends.failedLastHour,
@@ -136,20 +140,32 @@ export async function numberHealth(tenantId, { ownerUserId = null, nowMs = Date.
   });
 }
 
-// Asks every number this server is running whether it is still there, and remembers the answer.
-export async function pingSessions({ timeoutMs = 8000 } = {}) {
+// when a number's browser was last restarted because it stopped answering: one restart per cooldown, so that a number that
+// stays unwell is not restarted over and over
+const restartedAt = new Map();
+
+// Asks every number this server is running whether it is still there, and remembers the answer. A number that has not answered
+// HEARTBEAT_RESTART_AFTER checks in a row has a stuck browser (the page hung, WhatsApp's connection is gone), which only a restart
+// cures: it is restarted from its saved login, without a QR code. Until now it was only reported, and stayed down until a person acted.
+export async function pingSessions({ timeoutMs = 8000, io = null, nowMs = Date.now() } = {}) {
   const running = [...provider.sessions.values()].filter((s) => s.status === "CONNECTED" && s.client);
   await Promise.all(
     running.map(async (s) => {
       const result = await provider.ping(s.tenantId, s.sessionName, timeoutMs);
-      await query(
+      const { rows } = await query(
         `UPDATE whatsapp_sessions SET last_heartbeat_at=now(),
            last_heartbeat_ok_at=CASE WHEN $3::boolean THEN now() ELSE last_heartbeat_ok_at END,
            heartbeat_failures=CASE WHEN $3::boolean THEN 0 ELSE heartbeat_failures+1 END,
            heartbeat_error=CASE WHEN $3::boolean THEN NULL ELSE $4 END
-         WHERE tenant_id=$1 AND session_name=$2`,
+         WHERE tenant_id=$1 AND session_name=$2 RETURNING heartbeat_failures`,
         [s.tenantId, s.sessionName, result.ok, result.ok ? null : result.error || "No answer"],
       );
+      const key = `${s.tenantId}:${s.sessionName}`;
+      if (result.ok || (rows[0]?.heartbeat_failures ?? 0) < ENV.HEARTBEAT_RESTART_AFTER) return;
+      if (nowMs - (restartedAt.get(key) ?? -Infinity) < ENV.HEARTBEAT_RESTART_COOLDOWN_MS) return;
+      restartedAt.set(key, nowMs);
+      // not awaited: a restart takes a minute, and the background jobs that call this must not wait for it
+      restartTenantSession(s.tenantId, s.sessionName, io, { cause: "heartbeat" }).catch((e) => console.error(`Restart of ${s.sessionName} failed:`, e.message));
     }),
   );
   return running.length;
@@ -196,10 +212,15 @@ export async function alertOnProblems({ io = null, nowMs = Date.now() } = {}) {
 }
 
 let lastBeat = 0;
+let lastPrune = 0;
 // Called by the background jobs every few seconds: it asks the numbers once a minute and then looks for trouble.
 export async function pumpNumberHealth(io, nowMs = Date.now()) {
   if (nowMs - lastBeat < THRESHOLDS.heartbeatEverySeconds * 1000) return;
   lastBeat = nowMs;
-  await pingSessions();
+  await pingSessions({ io, nowMs });
   await alertOnProblems({ io, nowMs });
+  if (nowMs - lastPrune > 24 * 3600 * 1000) {
+    lastPrune = nowMs;
+    await pruneSessionEvents().catch((e) => console.warn("Pruning the number history:", e.message));
+  }
 }

@@ -60,6 +60,51 @@ test("A browser left running can never block the next connection", { skip: !linu
     assert.equal(await stopBrowsers(path.join(root, "tenant_a_staff-1", "tenant_a_staff-1")), 0, "nothing left to stop");
   });
 
+  // A stand-in for Chromium that behaves like it does on SIGTERM (finishes writing, then exits), and one that does not listen.
+  const polite = (profile, marker) => {
+    fs.mkdirSync(profile, { recursive: true });
+    const code = `process.on("SIGTERM",()=>{require("fs").writeFileSync(${JSON.stringify(marker)},"finished writing");process.exit(0)});setInterval(()=>{},1e6)`;
+    const child = spawn(process.execPath, ["-e", code, "--", `--user-data-dir=${profile}`], { stdio: "ignore" });
+    children.push(child);
+    return child;
+  };
+  const deaf = (profile) => {
+    fs.mkdirSync(profile, { recursive: true });
+    const child = spawn(process.execPath, ["-e", `process.on("SIGTERM",()=>{});setInterval(()=>{},1e6)`, "--", `--user-data-dir=${profile}`], { stdio: "ignore" });
+    children.push(child);
+    return child;
+  };
+
+  await t.test("a browser is asked to quit first, so that it can finish writing its profile (WhatsApp's login is in it), not killed outright", async () => {
+    const profile = path.join(root, "gentle", "gentle");
+    const marker = path.join(root, "gentle-marker");
+    const child = polite(profile, marker);
+    await until(() => browsersUsing(profile).length === 1);
+    await new Promise((r) => setTimeout(r, 200)); // let it install its handler
+    assert.equal(await stopBrowsers(profile), 1);
+    await until(() => !alive(child.pid));
+    assert.equal(fs.existsSync(marker), true, "it got SIGTERM and finished its write; a SIGKILL would have left no trace");
+  });
+
+  await t.test("a browser that ignores the request is forced after the grace period, and no sooner", async () => {
+    const saved = ENV.BROWSER_TERM_GRACE_MS;
+    ENV.BROWSER_TERM_GRACE_MS = 600;
+    try {
+      const profile = path.join(root, "stubborn", "stubborn");
+      const child = deaf(profile);
+      await until(() => browsersUsing(profile).length === 1);
+      await new Promise((r) => setTimeout(r, 200));
+      const began = Date.now();
+      assert.equal(await stopBrowsers(profile), 1);
+      const took = Date.now() - began;
+      await until(() => !alive(child.pid));
+      assert.ok(took >= 550, `it was given its grace period first (${took} ms)`);
+      assert.ok(took < 3000, `and forced soon after (${took} ms)`);
+    } finally {
+      ENV.BROWSER_TERM_GRACE_MS = saved;
+    }
+  });
+
   await t.test("clears the lock files a killed browser leaves behind", () => {
     const profile = path.join(root, "locked");
     fs.mkdirSync(profile, { recursive: true });
@@ -108,7 +153,9 @@ test("A browser left running can never block the next connection", { skip: !linu
     // An orphan: started by a shell that exits at once, so its parent is gone.
     const orphanDir = path.join(root, "orphan", "orphan");
     fs.mkdirSync(orphanDir, { recursive: true });
-    spawn("sh", ["-c", `"${process.execPath}" -e "setInterval(()=>{},1e6)" -- --user-data-dir=${orphanDir} >/dev/null 2>&1 &`], { stdio: "ignore" });
+    const shell = spawn("sh", ["-c", `"${process.execPath}" -e "setInterval(()=>{},1e6)" -- --user-data-dir=${orphanDir} >/dev/null 2>&1 &`], { stdio: "ignore" });
+    // it is an orphan only once that shell has gone (on a busy machine the browser can be seen before the shell has exited)
+    await new Promise((resolve) => shell.on("exit", resolve));
     await until(() => browsersUsing(orphanDir).length === 1);
     await until(() => browsersUsing(path.join(root, "live", "live")).length === 1);
 

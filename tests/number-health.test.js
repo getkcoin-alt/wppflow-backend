@@ -9,10 +9,16 @@ import { handleIncomingMessage } from "../src/services/messageService.js";
 import { closeSessions, saveSessionStatus } from "../src/services/sessionService.js";
 import { defaultWhatsAppProvider as provider } from "../src/services/whatsapp/WhatsAppProvider.js";
 import { judge, numberHealth, pingSessions, alertOnProblems, THRESHOLDS } from "../src/services/numberHealth.js";
+import { ENV } from "../src/config/env.js";
 
 test("Number health: heartbeat, failed and waiting sends, alerts and who can see them", async (t) => {
   const running = new Set();
+  // A number that keeps failing its checks is restarted by the server (tests/session-stability.test.js). Here only what is reported is
+  // under test, so the restart is put out of reach.
+  const restartAfter = ENV.HEARTBEAT_RESTART_AFTER;
+  ENV.HEARTBEAT_RESTART_AFTER = 1000;
   t.after(async () => {
+    ENV.HEARTBEAT_RESTART_AFTER = restartAfter;
     for (const key of running) provider.sessions.delete(key);
     await closeSessions(serverIo);
     serverIo.close();
@@ -152,8 +158,11 @@ test("Number health: heartbeat, failed and waiting sends, alerts and who can see
     assert.equal(judge({ ...base, heartbeatFailures: 2 }, now).level, "ok");
     const quiet = judge({ ...base, heartbeatFailures: 3, heartbeatError: "Page crashed" }, now);
     assert.equal(quiet.level, "warn");
-    assert.equal(quiet.problems[0].alert, true);
+    assert.equal(quiet.problems[0].alert, false, "shown, but nobody is woken yet: the server is restarting the browser by itself");
     assert.match(quiet.problems[0].text, /last 3 checks \(Page crashed\)/);
+    const stillQuiet = judge({ ...base, heartbeatFailures: THRESHOLDS.alertAfter, heartbeatError: "Page crashed" }, now);
+    assert.equal(stillQuiet.problems[0].alert, true, "worth an alert once the restart has not helped");
+    assert.match(stillQuiet.problems[0].title, /stopped answering/);
 
     assert.equal(judge({ ...base, sends: { failedLastHour: 4, totalLastHour: 4 } }, now).level, "ok", "under five is a blip");
     assert.equal(judge({ ...base, sends: { failedLastHour: 5, totalLastHour: 40 } }, now).level, "ok", "a few failures among many sends is normal");
@@ -173,6 +182,12 @@ test("Number health: heartbeat, failed and waiting sends, alerts and who can see
     for (let i = 0; i < 3; i++) await pingSessions();
     const noteCount = async () => (await query("SELECT user_id,title,body,dedupe_key FROM notifications WHERE tenant_id=$1 AND type='session' AND dedupe_key LIKE 'health:%' ORDER BY id", [tenantId])).rows;
     assert.equal((await noteCount()).length, 0);
+    // three misses: the server restarts it by itself, so nobody is told yet
+    await alertOnProblems();
+    assert.ok(!(await noteCount()).some((n) => n.dedupe_key === "health:unresponsive:sam-line"), "not told after three misses");
+    await query("DELETE FROM notifications WHERE tenant_id=$1", [tenantId]);
+    // five: the restart did not help
+    for (let i = 0; i < THRESHOLDS.alertAfter - 3; i++) await pingSessions();
     assert.ok((await alertOnProblems()) > 0);
     let notes = await noteCount();
     const unresponsive = notes.filter((n) => n.dedupe_key === "health:unresponsive:sam-line");

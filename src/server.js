@@ -43,6 +43,7 @@ import otpWidgetRoutes from "./routes/otpWidgetRoutes.js";
 import otpSetupRoutes from "./routes/otpSetupRoutes.js";
 import { errorHandler } from "./middleware/http.js";
 import { restoreSessions, closeSessions } from "./services/sessionService.js";
+import { installProcessGuards } from "./services/processGuard.js";
 import { sweepOrphanBrowsers } from "./services/whatsapp/browserProcess.js";
 import { startDomainJobs, stopDomainJobs } from "./services/domainJobs.js";
 import { loadPlans, keepPlansFresh } from "./services/plans.js";
@@ -274,6 +275,8 @@ app.use(errorHandler);
 // 4. Server Lifecycle & Initialization
 export async function startServer() {
   console.log("🚀 Starting Scriwo backend...");
+  // A stray error must not take every linked number down with the process (see services/processGuard.js).
+  installProcessGuards({ onFatal: () => stopServer() });
   console.log(`📁 Environment: ${ENV.NODE_ENV} | Port: ${ENV.PORT}`);
 
   // 1. Verify PostgreSQL Database
@@ -329,17 +332,36 @@ export async function startServer() {
   });
 }
 
-export async function stopServer() {
-  stopReconcileLoop();
-  await stopDomainJobs();
-  await closeQueue();
-  await closeSessions(io);
-  io.disconnectSockets(true);
-  await new Promise((resolve) => io.close(resolve));
-  await closePool();
+// resolves after `ms` at the latest, whether or not `promise` has settled
+const atMost = (promise, ms) =>
+  Promise.race([
+    promise,
+    new Promise((resolve) => {
+      setTimeout(resolve, ms).unref();
+    }),
+  ]);
+let stopping = null;
+// Stops the server: the linked numbers are closed cleanly (that is what keeps their WhatsApp logins intact), so the background jobs
+// and the message queue get a time limit and cannot hold them up. Safe to call twice.
+export function stopServer() {
+  stopping ||= (async () => {
+    stopReconcileLoop();
+    await atMost(stopDomainJobs(), 5000).catch((e) => console.warn("Stopping the background jobs:", e.message));
+    await atMost(closeQueue(), 5000).catch((e) => console.warn("Closing the message queue:", e.message));
+    await closeSessions(io);
+    io.disconnectSockets(true);
+    await atMost(new Promise((resolve) => io.close(resolve)), 5000);
+    await closePool();
+  })();
+  return stopping;
 }
 for (const signal of ["SIGINT", "SIGTERM"])
-  process.once(signal, () => stopServer().finally(() => process.exit(0)));
+  process.once(signal, () => {
+    console.log(`${signal} received: stopping cleanly`);
+    // if something hangs, leave anyway rather than wait to be killed
+    setTimeout(() => process.exit(1), ENV.SHUTDOWN_GRACE_MS + 20000).unref();
+    stopServer().finally(() => process.exit(0));
+  });
 
 export { app, server, io };
 

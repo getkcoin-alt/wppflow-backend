@@ -130,13 +130,14 @@ export class WhatsAppProvider {
         } else if (statusSession === "autocloseCalled") {
           sessionState.status = SESSION_STATUS.EXPIRED;
           sessionState.qrcode = null;
-          notify(callbacks.onStatus, SESSION_STATUS.EXPIRED);
+          notify(callbacks.onStatus, SESSION_STATUS.EXPIRED, "qr_not_scanned");
         } else if (
           statusSession === "browserClose" ||
           statusSession === "serverClose"
         ) {
           sessionState.status = SESSION_STATUS.DISCONNECTED;
-          notify(callbacks.onStatus, SESSION_STATUS.DISCONNECTED);
+          // WhatsApp's own word for why, kept so that a drop can be explained afterwards (browserClose: the browser went away).
+          notify(callbacks.onStatus, SESSION_STATUS.DISCONNECTED, statusSession);
         }
       },
       autoClose: ENV.QR_TIMEOUT_MS,
@@ -191,6 +192,18 @@ export class WhatsAppProvider {
     console.log(`WhatsApp ${sessionName}: signed in as …${String(sessionState.phone || "").replace(/\D/g, "").slice(-4) || "unknown"}`);
     sessionState.status = SESSION_STATUS.CONNECTED;
     if (callbacks.onStatus) await callbacks.onStatus(SESSION_STATUS.CONNECTED);
+
+    // WhatsApp's own reports about the connection: another window took over (CONFLICT), the phone unlinked this device (UNPAIRED),
+    // the stream to WhatsApp dropped. Without them a number is only noticed to be in trouble by the next failed check, and nothing
+    // says why.
+    try {
+      if (client?.onStateChange && callbacks.onState)
+        client.onStateChange((state) => notify(callbacks.onState, state));
+      if (client?.onStreamChange && callbacks.onStream)
+        client.onStreamChange((state) => notify(callbacks.onStream, state));
+    } catch (error) {
+      console.warn(`WhatsApp ${sessionName}: could not listen to connection state: ${error.message}`);
+    }
 
     // Register incoming message handler
     if (client?.onAnyMessage && callbacks.onMessage) {
@@ -290,14 +303,32 @@ export class WhatsAppProvider {
     }
   }
 
+  // Takes the number back from WhatsApp when it reports that another window has taken over ("Use here").
+  async useHere(tenantId, sessionName) {
+    const session = this.sessions.get(this.sessionKey(tenantId, sessionName));
+    if (!session?.client?.useHere) return false;
+    await session.client.useHere();
+    return true;
+  }
+
   async closeSession(tenantId, sessionName) {
     const key = this.sessionKey(tenantId, sessionName);
     const session = this.sessions.get(key);
     if (session?.client) {
+      let timer;
       try {
-        await session.client.close();
+        // A hung page can make close() wait for ever. Past the limit the browser is stopped from outside (releaseProfile below).
+        await Promise.race([
+          session.client.close(),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`the browser did not close within ${Math.round(ENV.BROWSER_CLOSE_TIMEOUT_MS / 1000)} s`)), ENV.BROWSER_CLOSE_TIMEOUT_MS);
+            timer.unref?.();
+          }),
+        ]);
       } catch (err) {
         console.warn(`Error closing session ${sessionName}:`, err.message);
+      } finally {
+        clearTimeout(timer);
       }
     }
     this.sessions.delete(key);

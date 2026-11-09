@@ -49,6 +49,20 @@ try {
   for (const s of sessions.rows)
     console.log(`${s.company} / ${s.session_name}: ${s.status}, phone ${mask(s.phone)}, restore ${s.restore_on_start}, running here ${s.owned}, lease ${s.lease_s ?? "-"} s, updated ${new Date(s.updated_at).toISOString()}${s.last_error ? `, error: ${hide(s.last_error)}` : ""}`);
 
+  // What happened to the numbers: how often each drop cause occurred, and the latest events. Needs migration 052 (a server not yet
+  // upgraded has no history, which is not an error).
+  try {
+    heading("What happened to the numbers (history, last 7 days)");
+    const counts = await query(`SELECT event,coalesce(cause,'') AS cause,count(*)::int AS n,max(created_at) AS last FROM whatsapp_session_events WHERE created_at > now() - interval '7 days' GROUP BY 1,2 ORDER BY n DESC,event LIMIT 40`);
+    for (const c of counts.rows) console.log(`${String(c.n).padStart(4)} x ${c.event}${c.cause ? ` (${c.cause})` : ""}, last ${new Date(c.last).toISOString()}`);
+    if (!counts.rowCount) console.log("(nothing recorded yet)");
+    heading("Latest events, newest first");
+    const latest = await query(`SELECT t.name AS company,e.session_name,e.event,e.cause,left(e.detail,100) AS detail,e.created_at FROM whatsapp_session_events e JOIN tenants t ON t.id=e.tenant_id ORDER BY e.id DESC LIMIT 40`);
+    for (const e of latest.rows) console.log(`${new Date(e.created_at).toISOString()}  ${e.company} / ${e.session_name}: ${e.event}${e.cause ? ` (${e.cause})` : ""}${e.detail ? `, ${hide(e.detail)}` : ""}`);
+  } catch (error) {
+    console.log(`(no history yet: ${error.message})`);
+  }
+
   heading("Saved logins on disk");
   const root = path.resolve(ENV.TOKEN_DIR);
   const known = new Set((await query("SELECT tenant_id,session_name FROM whatsapp_sessions")).rows.map((s) => `tenant_${s.tenant_id}_${s.session_name}`));
