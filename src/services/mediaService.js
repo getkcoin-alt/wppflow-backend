@@ -5,6 +5,7 @@ import {
   HeadObjectCommand,
   GetObjectCommand,
   DeleteObjectCommand,
+  ListObjectsV2Command,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { fail } from "../middleware/http.js";
@@ -336,4 +337,25 @@ export async function finishUploadCheck(tenantId, key) {
         : explain(error),
     };
   }
+}
+
+// Every file a company has stored: the files themselves, their previews and anything else kept under its own folder. Used when
+// the platform admin deletes a company. Returns how many went. A company's folder is its id and a slash, so "tenant_1/" cannot
+// reach "tenant_10/". Files are removed one at a time, the call the rest of the app already uses on this storage, a few at once.
+export async function deleteTenantMedia(tenantId) {
+  if (!mediaEnabled()) return 0;
+  const id = String(tenantId ?? "");
+  if (!id || id.includes("/")) throw fail(400, "That is not a company id");
+  const Prefix = `${id}/`;
+  let removed = 0;
+  let token;
+  do {
+    const page = await sendCommand(new ListObjectsV2Command({ Bucket: process.env.S3_BUCKET, Prefix, ContinuationToken: token }));
+    const keys = (page.Contents || []).map((o) => o.Key).filter((key) => key && key.startsWith(Prefix));
+    for (let i = 0; i < keys.length; i += 10)
+      await Promise.all(keys.slice(i, i + 10).map((Key) => sendCommand(new DeleteObjectCommand({ Bucket: process.env.S3_BUCKET, Key }))));
+    removed += keys.length;
+    token = page.IsTruncated ? page.NextContinuationToken : undefined;
+  } while (token);
+  return removed;
 }

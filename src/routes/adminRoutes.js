@@ -13,6 +13,7 @@ import { subscriptionView, recordPayment, scheduleChange, clearScheduledChange, 
 import { invoiceForRecordedPayment, adminPayments, getInvoice, billingAudit } from "../services/billingService.js";
 import { platformOverview, platformNumberHealth, startSupportSession, endSupportSession, supportLook, supportSessions } from "../services/platformService.js";
 import { renderInvoice, invoiceFileName } from "../services/invoicePdf.js";
+import { deleteCompany, deletedCompanies, deletionPreview } from "../services/companyDeletion.js";
 const router = express.Router();
 router.use(authenticateToken, requireSuperAdmin);
 const companyView = (r) => ({
@@ -222,6 +223,24 @@ router.patch(
     const warnings = plan ? planWarnings(company) : [];
     res.json({ status: "success", company, warnings });
   }),
+);
+// ── Deleting a company ─────────────────────────────────────────────────────────────────────────
+// What it would remove and whether it may be deleted at all; nothing is changed.
+router.get(
+  "/companies/:id/deletion",
+  route(async (req, res) => res.json({ status: "success", ...(await deletionPreview(req.params.id)) })),
+);
+// Deletes it, and everything of it, once its name has been typed. A POST with a body rather than a DELETE, which some proxies strip.
+router.post(
+  "/companies/:id/delete",
+  route(async (req, res) => {
+    const done = await deleteCompany({ tenantId: req.params.id, confirmName: req.body?.confirmName, actor: req.user, io: req.app.get("io") });
+    res.json({ status: "success", ...done });
+  }),
+);
+router.get(
+  "/deleted-companies",
+  route(async (req, res) => res.json({ status: "success", companies: await deletedCompanies() })),
 );
 // ── Subscription: payments received, and what happens when the period ends ─────────────────────
 const companyAfter = async (id) => companyView((await query(`${COMPANY_SQL} WHERE t.id=$1`, [id])).rows[0]);
