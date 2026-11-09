@@ -26,6 +26,8 @@ for anything else.
 | A connected number stops answering its check (one a minute) | After `HEARTBEAT_RESTART_AFTER` (3) misses its browser is restarted from the saved login (no QR code), at most once per `HEARTBEAT_RESTART_COOLDOWN_MS` (10 min). It used to be only reported. People are told (`THRESHOLDS.alertAfter`, 5 misses) only when the restart did not help. | `pingSessions` in `numberHealth.js` |
 | WhatsApp reports `CONFLICT` (open in another window) | "Use here" takes the number back. | `onWhatsAppState` |
 | WhatsApp reports `UNPAIRED` (the phone logged the device out) | The number is **not restored** (it would only show a QR code nobody scans); status `EXPIRED`, owner and managers are told to scan again. | `onWhatsAppState` |
+| A number is linked (QR scanned) but its chats take long to load (a phone with a lot of history) | WPPConnect closes the page 3 minutes after login unless the chats have loaded (`deviceSyncTimeout`), and the app then said "QR code not scanned in time", so people scanned again; every scan adds another linked device to the phone. The limit is now `SESSION_DEVICE_SYNC_TIMEOUT_MS` (15 min). If it still runs out, the number is **not** marked as needing a scan: it is `DISCONNECTED` with a plain message and is started again from its saved login (no new scan), up to 3 times, then a person is asked to press Reconnect. | `statusFind` in `WhatsAppProvider.js`, `onStatus` in `sessionService.js` |
+| The phone or WhatsApp unlinks the device while the number is connected (WPPConnect `disconnectedMobile`) | It was ignored, so the number kept looking connected while it was gone, no new messages arrived, and nothing said why. Now handled like `UNPAIRED` below: `EXPIRED`, not restored, owner and managers told. WPPConnect also reports `disconnectedMobile` once at the start of a number that was never linked; that one is ignored. Before acting (`SESSION_UNLINK_CONFIRM_MS`, 2 s) the page is asked whether it is really logged out, so a blip is not mistaken for an unlink. | `statusFind` in `WhatsAppProvider.js` |
 | WhatsApp's stream drops and does not come back within `STREAM_DOWN_RESTART_MS` (90 s) | The browser is restarted. If it comes back by itself nothing is done. | `onWhatsAppStream` |
 
 ## What is recorded: `whatsapp_session_events`
@@ -45,8 +47,15 @@ One row per event (migration 052), kept 90 days; no message or contact data. `ev
 | `claim_error` / `claim_released` / `claim_lost` | `database`, `database_unavailable`, `another_worker` | trouble with the number's claim in the database |
 | `whatsapp_state` | `CONFLICT`, `UNPAIRED`, `PROXYBLOCK`, `TOS_BLOCK` ... | what WhatsApp itself reported |
 | `conflict` | `took_back`, `could_not_take_back` | the outcome of "Use here" |
-| `unlinked` | `whatsapp_unpaired` | the phone unlinked the device |
+| `unlinked` | `whatsapp_unpaired` | the phone (or WhatsApp) unlinked the device |
+| `removed` | `removed_by_user`, `company_deleted` | **the only way this server ever unlinks a phone**: "Remove this number" (or deleting the company). `detail` says whether the phone could be unlinked and who asked |
+| `disconnected` | `device_sync_timeout` | the number was linked but its chats had not finished loading in time (see above) |
 | `stream_down` / `stream_up` | `whatsapp`, `came_back_by_itself` | WhatsApp's connection dropped / returned |
+
+**"The number vanished from the phone's Linked devices": was it us?** Look for `removed` just before: that is someone pressing
+"Remove this number" (and who). An `unlinked:whatsapp_unpaired` with no `removed` before it was done by the phone, the person at the
+phone, or WhatsApp. Numbers that keep getting unlinked right after linking are worth a look at the first sync (`device_sync_timeout`)
+and at the server's address (WhatsApp is stricter with linked devices that connect from a data centre).
 
 On the server, `node scripts/diagnose-numbers.mjs` prints the counts per cause for 7 days and the latest 40 events (read-only; phone
 numbers masked). A drop with no `restart`, `closed` or `claim_*` event before it came from outside: the browser died on its own
@@ -56,7 +65,7 @@ numbers masked). A drop with no `restart`, `closed` or `claim_*` event before it
 
 `SESSION_START_CONCURRENCY`, `SESSION_RETRY_BASE_MS`, `SESSION_RETRY_MAX_MS`, `SESSION_LEASE_TICK_MS`, `SESSION_LEASE_GRACE_MS`,
 `SESSION_RECOVER_EVERY_MS`, `SESSION_LAUNCH_TIMEOUT_MS`, `SHUTDOWN_GRACE_MS`, `BROWSER_CLOSE_TIMEOUT_MS`, `BROWSER_TERM_GRACE_MS`,
-`HEARTBEAT_RESTART_AFTER`, `HEARTBEAT_RESTART_COOLDOWN_MS`, `STREAM_DOWN_RESTART_MS`. The defaults are the tested ones.
+`HEARTBEAT_RESTART_AFTER`, `HEARTBEAT_RESTART_COOLDOWN_MS`, `STREAM_DOWN_RESTART_MS`, `SESSION_DEVICE_SYNC_TIMEOUT_MS`, `SESSION_UNLINK_CONFIRM_MS`. The defaults are the tested ones.
 
 ## Server settings that go with it (not in the code)
 
@@ -77,6 +86,6 @@ numbers masked). A drop with no `restart`, `closed` or `claim_*` event before it
 
 `tests/session-stability.test.js` (a failing database does not close a healthy number; recovery launches two at a time and does not
 block the server; backoff; shutdown closes in parallel within a limit; a silent number is restarted once per cooldown; `CONFLICT`,
-`UNPAIRED` and stream drops; history and pruning; process guards), `tests/browser-process.test.js` (SIGTERM before SIGKILL). Real
+`UNPAIRED` and stream drops; history and pruning; process guards), `tests/browser-process.test.js` (SIGTERM before SIGKILL), `tests/session-linking.test.js` (a slow first sync is not an unscanned QR code and is retried from the saved login, a phone-side unlink is recognised, removal is on record). Real
 Chromium and WhatsApp are not in them: a stand-in plays WhatsApp. **Verify on a spare number before relying on it**: restart the
 server three times and check that the number returns without a QR code; kill its browser and check it returns within two minutes.

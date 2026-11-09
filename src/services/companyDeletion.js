@@ -128,7 +128,7 @@ export async function deleteCompany({ tenantId, confirmName, actor, io = null })
   const sessions = (await query("SELECT session_name FROM whatsapp_sessions WHERE tenant_id=$1 ORDER BY created_at", [tenantId])).rows;
   for (const { session_name: name } of sessions) {
     try {
-      const { unlinked } = await removeTenantSession(tenantId, name, io);
+      const { unlinked } = await removeTenantSession(tenantId, name, io, { cause: "company_deleted", actorId: actor?.id ?? null });
       if (!unlinked) numbersNotUnlinked.push(name);
     } catch (error) {
       // the number's records go with the company either way; the phone still shows it under Linked devices

@@ -80,6 +80,11 @@ export const ENV = {
   SHUTDOWN_GRACE_MS: whole("SHUTDOWN_GRACE_MS", 30000, 1000),
   BROWSER_CLOSE_TIMEOUT_MS: whole("BROWSER_CLOSE_TIMEOUT_MS", 15000, 50),
   BROWSER_TERM_GRACE_MS: whole("BROWSER_TERM_GRACE_MS", 5000, 0),
+  // how long a number that has just logged in is given to finish loading its chats before its browser is closed (WPPConnect's own
+  // default is 3 minutes, which a phone with a lot of history cannot meet: the number then never finishes linking). 0 = no limit.
+  SESSION_DEVICE_SYNC_TIMEOUT_MS: whole("SESSION_DEVICE_SYNC_TIMEOUT_MS", 900000, 0),
+  // WPPConnect reports a phone-side unlink; this long after it, the page is asked whether it is really logged out before the number is given up
+  SESSION_UNLINK_CONFIRM_MS: whole("SESSION_UNLINK_CONFIRM_MS", 2000, 0),
   // a connected number that fails this many checks in a row (one a minute) has its browser restarted, at most once per cooldown
   HEARTBEAT_RESTART_AFTER: whole("HEARTBEAT_RESTART_AFTER", 3, 1),
   HEARTBEAT_RESTART_COOLDOWN_MS: whole("HEARTBEAT_RESTART_COOLDOWN_MS", 600000, 0),

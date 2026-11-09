@@ -16,6 +16,9 @@ export function friendlyStartError(error) {
     return "The previous connection for this number was still shutting down. Please try again.";
   return message.replace(/(?:\/[\w.@:+-]+){2,}\/?/g, "…").slice(0, 300);
 }
+// Shown on the number when it was linked (or logged in) but WhatsApp had not finished loading its chats when the time limit ran out.
+const DEVICE_SYNC_MESSAGE =
+  "WhatsApp had not finished loading this number's chats when the waiting time ran out. Keep the phone unlocked with WhatsApp open, then press Reconnect; a phone with a lot of chats can take several minutes.";
 const workerId = crypto.randomUUID(),
   owned = new Map();
 let recoveryTimer;
@@ -296,9 +299,15 @@ export async function startTenantSession(
                 rowCount && notifySessionLost({ io, tenantId, sessionName, status }),
               )
               .catch((e) => console.error("Session notification failed:", e.message));
+            // A number that was linked but whose chats had not finished loading is started again from its saved login, which needs no
+            // new scan (a new scan would add another linked device to the phone), a few times before a person is asked to step in.
+            const syncTimeout = cause === "device_sync_timeout";
             await query(
-              "UPDATE whatsapp_sessions SET worker_id=NULL,lease_until=NULL,restore_on_start=($3 AND phone IS NOT NULL) WHERE tenant_id=$1 AND session_name=$2 AND worker_id=$4",
-              [tenantId, sessionName, status !== "EXPIRED", workerId],
+              `UPDATE whatsapp_sessions SET worker_id=NULL,lease_until=NULL,
+                 restore_on_start=(($3::boolean AND phone IS NOT NULL) OR ($5::boolean AND reconnect_attempts < 3)),
+                 last_error=CASE WHEN $5::boolean THEN $6::text ELSE last_error END
+               WHERE tenant_id=$1 AND session_name=$2 AND worker_id=$4`,
+              [tenantId, sessionName, status !== "EXPIRED", workerId, syncTimeout, DEVICE_SYNC_MESSAGE],
             );
           }
           emitForSession(io, tenantId, sessionName, "session:status", {
@@ -333,8 +342,13 @@ export async function startTenantSession(
     .catch(async (error) => {
       // Cancelled on purpose: the canceller cleaned up, and a newer start may own this session now.
       if (error?.code === "SESSION_CANCELLED") return;
-      // a start that has been replaced is the newer start's business, not this one's
-      if (!current()) return console.warn(`A replaced start of ${sessionName} failed (${error.message}); ignored`);
+      if (!current()) {
+        // A newer start owns this number: its failure is not this one's business. If nobody does, this start's drop was already handled
+        // by a status report (a timeout, for one), and the library has left its browser running: make sure it is gone.
+        if (owned.has(key)) return console.warn(`A replaced start of ${sessionName} failed (${error.message}); ignored`);
+        await provider.closeSession(tenantId, sessionName).catch(() => {});
+        return;
+      }
       clearInterval(claim);
       owned.delete(key);
       clearStreamTimer(key);
@@ -361,7 +375,7 @@ export async function startTenantSession(
 }
 // Permanently remove a number: unlink it from the phone, stop the browser, delete the saved
 // login and forget the session. Inbox history is kept.
-export async function removeTenantSession(tenantId, sessionName, io) {
+export async function removeTenantSession(tenantId, sessionName, io, { cause = "removed_by_user", actorId = null } = {}) {
   const unlinked = await provider.logoutSession(tenantId, sessionName);
   await closeTenantSession(tenantId, sessionName, io, false, "removed");
   provider.deleteTokens(tenantId, sessionName);
@@ -369,6 +383,16 @@ export async function removeTenantSession(tenantId, sessionName, io) {
     "DELETE FROM whatsapp_sessions WHERE tenant_id=$1 AND session_name=$2",
     [tenantId, sessionName],
   );
+  // The one way this server ever unlinks a phone. When a number vanishes from the phone's Linked devices, this record says whether
+  // it was us (and who asked) or not.
+  await recordSessionEvent({
+    tenantId,
+    sessionName,
+    event: "removed",
+    cause,
+    detail: `${unlinked ? "unlinked from the phone" : "could not be unlinked from the phone"}${actorId ? `; asked by user ${actorId}` : ""}`,
+    workerId,
+  });
   return { unlinked };
 }
 export async function closeTenantSession(

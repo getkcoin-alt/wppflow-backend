@@ -179,6 +179,7 @@ router.delete(
       req.tenantId,
       req.params.sessionName,
       req.app.get("io"),
+      { actorId: req.user?.id ?? null },
     );
     res.json({
       status: "success",

@@ -5,6 +5,13 @@ import { ENV } from "../../config/env.js";
 import { ACK_STATUS, SESSION_STATUS } from "../../config/constants.js";
 import { stopBrowsers, clearProfileLocks } from "./browserProcess.js";
 
+// How a number's browser is started and logged in: WPPConnect's create(). A seam so that tests can play WhatsApp's login (a slow first
+// sync, an unscanned QR code, an unlinked device) without a browser.
+let createClient = (options) => wppconnect.create(options);
+export function setClientFactory(factory) {
+  createClient = factory || ((options) => wppconnect.create(options));
+}
+
 const MEDIA_TYPES = new Set([
   "image",
   "video",
@@ -126,11 +133,36 @@ export class WhatsAppProvider {
         } else if (statusSession === "qrReadSuccess") {
           sessionState.status = SESSION_STATUS.AUTHENTICATING;
           sessionState.qrcode = null;
+          sessionState.scanned = true;
           notify(callbacks.onStatus, SESSION_STATUS.AUTHENTICATING);
+        } else if (statusSession === "phoneNotConnected") {
+          // Logged in, but WhatsApp did not finish loading the chats within deviceSyncTimeout; autocloseCalled follows at once.
+          sessionState.syncTimedOut = true;
         } else if (statusSession === "autocloseCalled") {
-          sessionState.status = SESSION_STATUS.EXPIRED;
           sessionState.qrcode = null;
-          notify(callbacks.onStatus, SESSION_STATUS.EXPIRED, "qr_not_scanned");
+          if (sessionState.syncTimedOut || sessionState.scanned) {
+            // Not an unscanned QR code: the number was linked, and its chats were still loading when the time ran out. Asking for another
+            // scan would add another linked device to the phone; starting it again from its saved login finishes the job.
+            sessionState.status = SESSION_STATUS.DISCONNECTED;
+            notify(callbacks.onStatus, SESSION_STATUS.DISCONNECTED, "device_sync_timeout");
+          } else {
+            sessionState.status = SESSION_STATUS.EXPIRED;
+            notify(callbacks.onStatus, SESSION_STATUS.EXPIRED, "qr_not_scanned");
+          }
+        } else if (statusSession === "disconnectedMobile") {
+          // The device is no longer registered: the phone (or WhatsApp) unlinked it. WPPConnect also reports this once at the start of a
+          // number that was never linked, so it only counts for a number that had connected. And it is checked again after a moment:
+          // if the page is still logged in, it was a blip, and a number that is fine must not become "scan the QR code again".
+          if (sessionState.client && sessionState.status === SESSION_STATUS.CONNECTED) {
+            const client = sessionState.client;
+            const confirm = setTimeout(async () => {
+              if (this.sessions.get(key) !== sessionState) return; // closed or replaced meanwhile
+              const stillLoggedIn = typeof client.isAuthenticated === "function" ? await client.isAuthenticated().catch(() => false) : false;
+              if (stillLoggedIn === true) return console.warn(`WhatsApp ${sessionName}: reported unlinked, but the page is still logged in; ignored`);
+              notify(callbacks.onState, "UNPAIRED");
+            }, ENV.SESSION_UNLINK_CONFIRM_MS);
+            confirm.unref?.();
+          }
         } else if (
           statusSession === "browserClose" ||
           statusSession === "serverClose"
@@ -141,6 +173,9 @@ export class WhatsAppProvider {
         }
       },
       autoClose: ENV.QR_TIMEOUT_MS,
+      // After login WPPConnect gives the number this long to finish loading its chats, then closes the page. Its default (3 minutes) is
+      // too short for a phone with a lot of history, and an interrupted first sync is how a number "links" but never connects.
+      deviceSyncTimeout: ENV.SESSION_DEVICE_SYNC_TIMEOUT_MS,
       headless: true,
       useChrome: true,
       devtools: false,
@@ -170,11 +205,11 @@ export class WhatsAppProvider {
     let client;
     try {
       try {
-        client = await wppconnect.create(createOptions);
+        client = await createClient(createOptions);
       } catch (error) {
         if (!/already running/i.test(String(error?.message))) throw error;
         await this.releaseProfile(tenantId, sessionName);
-        client = await wppconnect.create(createOptions);
+        client = await createClient(createOptions);
       }
     } catch (error) {
       // Cancelled or replaced while starting (the pairing was closed, the number removed): whoever did

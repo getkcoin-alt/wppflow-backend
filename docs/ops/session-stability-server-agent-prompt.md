@@ -121,7 +121,7 @@ cd ~/.pm2/logs && ls -la wppflow*
 grep -E "Backend deployment started|Deployed|Rolling back|Finished with exit code" /var/log/wppflow-backend-deploy.log | tail -60
 grep -hc "Scriwo backend running on port" wppflow*-out.log*                    # process starts in the retained logs
 grep -hE "orphaned browser|leftover browser" wppflow*-out.log* wppflow*-error.log* | sort | uniq -c | tail
-grep -hE "WhatsApp [^:]+: (notLogged|qrReadSuccess|qrReadFail|autocloseCalled|browserClose|serverClose|desconnectedMobile|deleteToken)|QR code ready|Session start failed|Session recovery failed" wppflow*-out.log* wppflow*-error.log* | sed -E 's/[A-Za-z0-9_+\/=-]{40,}/<hidden>/g' | tail -200
+grep -hE "WhatsApp [^:]+: (notLogged|qrReadSuccess|qrReadFail|qrReadError|isLogged|inChat|phoneNotConnected|autocloseCalled|disconnectedMobile|browserClose|serverClose)|QR code ready|Session Unpaired|Auto Close Called|Phone not connected|WhatsApp logout for|Session start failed|Session recovery failed" wppflow*-out.log* wppflow*-error.log* | sed -E 's/[A-Za-z0-9_+\/=-]{40,}/<hidden>/g' | tail -200
 grep -hE "UnhandledPromiseRejection|unhandled|uncaught|Target closed|Protocol error|Execution context was destroyed|Page crashed|timeout exceeded when trying to connect|too many clients|ECONNRESET|ENOMEM|EMFILE|CONFLICT" wppflow*-error.log* wppflow*-out.log* | sed -E 's/[A-Za-z0-9_+\/=-]{40,}/<hidden>/g' | sort | uniq -c | sort -rn | head -30
 ```
 
