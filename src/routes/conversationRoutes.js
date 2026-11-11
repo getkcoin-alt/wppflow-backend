@@ -8,6 +8,8 @@ import {
 } from "../middleware/auth.js";
 import crypto from "node:crypto";
 import { query } from "../db/index.js";
+import { ENV } from "../config/env.js";
+import { withDeadline } from "../services/deadline.js";
 import { route, fail } from "../middleware/http.js";
 import { defaultWhatsAppProvider as provider } from "../services/whatsapp/WhatsAppProvider.js";
 import { formatConversation, withLabels } from "../services/conversationService.js";
@@ -371,28 +373,40 @@ router.get("/:id/messages", async (req, res) => {
       // Older history is a bonus: if WhatsApp is unreachable, show what we already have,
       // and say why so the screen can explain an empty chat.
       try {
-        const messages = await provider.getHistory(
+        const pulled = provider.getHistory(
           req.tenantId,
           rows[0].session_name,
           rows[0].provider_chat_id,
         );
-        let stored = await adoptMisfiledMessages({
-          tenantId: req.tenantId,
-          sessionName: rows[0].session_name,
-          conversationId: rows[0].id,
-          providerMessageIds: messages.map((m) => m.providerMessageId),
-        });
-        for (const msg of messages)
-          if (
-            await handleIncomingMessage({
-              tenantId: req.tenantId,
-              sessionName: rows[0].session_name,
-              msg,
-              history: true,
-            })
-          )
-            stored++;
-        historySync = { fetched: messages.length, stored };
+        const keep = async (messages) => {
+          let stored = await adoptMisfiledMessages({
+            tenantId: req.tenantId,
+            sessionName: rows[0].session_name,
+            conversationId: rows[0].id,
+            providerMessageIds: messages.map((m) => m.providerMessageId),
+          });
+          for (const msg of messages)
+            if (
+              await handleIncomingMessage({
+                tenantId: req.tenantId,
+                sessionName: rows[0].session_name,
+                msg,
+                history: true,
+              })
+            )
+              stored++;
+          return stored;
+        };
+        let messages;
+        try {
+          messages = await withDeadline(pulled, ENV.HISTORY_ON_OPEN_TIMEOUT_MS, "WhatsApp");
+        } catch (error) {
+          // WhatsApp is slow (a number that has just linked is still loading its chats): the chat opens with what is saved, without
+          // keeping the person waiting until a proxy gives up, and the messages are kept if they do arrive
+          if (error.code === "DEADLINE") pulled.then(keep).catch((e) => console.warn(`Late history for a chat was not kept: ${e.message}`));
+          throw error;
+        }
+        historySync = { fetched: messages.length, stored: await keep(messages) };
       } catch (error) {
         console.warn(`History sync skipped: ${error.message}`);
         historySync = {

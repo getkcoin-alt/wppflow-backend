@@ -157,11 +157,15 @@ export async function pingSessions({ timeoutMs = 8000, io = null, nowMs = Date.n
            last_heartbeat_ok_at=CASE WHEN $3::boolean THEN now() ELSE last_heartbeat_ok_at END,
            heartbeat_failures=CASE WHEN $3::boolean THEN 0 ELSE heartbeat_failures+1 END,
            heartbeat_error=CASE WHEN $3::boolean THEN NULL ELSE $4 END
-         WHERE tenant_id=$1 AND session_name=$2 RETURNING heartbeat_failures`,
+         WHERE tenant_id=$1 AND session_name=$2 RETURNING heartbeat_failures,connected_since`,
         [s.tenantId, s.sessionName, result.ok, result.ok ? null : result.error || "No answer"],
       );
       const key = `${s.tenantId}:${s.sessionName}`;
-      if (result.ok || (rows[0]?.heartbeat_failures ?? 0) < ENV.HEARTBEAT_RESTART_AFTER) return;
+      // A number that has only just connected is still loading its chats in the background, and a browser that is that busy answers
+      // slowly. Restarting it then would interrupt the very sync it needs, so while it settles it is given three times as many misses.
+      const settling = rows[0]?.connected_since && nowMs - new Date(rows[0].connected_since).getTime() < ENV.HEARTBEAT_SETTLE_MS;
+      const misses = settling ? ENV.HEARTBEAT_RESTART_AFTER * 3 : ENV.HEARTBEAT_RESTART_AFTER;
+      if (result.ok || (rows[0]?.heartbeat_failures ?? 0) < misses) return;
       if (nowMs - (restartedAt.get(key) ?? -Infinity) < ENV.HEARTBEAT_RESTART_COOLDOWN_MS) return;
       restartedAt.set(key, nowMs);
       // not awaited: a restart takes a minute, and the background jobs that call this must not wait for it

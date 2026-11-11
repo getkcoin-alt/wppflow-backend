@@ -5,6 +5,7 @@ import { syncConversations } from "./conversationService.js";
 import { handleIncomingMessage, adoptMisfiledMessages } from "./messageService.js";
 import { syncContacts } from "../routes/contactRoutes.js";
 import { emitForSession } from "./realtime.js";
+import { withDeadline } from "./deadline.js";
 
 // How much history each pass pulls. Live messages already arrive instantly; this only
 // fills the first-time view and repairs anything missed while the server was away.
@@ -17,6 +18,8 @@ const running = new Set();
 let timer;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const report = (io, tenantId, sessionName, phase, done = 0, total = 0, extra = {}) =>
+  emitForSession(io, tenantId, sessionName, "sync:progress", { sessionName, phase, done, total, ...extra });
 
 // mode "auto": a session with no chats yet gets the first-time backfill, otherwise only
 // chats that changed since we last looked are refreshed.
@@ -24,14 +27,7 @@ export async function syncSession({ tenantId, sessionName, io = null, mode = "au
   const key = `${tenantId}:${sessionName}`;
   if (running.has(key)) return { skipped: true };
   running.add(key);
-  const progress = (phase, done = 0, total = 0, extra = {}) =>
-    emitForSession(io, tenantId, sessionName, "sync:progress", {
-      sessionName,
-      phase,
-      done,
-      total,
-      ...extra,
-    });
+  const progress = (phase, done = 0, total = 0, extra = {}) => report(io, tenantId, sessionName, phase, done, total, extra);
   try {
     const known = new Map(
       (
@@ -45,9 +41,12 @@ export async function syncSession({ tenantId, sessionName, io = null, mode = "au
     const { chats: chatLimit, messages: messageLimit } = LIMITS[kind];
     progress("chats");
 
-    const remote = await provider.syncConversations(tenantId, sessionName);
+    // WhatsApp's browser can be busy for minutes (a number that has just linked is still loading): no step waits for ever, so
+    // that a stuck call cannot leave this number "syncing" until the server is restarted
+    const remote = await withDeadline(provider.syncConversations(tenantId, sessionName), ENV.SYNC_STEP_TIMEOUT_MS, "Reading the chat list");
     await syncConversations({ tenantId, sessionName, io, remote });
-    if (kind === "initial") await syncContacts(tenantId, sessionName).catch((e) => console.error("Contact sync:", e.message));
+    if (kind === "initial")
+      await withDeadline(syncContacts(tenantId, sessionName), ENV.SYNC_STEP_TIMEOUT_MS, "Reading the contacts").catch((e) => console.error("Contact sync:", e.message));
 
     const pending = remote
       .filter((c) => !known.has(c.id) || c.lastActiveEpoch > known.get(c.id))
@@ -57,7 +56,7 @@ export async function syncSession({ tenantId, sessionName, io = null, mode = "au
     for (const chat of pending) {
       progress("messages", done, pending.length);
       try {
-        const history = await provider.getHistory(tenantId, sessionName, chat.id, messageLimit);
+        const history = await withDeadline(provider.getHistory(tenantId, sessionName, chat.id, messageLimit), ENV.SYNC_HISTORY_TIMEOUT_MS, "Reading a chat's messages");
         const target = await query(
           "SELECT id FROM conversations WHERE tenant_id=$1 AND session_name=$2 AND provider_chat_id=$3",
           [tenantId, sessionName, chat.id],
@@ -87,6 +86,31 @@ export async function syncSession({ tenantId, sessionName, io = null, mode = "au
   } finally {
     running.delete(key);
   }
+}
+
+// The inbox's sync button: read the contacts, then the chat list. It used to do all of this inside the web request, and on a phone with a
+// lot of contacts and chats that takes longer than the proxies in front of the server wait, so the person saw "The server returned an
+// invalid response" while the work carried on unseen. Now it starts the work and answers at once; the screen follows it through
+// sync:progress and refreshes when it is done. One sync per number at a time: pressing it again while it runs does nothing.
+export function startInboxSync({ tenantId, sessionName, io = null }) {
+  const key = `${tenantId}:${sessionName}`;
+  if (running.has(key)) return { started: false, alreadyRunning: true };
+  running.add(key);
+  void (async () => {
+    report(io, tenantId, sessionName, "chats");
+    try {
+      await withDeadline(syncContacts(tenantId, sessionName), ENV.SYNC_STEP_TIMEOUT_MS, "Reading the contacts");
+      const result = await withDeadline(syncConversations({ tenantId, sessionName, io }), ENV.SYNC_STEP_TIMEOUT_MS, "Reading the chats");
+      emitForSession(io, tenantId, sessionName, "inbox:synced", { sessionName });
+      report(io, tenantId, sessionName, "done", 0, 0, { kind: "manual", chats: result?.chats ?? undefined });
+    } catch (error) {
+      console.error(`Inbox sync for ${sessionName} failed:`, error.message, process.env.SYNC_DEBUG ? error.stack : "");
+      report(io, tenantId, sessionName, "failed", 0, 0, { message: "Sync will retry automatically" });
+    } finally {
+      running.delete(key);
+    }
+  })();
+  return { started: true };
 }
 
 // Called when a phone connects: wait a moment for WhatsApp Web to finish loading.

@@ -211,6 +211,7 @@ test("Keeping linked numbers connected: what the server does by itself", async (
   await t.test("a number that stops answering has its browser restarted, once, not over and over", async () => {
     ENV.HEARTBEAT_RESTART_AFTER = 3;
     ENV.HEARTBEAT_RESTART_COOLDOWN_MS = 60_000;
+    ENV.HEARTBEAT_SETTLE_MS = 0; // (the settling period has its own test below)
     await startTenantSession(tenantId, "hb-1", io, owner.user.id);
     await until(async () => (await row("hb-1"))?.status === "CONNECTED", 3000, "hb-1 connected");
     fake.clients["hb-1"].isConnected = async () => {
@@ -240,6 +241,38 @@ test("Keeping linked numbers connected: what the server does by itself", async (
     await until(() => fake.starts.includes("hb-1"), 3000, "restarted again after the cooldown");
     await until(async () => (await row("hb-1"))?.status === "CONNECTED", 3000, "back again");
     await stopAll("hb-1");
+  });
+
+  await t.test("a number that has only just connected, and is still loading its chats, is given three times as many misses before its browser is restarted", async () => {
+    ENV.HEARTBEAT_RESTART_AFTER = 3;
+    ENV.HEARTBEAT_RESTART_COOLDOWN_MS = 60_000;
+    ENV.HEARTBEAT_SETTLE_MS = 15 * 60_000;
+    await startTenantSession(tenantId, "settle-1", io, owner.user.id);
+    await until(async () => (await row("settle-1"))?.status === "CONNECTED", 3000, "settle-1 connected");
+    fake.clients["settle-1"].isConnected = async () => {
+      throw new Error("the page is busy");
+    };
+    fake.starts.length = 0;
+    fake.closes.length = 0;
+    const now = Date.now();
+    for (let i = 0; i < 8; i++) await pingSessions({ io, nowMs: now + i * 60_000 });
+    await sleep(150);
+    assert.deepEqual(fake.closes, [], "eight misses in the first minutes are not enough");
+    await pingSessions({ io, nowMs: now + 8 * 60_000 }); // the ninth
+    await until(() => fake.starts.includes("settle-1"), 3000, "restarted after the ninth miss");
+    await until(async () => (await row("settle-1"))?.status === "CONNECTED", 3000, "back");
+
+    // once it has settled (the clock moves past the settling time) the usual three are enough
+    fake.clients["settle-1"].isConnected = async () => false;
+    fake.starts.length = 0;
+    const later = Date.now() + 30 * 60_000;
+    for (let i = 0; i < 2; i++) await pingSessions({ io, nowMs: later + i * 60_000 });
+    await sleep(120);
+    assert.deepEqual(fake.starts, []);
+    await pingSessions({ io, nowMs: later + 2 * 60_000 });
+    await until(() => fake.starts.includes("settle-1"), 3000, "restarted after three misses once settled");
+    await until(async () => (await row("settle-1"))?.status === "CONNECTED", 3000, "back again");
+    await stopAll("settle-1");
   });
 
   await t.test("WhatsApp says another window took over: the number is taken back, not dropped", async () => {

@@ -13,11 +13,10 @@ import {
   removeTenantSession,
   validateSession,
 } from "../services/sessionService.js";
-import { syncConversations } from "../services/conversationService.js";
-import { syncContacts } from "./contactRoutes.js";
+import { startInboxSync } from "../services/syncService.js";
 import { route, fail } from "../middleware/http.js";
 import { isManager, assertSessionAccess } from "../services/access.js";
-import { emitForSession, forgetSessionOwner } from "../services/realtime.js";
+import { forgetSessionOwner } from "../services/realtime.js";
 import { numberHealth, numberHealthView, THRESHOLDS } from "../services/numberHealth.js";
 const router = express.Router();
 router.use(authenticateToken, requireTenantContext, requireScope("sessions"));
@@ -217,20 +216,14 @@ router.post(
   "/:sessionName/sync-inbox",
   route(async (req, res) => {
     await assertSessionAccess(req, req.params.sessionName);
-    await syncContacts(req.tenantId, req.params.sessionName);
-    const result = await syncConversations({
+    // The sync can take minutes on a phone with a lot of chats, longer than the proxies in front of the server wait for an answer.
+    // It runs in the background (services/syncService.startInboxSync) and the screen follows it through the sync:progress events.
+    const result = startInboxSync({
       tenantId: req.tenantId,
       sessionName: req.params.sessionName,
       io: req.app.get("io"),
     });
-    emitForSession(
-      req.app.get("io"),
-      req.tenantId,
-      req.params.sessionName,
-      "inbox:synced",
-      { sessionName: req.params.sessionName },
-    );
-    res.json(result);
+    res.status(202).json({ status: "success", ...result });
   }),
 );
 export default router;

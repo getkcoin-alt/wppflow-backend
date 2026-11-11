@@ -85,6 +85,12 @@ export const ENV = {
   SESSION_DEVICE_SYNC_TIMEOUT_MS: whole("SESSION_DEVICE_SYNC_TIMEOUT_MS", 900000, 0),
   // WPPConnect reports a phone-side unlink; this long after it, the page is asked whether it is really logged out before the number is given up
   SESSION_UNLINK_CONFIRM_MS: whole("SESSION_UNLINK_CONFIRM_MS", 2000, 0),
+  // the inbox sync and opening a chat wait on WhatsApp's browser, which can be busy for minutes: how long each step is given
+  SYNC_STEP_TIMEOUT_MS: whole("SYNC_STEP_TIMEOUT_MS", 120000, 50),
+  SYNC_HISTORY_TIMEOUT_MS: whole("SYNC_HISTORY_TIMEOUT_MS", 45000, 50),
+  HISTORY_ON_OPEN_TIMEOUT_MS: whole("HISTORY_ON_OPEN_TIMEOUT_MS", 20000, 50),
+  // a number that has just connected is still loading in the background; its browser is not restarted for being slow until it has had this long
+  HEARTBEAT_SETTLE_MS: whole("HEARTBEAT_SETTLE_MS", 900000, 0),
   // a connected number that fails this many checks in a row (one a minute) has its browser restarted, at most once per cooldown
   HEARTBEAT_RESTART_AFTER: whole("HEARTBEAT_RESTART_AFTER", 3, 1),
   HEARTBEAT_RESTART_COOLDOWN_MS: whole("HEARTBEAT_RESTART_COOLDOWN_MS", 600000, 0),

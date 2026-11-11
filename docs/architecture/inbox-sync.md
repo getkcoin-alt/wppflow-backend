@@ -21,6 +21,8 @@ reconnect, and no one presses a "sync" button.
 | Live | WhatsApp event | `handleIncomingMessage` stores the message idempotently, then emits `message:received` **with the updated conversation** to the session owner and company managers only. |
 | First-time backfill | A phone connects and has no chats yet | `syncSession` imports contacts (batched), the chat list, and the last 30 messages of the 40 most recent chats, throttled, with `sync:progress` events for a "Syncing your WhatsApp… 12 of 40" banner. History import never raises unread counts or triggers automations/webhooks. |
 | Reconcile | A phone reconnects, then every `SYNC_RECONCILE_MS` (5 min) | Compares WhatsApp's chat list with ours and re-reads only chats that are newer (max 25 chats × 20 messages). Repairs anything missed while the server was down. |
+| Manual (the sync button) | Someone presses it | Starts the same kind of work (contacts, then the chat list) **in the background** and answers at once (`202`, `{ started }`); one at a time per number (pressing it again while it runs does nothing). The screen follows `sync:progress` and refreshes on `inbox:synced`. It used to run inside the web request, and on a phone with a lot of chats that outlasted the proxies in front of the server: the person saw "The server returned an invalid response" while the work carried on unseen. |
+| Opening a chat | A chat is opened | Asks WhatsApp for the chat's recent history and waits at most `HISTORY_ON_OPEN_TIMEOUT_MS` (20 s). If WhatsApp is slower (a number that has just linked is busy loading), the chat opens with what is saved and says so; the messages are kept when they arrive. |
 | Catch-up (browser) | Socket (re)connect, tab becomes visible, network returns, every 60 s | `GET /api/conversations/changes?since=` returns just the conversations changed after the last sync point (agents: their own sessions only). |
 
 ## In the browser
@@ -43,6 +45,9 @@ collapse), the chat moves to the top with its unread badge, read receipts only m
 |---|---|---|
 | `SYNC_RECONCILE_MS` | 300000 | Interval of the repair pass; `0` disables it. |
 | `QR_TIMEOUT_MS` | 180000 | How long an unscanned QR stays valid. |
+| `SYNC_STEP_TIMEOUT_MS` | 120000 | Most a sync step (the contacts, the chat list) waits for WhatsApp's browser. Past it the sync is reported as failed and tried again by the next pass; it never leaves a number "syncing" for ever. |
+| `SYNC_HISTORY_TIMEOUT_MS` | 45000 | Most one chat's messages are waited for during a sync; that chat is skipped. |
+| `HISTORY_ON_OPEN_TIMEOUT_MS` | 20000 | Most opening a chat waits for its history from WhatsApp. |
 
 ## Known limits
 
