@@ -75,6 +75,16 @@ export const ENV = {
   // a number that keeps failing is retried after this, doubling each time up to the maximum
   SESSION_RETRY_BASE_MS: whole("SESSION_RETRY_BASE_MS", 30000, 0),
   SESSION_RETRY_MAX_MS: whole("SESSION_RETRY_MAX_MS", 600000, 0),
+  // ... and after this many tries in a row without a connection (about an hour and a half at the settings above) it stops trying until the
+  // server restarts (one more try per number, then) or a person presses Reconnect. Each try launches a whole browser, so a number that
+  // cannot start must not do it for ever on a small server.
+  SESSION_MAX_AUTO_ATTEMPTS: whole("SESSION_MAX_AUTO_ATTEMPTS", 12, 1),
+  // what the server keeps an eye on in itself (src/services/vitals.js, shown on /health): how often it looks, how many readings it keeps (60
+  // at 10 s is ten minutes), and from how long on a request or a background job is called slow and logged
+  VITALS_SAMPLE_MS: whole("VITALS_SAMPLE_MS", 10000, 50),
+  VITALS_KEEP: whole("VITALS_KEEP", 60, 1),
+  SLOW_REQUEST_MS: whole("SLOW_REQUEST_MS", 2000, 1),
+  SLOW_JOB_MS: whole("SLOW_JOB_MS", 1000, 1),
   // stopping the server: the time given to close every number cleanly, to close one browser, and to a browser that is asked to quit
   // (SIGTERM) before it is forced to (SIGKILL). pm2's kill_timeout must be longer than SHUTDOWN_GRACE_MS.
   SHUTDOWN_GRACE_MS: whole("SHUTDOWN_GRACE_MS", 30000, 1000),

@@ -27,6 +27,10 @@ let recovering = false;
 const streamTimers = new Map();
 // numbers being restarted right now, so that two causes (a failed check and a dropped stream) do not restart one twice
 const restarting = new Set();
+// numbers the server has stopped retrying (SESSION_MAX_AUTO_ATTEMPTS): said once each, not at every pass of the recovery loop
+const gaveUp = new Set();
+const gaveUpMessage = (attempts) =>
+  `The server tried to bring this number back ${attempts} times in a row and could not, so it stopped trying. Open Numbers and press Reconnect (you may have to scan the QR code again).`;
 // resolves with `fallback` when `promise` takes longer than `ms`; the timer never keeps the process alive
 const within = (promise, ms, fallback) => {
   let timer;
@@ -275,6 +279,7 @@ export async function startTenantSession(
           await saveSessionStatus({ tenantId, sessionName, workerId, status, phone });
           if (status === "CONNECTED" && !connectedRecorded) {
             connectedRecorded = true;
+            gaveUp.delete(key); // back: a later outage is a new one, and is said again
             await recordSessionEvent({ tenantId, sessionName, event: "connected", cause: reason, workerId });
           }
           if (["DISCONNECTED", "EXPIRED"].includes(status)) {
@@ -449,6 +454,42 @@ export async function restartTenantSession(tenantId, sessionName, io, { cause = 
   }
 }
 
+// Says, once per outage, that the server has stopped retrying a number: on the number itself, in its history, to the people who look
+// after it. Never throws: the recovery loop must go on with the other numbers.
+async function giveUpOn({ io, tenantId, sessionName, attempts }) {
+  const key = `${tenantId}:${sessionName}`;
+  if (gaveUp.has(key)) return;
+  gaveUp.add(key);
+  try {
+    await query("UPDATE whatsapp_sessions SET last_error=$3 WHERE tenant_id=$1 AND session_name=$2 AND worker_id IS NULL", [
+      tenantId,
+      sessionName,
+      gaveUpMessage(attempts),
+    ]);
+    await recordSessionEvent({
+      tenantId,
+      sessionName,
+      event: "gave_up",
+      cause: "too_many_failures",
+      detail: `${attempts} automatic attempts in a row without a connection`,
+      workerId,
+    });
+    await notifySessionLost({ io, tenantId, sessionName, status: "GAVE_UP" });
+  } catch (error) {
+    console.error(`Could not record that ${sessionName} was given up:`, error.message);
+  }
+}
+// A server that has just started tries each number it had given up on once more (what made them fail may be over: a starved machine, a
+// deploy in the middle of a launch), and only once: a number that fails again is given up again. Returns how many numbers it concerns.
+export async function resetGivenUpNumbers() {
+  gaveUp.clear();
+  const { rowCount } = await query(
+    "UPDATE whatsapp_sessions SET reconnect_attempts=$1::int-1 WHERE restore_on_start=true AND reconnect_attempts>=$1::int",
+    [ENV.SESSION_MAX_AUTO_ATTEMPTS],
+  );
+  return rowCount;
+}
+
 // Brings back the numbers that are meant to be running but are not: the server was restarted, a browser died. At most
 // SESSION_START_CONCURRENCY browsers launch at a time (all of them at once is a spike of memory and processor that makes some of the
 // launches fail), and a number that keeps failing is retried less and less often (retryDelayMs).
@@ -459,8 +500,16 @@ export async function recoverSessions(io, { now = Date.now() } = {}) {
     const { rows } = await query(
       "SELECT tenant_id,session_name,reconnect_attempts,last_reconnect_at FROM whatsapp_sessions WHERE restore_on_start=true AND (lease_until IS NULL OR lease_until<now()) ORDER BY last_reconnect_at NULLS FIRST,created_at",
     );
+    // A number that has failed to come back this many times in a row is left alone: every try launches a whole browser (up to a minute and
+    // a half of processor and a few hundred MB), which on a small server slows everything else down. It is said once (history and the
+    // people who look after the number), and tried once more when the server next starts, or at once when a person presses Reconnect.
+    for (const s of rows)
+      if (s.reconnect_attempts >= ENV.SESSION_MAX_AUTO_ATTEMPTS)
+        await giveUpOn({ io, tenantId: s.tenant_id, sessionName: s.session_name, attempts: s.reconnect_attempts });
     const due = rows.filter(
-      (s) => !s.last_reconnect_at || now - new Date(s.last_reconnect_at).getTime() >= retryDelayMs(s.reconnect_attempts) * spread(s.session_name),
+      (s) =>
+        s.reconnect_attempts < ENV.SESSION_MAX_AUTO_ATTEMPTS &&
+        (!s.last_reconnect_at || now - new Date(s.last_reconnect_at).getTime() >= retryDelayMs(s.reconnect_attempts) * spread(s.session_name)),
     );
     let next = 0;
     let started = 0;
@@ -495,6 +544,7 @@ export async function recoverSessions(io, { now = Date.now() } = {}) {
 // The first pass runs in the background: bringing every number back can take minutes, and the server must answer its health check
 // (and be reachable) in the meantime.
 export async function restoreSessions(io) {
+  await resetGivenUpNumbers().catch((e) => console.warn("Could not reset the retry counters:", e.message));
   recoverSessions(io).catch((e) => console.error("Session recovery:", e.message));
   recoveryTimer = setInterval(
     () =>

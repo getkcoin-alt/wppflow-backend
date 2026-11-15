@@ -39,11 +39,14 @@ export function judge(r, nowMs = Date.now()) {
   if (!connected) {
     const down = sec(r.downSince);
     const trying = ["STARTING", "AUTHENTICATING"].includes(r.status);
+    // the server stops trying after SESSION_MAX_AUTO_ATTEMPTS (sessionService.js): say so, and what to do
+    const stopped = !trying && r.reconnectAttempts >= ENV.SESSION_MAX_AUTO_ATTEMPTS;
     problems.push({
       code: "down",
       text:
         `${trying ? "Reconnecting" : "Not connected"}${down !== null ? ` for ${span(down)}` : ""}` +
         (r.reconnectAttempts > 0 ? `. The server has tried to bring it back ${r.reconnectAttempts} time${r.reconnectAttempts === 1 ? "" : "s"}` : "") +
+        (stopped ? " and has stopped trying. Press Reconnect" : "") +
         ".",
       alert: down !== null && down >= THRESHOLDS.downMinutes * 60,
       title: `${r.label} has been disconnected for ${span(down ?? 0)}`,

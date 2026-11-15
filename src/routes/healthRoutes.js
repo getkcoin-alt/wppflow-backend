@@ -7,6 +7,7 @@ import { aiConfigured, aiProvider } from "../services/aiService.js";
 import { defaultWhatsAppProvider } from "../services/whatsapp/WhatsAppProvider.js";
 import { getEmailServiceStatus } from "../services/emailService.js";
 import { paymentsStatus } from "../services/billingService.js";
+import { vitalsSnapshot } from "../services/vitals.js";
 
 const router = express.Router();
 
@@ -42,6 +43,8 @@ router.get("/health", async (req, res) => {
     schemaVersion,
     emailService: getEmailServiceStatus(),
     activeSessions: activeSessionsCount,
+    // load, memory, event-loop delay, database connections waiting, browsers, the slowest request and job lately (docs/ops/server-vitals.md)
+    vitals: vitalsSnapshot(),
     uptime: Math.floor(process.uptime()),
     timestamp: new Date().toISOString(),
   });

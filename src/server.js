@@ -44,6 +44,7 @@ import otpSetupRoutes from "./routes/otpSetupRoutes.js";
 import { errorHandler } from "./middleware/http.js";
 import { restoreSessions, closeSessions } from "./services/sessionService.js";
 import { installProcessGuards } from "./services/processGuard.js";
+import { vitalsMiddleware, startVitals, stopVitals } from "./services/vitals.js";
 import { sweepOrphanBrowsers } from "./services/whatsapp/browserProcess.js";
 import { startDomainJobs, stopDomainJobs } from "./services/domainJobs.js";
 import { loadPlans, keepPlansFresh } from "./services/plans.js";
@@ -56,6 +57,8 @@ const server = http.createServer(app);
 // Trust first proxy hop (Nginx reverse proxy) so req.ip and rate limiters work accurately
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
+// First of all, so that every request is timed from the moment it arrives (services/vitals.js; slow ones are logged and shown on /health)
+app.use(vitalsMiddleware);
 
 // Standard security headers
 app.use((req, res, next) => {
@@ -277,6 +280,7 @@ export async function startServer() {
   console.log("🚀 Starting Scriwo backend...");
   // A stray error must not take every linked number down with the process (see services/processGuard.js).
   installProcessGuards({ onFatal: () => stopServer() });
+  startVitals();
   console.log(`📁 Environment: ${ENV.NODE_ENV} | Port: ${ENV.PORT}`);
 
   // 1. Verify PostgreSQL Database
@@ -345,6 +349,7 @@ let stopping = null;
 // and the message queue get a time limit and cannot hold them up. Safe to call twice.
 export function stopServer() {
   stopping ||= (async () => {
+    stopVitals();
     stopReconcileLoop();
     await atMost(stopDomainJobs(), 5000).catch((e) => console.warn("Stopping the background jobs:", e.message));
     await atMost(closeQueue(), 5000).catch((e) => console.warn("Closing the message queue:", e.message));

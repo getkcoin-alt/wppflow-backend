@@ -12,25 +12,27 @@ import { pumpAutopilot } from "./autopilotService.js";
 import { pumpAiBrief } from "./aiBriefService.js";
 import { pumpKnowledge } from "./knowledgeService.js";
 import { pumpOtp } from "./otp/otpService.js";
+import { timeJob } from "./vitals.js";
 let timer, running;
+// every job is timed (services/vitals.js): the slowest lately is on /health, and one over SLOW_JOB_MS is logged
 export function startDomainJobs(io) {
   timer = setInterval(() => {
     if (running) return;
     running = Promise.allSettled([
-      pumpAutomations(io),
-      pumpCampaigns(io),
-      pumpWebhooks(),
-      pumpLeadReminders(io),
-      pumpSubscriptions(io),
-      pumpBilling(io),
-      pumpReports(io),
-      pumpNumberHealth(io),
-      pumpRealEstate(io),
-      pumpAiPrep(io),
-      pumpAutopilot(io),
-      pumpAiBrief(io),
-      pumpKnowledge(),
-      pumpOtp(),
+      timeJob("automations", () => pumpAutomations(io)),
+      timeJob("campaigns", () => pumpCampaigns(io)),
+      timeJob("webhooks", () => pumpWebhooks()),
+      timeJob("lead reminders", () => pumpLeadReminders(io)),
+      timeJob("subscriptions", () => pumpSubscriptions(io)),
+      timeJob("billing", () => pumpBilling(io)),
+      timeJob("reports", () => pumpReports(io)),
+      timeJob("number health", () => pumpNumberHealth(io)),
+      timeJob("real estate", () => pumpRealEstate(io)),
+      timeJob("ai prep", () => pumpAiPrep(io)),
+      timeJob("autopilot", () => pumpAutopilot(io)),
+      timeJob("ai brief", () => pumpAiBrief(io)),
+      timeJob("knowledge", () => pumpKnowledge()),
+      timeJob("otp", () => pumpOtp()),
     ])
       .then((results) => {
         for (const r of results)

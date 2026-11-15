@@ -130,6 +130,9 @@ export async function notifyAssignment({ io, tenantId, conversationId, actor, as
 
 // A paired phone dropped: the staff member who owns it and the workspace managers should know.
 export async function notifySessionLost({ io, tenantId, sessionName, status }) {
+  // "GAVE_UP": the server stopped trying to bring the number back by itself (it has its own alert, apart from the drop's)
+  const gaveUp = status === "GAVE_UP";
+  const key = gaveUp ? `${sessionName}:gave_up` : sessionName;
   const { rows } = await query(
     `SELECT owner_user_id FROM whatsapp_sessions WHERE tenant_id=$1 AND session_name=$2`,
     [tenantId, sessionName],
@@ -137,7 +140,7 @@ export async function notifySessionLost({ io, tenantId, sessionName, status }) {
   // One alert per outage, not one per flicker.
   const recent = await query(
     `SELECT 1 FROM notifications WHERE tenant_id=$1 AND type='session' AND dedupe_key=$2 AND created_at > now() - interval '10 minutes' LIMIT 1`,
-    [tenantId, sessionName],
+    [tenantId, key],
   );
   if (recent.rowCount) return [];
   const managers = (
@@ -155,10 +158,11 @@ export async function notifySessionLost({ io, tenantId, sessionName, status }) {
       ...managers.map((m) => ({ userId: m.id, type: "session" })),
     ],
     actor: null,
-    dedupeKey: sessionName,
-    title: "A WhatsApp number was disconnected",
-    body:
-      status === "EXPIRED"
+    dedupeKey: key,
+    title: gaveUp ? "A WhatsApp number could not be brought back" : "A WhatsApp number was disconnected",
+    body: gaveUp
+      ? "The server tried several times and stopped. Open Numbers and press Reconnect; you may have to scan the QR code again."
+      : status === "EXPIRED"
         ? "Open Sessions and scan the QR code again to reconnect."
         : "Open Sessions to reconnect it.",
   });
