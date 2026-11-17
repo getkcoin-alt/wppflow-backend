@@ -36,6 +36,8 @@ export function formatMessage(m) {
         audioDuration: m.audio_duration,
         timestampEpoch: Number(m.timestamp_epoch),
         isNote: m.type === "internal_note",
+        // set when an AI agent sent it (see services/agents)
+        sentVia: m.sent_via || null,
         quoted:
           typeof m.quoted === "string"
             ? JSON.parse(m.quoted)
@@ -81,6 +83,8 @@ export async function sendTextMessage({
   campaignId = null,
   quotedMessageId = null,
   audit = null,
+  // "ai_agent" for a message an AI agent sent through the agent API (services/agents): the inbox labels it, and it is handled as a machine
+  sentVia = null,
 }) {
   text = validateText(text, "Message", 10000);
   idempotencyKey = validateText(idempotencyKey, "Idempotency key", 128);
@@ -165,8 +169,8 @@ export async function sendTextMessage({
       stamp = new Date().toISOString(),
       note = type === "internal_note";
     const saved = await c.query(
-      `INSERT INTO messages(id,tenant_id,conversation_id,idempotency_key,sender,agent_name,text,type,status,ack,timestamp,timestamp_epoch,sent_by_user_id,quoted,quoted_message_id)
-      VALUES($1,$2,$3,$4,'agent',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+      `INSERT INTO messages(id,tenant_id,conversation_id,idempotency_key,sender,agent_name,text,type,status,ack,timestamp,timestamp_epoch,sent_by_user_id,quoted,quoted_message_id,sent_via)
+      VALUES($1,$2,$3,$4,'agent',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
       [
         id,
         tenantId,
@@ -182,6 +186,7 @@ export async function sendTextMessage({
         sentByUserId,
         quoted ? JSON.stringify(quoted) : null,
         quoted ? quoted.id : null,
+        sentVia,
       ],
     );
     if (!note) {
@@ -219,8 +224,8 @@ export async function sendTextMessage({
           conversationId,
           tenantId,
           !["Automation", "Campaign"].includes(agentName),
-          // only a person answering ends a request for a person; Riwo does not
-          !["Automation", "Campaign", "Riwo"].includes(agentName),
+          // only a person answering ends a request for a person; Riwo and an AI agent do not
+          !["Automation", "Campaign", "Riwo"].includes(agentName) && sentVia !== "ai_agent",
         ],
       );
     }
@@ -233,7 +238,7 @@ export async function sendTextMessage({
   });
   // everything Riwo or a rule says to a customer is written to the audit record: what started it, which rule allowed it, which
   // model was involved and the exact words. A message nobody labelled is recorded too, as "unlabelled", so none escapes.
-  if (!result.duplicate && type === "text" && AUTOMATED_SENDERS.includes(agentName)) {
+  if (!result.duplicate && type === "text" && (AUTOMATED_SENDERS.includes(agentName) || sentVia === "ai_agent")) {
     const a = audit || {};
     await recordAutomated({
       tenantId,

@@ -12,6 +12,7 @@ import { pumpAutopilot } from "./autopilotService.js";
 import { pumpAiBrief } from "./aiBriefService.js";
 import { pumpKnowledge } from "./knowledgeService.js";
 import { pumpOtp } from "./otp/otpService.js";
+import { pumpAgents } from "./agents/activity.js";
 import { timeJob } from "./vitals.js";
 let timer, running;
 // every job is timed (services/vitals.js): the slowest lately is on /health, and one over SLOW_JOB_MS is logged
@@ -33,6 +34,7 @@ export function startDomainJobs(io) {
       timeJob("ai brief", () => pumpAiBrief(io)),
       timeJob("knowledge", () => pumpKnowledge()),
       timeJob("otp", () => pumpOtp()),
+      timeJob("agents", () => pumpAgents()),
     ])
       .then((results) => {
         for (const r of results)

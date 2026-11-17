@@ -41,6 +41,8 @@ import publicRoutes from "./routes/publicRoutes.js";
 import otpRoutes from "./routes/otpRoutes.js";
 import otpWidgetRoutes from "./routes/otpWidgetRoutes.js";
 import otpSetupRoutes from "./routes/otpSetupRoutes.js";
+import { mcpRouter, agentApiRouter } from "./routes/agentApiRoutes.js";
+import agentSetupRoutes from "./routes/agentSetupRoutes.js";
 import { errorHandler } from "./middleware/http.js";
 import { restoreSessions, closeSessions } from "./services/sessionService.js";
 import { installProcessGuards } from "./services/processGuard.js";
@@ -75,6 +77,10 @@ app.use("/api/public", express.json({ limit: "16kb" }), publicRoutes);
 // The drop-in OTP widget runs on other people's websites, so it answers any origin itself (the key says who may ask) and sits
 // before the origin check below. Its body is plain text holding JSON, so browsers send it without a preflight.
 app.use("/api/otp/widget", express.text({ type: "*/*", limit: "4kb" }), otpWidgetRoutes);
+
+// AI agents come in with a key of their own and no cookies (the MCP server, and the same tools as REST), so they sit before the origin check as well
+app.use("/mcp", mcpRouter);
+app.use("/api/agent/v1", agentApiRouter);
 
 // Razorpay's webhook: no cookies, no origin, and the signature covers the exact bytes, so it reads the body raw and
 // comes before the JSON parser below.
@@ -258,6 +264,8 @@ app.use("/api/workspace", workspaceRoutes);
 // Free OTP: the calls a company's server makes (its own keys), and the setup page in Developers
 app.use("/api/otp", otpRoutes);
 app.use("/api/otp-setup", otpSetupRoutes);
+// AI agents: the Developers page where an owner makes an agent, sets what it may do and sees what it did
+app.use("/api/agents", agentSetupRoutes);
 app.use("/api/home", homeRoutes);
 app.use("/api/export", exportRouter);
 app.use("/api/knowledge", knowledgeRoutes);

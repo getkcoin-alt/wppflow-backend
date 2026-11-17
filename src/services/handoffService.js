@@ -41,7 +41,7 @@ const MACHINES = ["Riwo", "Automation"];
 async function machineAnswered(tenantId, conversationId) {
   return (
     await query(
-      `SELECT 1 FROM messages WHERE tenant_id=$1 AND conversation_id=$2 AND sender='agent' AND agent_name = ANY($3::text[]) AND created_at > now() - interval '24 hours' LIMIT 1`,
+      `SELECT 1 FROM messages WHERE tenant_id=$1 AND conversation_id=$2 AND sender='agent' AND (agent_name = ANY($3::text[]) OR sent_via='ai_agent') AND created_at > now() - interval '24 hours' LIMIT 1`,
       [tenantId, conversationId, MACHINES],
     )
   ).rowCount > 0;

@@ -110,6 +110,9 @@ export const ENV = {
   SYNC_RECONCILE_MS: parseInt(process.env.SYNC_RECONCILE_MS || "300000", 10),
   // Base address of the web app, used in the links emailed to people.
   APP_URL: resolveAppUrl(process.env.APP_URL, process.env.NODE_ENV),
+  // The public address of this server as an AI agent reaches it (the MCP server is at <this>/mcp, the REST mirror at <this>/api/agent/v1).
+  // Shown on the AI agents screen and put in the OpenAPI description. Production defaults to the API address.
+  PUBLIC_API_URL: String(process.env.PUBLIC_API_URL || (process.env.NODE_ENV === "production" ? "https://api.scriwo.com" : `http://localhost:${process.env.PORT || 8080}`)).replace(/\/+$/, ""),
   SUPERADMIN_EMAIL: (process.env.SUPERADMIN_EMAIL || "karnveer@scriza.in").toLowerCase().trim(),
   SUPERADMIN_PASSWORD: process.env.SUPERADMIN_PASSWORD || "",
   ALLOW_PUBLIC_SIGNUP: process.env.ALLOW_PUBLIC_SIGNUP !== "false",
