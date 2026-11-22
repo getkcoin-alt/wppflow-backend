@@ -63,9 +63,25 @@ export async function reserveSend(agent, conversationId, { via = "mcp" } = {}) {
   });
 }
 
-export async function settleSend(eventId, { ok, summary = "", errorCode = null, ms = null }) {
+// Starting a chat with a new number has its own daily cap (checked and reserved under its own lock, like a send), counted in 24 hours.
+export async function reserveNewChat(agent, { via = "mcp" } = {}) {
+  return withTransaction(async (c) => {
+    await c.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`agent-newchat:${agent.id}`]);
+    const { rows } = await c.query(
+      `SELECT count(*)::int AS n, ceil(extract(epoch FROM (min(created_at) + interval '24 hours' - now())))::int AS wait
+         FROM agent_events WHERE agent_id=$1 AND tool='message_new_number' AND (ok IS TRUE OR (ok IS NULL AND created_at > now() - $2::int * interval '1 second')) AND created_at > now() - interval '24 hours'`,
+      [agent.id, RESERVATION_SECONDS],
+    );
+    if (rows[0].n >= agent.new_chats_per_day)
+      throw agentError(429, "limit_reached", `This agent has already started ${rows[0].n} chats with new numbers in 24 hours (its limit is ${agent.new_chats_per_day}).`, `Wait ${wait(rows[0].wait)}, or ask an owner or admin to raise the limit under Developers, AI agents. Do not look for another way to reach new people.`, { retryAfter: Math.max(1, rows[0].wait) });
+    const made = await c.query("INSERT INTO agent_events(tenant_id,agent_id,tool,ok,summary,via) VALUES($1,$2,'message_new_number',NULL,'Starting a chat with a new number',$3) RETURNING id", [agent.tenant_id, agent.id, ["rest", "test"].includes(via) ? via : "mcp"]);
+    return made.rows[0].id;
+  });
+}
+
+export async function settleSend(eventId, { ok, summary = "", errorCode = null, ms = null, conversationId = null }) {
   try {
-    await query("UPDATE agent_events SET ok=$2,summary=$3,error_code=$4,ms=$5 WHERE id=$1", [eventId, ok, clip(summary, 240), errorCode ? clip(errorCode, 40) : null, ms === null ? null : Math.round(ms)]);
+    await query("UPDATE agent_events SET ok=$2,summary=$3,error_code=$4,ms=$5,conversation_id=COALESCE($6,conversation_id) WHERE id=$1", [eventId, ok, clip(summary, 240), errorCode ? clip(errorCode, 40) : null, ms === null ? null : Math.round(ms), conversationId]);
   } catch (error) {
     console.error("Agent send not settled:", error.message);
   }
@@ -92,7 +108,7 @@ export async function listEvents(tenantId, { agentId = null, limit = 50, beforeI
     params.push(Number(beforeId) || 0);
     where += ` AND e.id<$${params.length}`;
   }
-  if (onlyChanges) where += " AND e.tool IN ('send_message','add_note','mark_read','assign_conversation','set_status','update_labels','create_task','complete_task')";
+  if (onlyChanges) where += " AND e.tool IN ('send_message','message_new_number','add_note','mark_read','assign_conversation','set_status','update_labels','create_task','complete_task')";
   params.push(Math.min(Math.max(Number(limit) || 50, 1), 200));
   const { rows } = await query(
     `SELECT e.id,e.agent_id,k.name AS agent_name,e.tool,e.ok,e.conversation_id,e.summary,e.error_code,e.ms,e.via,e.created_at,c.contact_name,c.phone,c.is_group

@@ -12,9 +12,12 @@ import { formatConversation } from "../conversationFormat.js";
 import { snippetOf, MIN_CHARS } from "../searchService.js";
 import { chatMatch, likeOf } from "../chatMatch.js";
 import { chatTitle } from "../personName.js";
+import { isOwnNumber } from "../personGuard.js";
+import { contactForNumber, chatWithContact } from "../newChat.js";
+import { normalizePhone, PHONE_HELP } from "../phone.js";
 import { agentError } from "./keys.js";
 import { levelAllows, MAX_TEXT, MAX_NOTE, withDisclosure } from "./config.js";
-import { recordEvent, reserveSend, settleSend, usageOf } from "./activity.js";
+import { recordEvent, reserveSend, reserveNewChat, settleSend, usageOf } from "./activity.js";
 import { NOTICE, allowedNumbers, scopeSql, loadChat, titleOf, phoneOf, labelsOf, chatItem, readMessages, clip, isoOf } from "./scope.js";
 
 // What an agent can do. One list of tools, shown three ways: the MCP server (/mcp), a REST mirror (/api/agent/v1/tools) and the OpenAPI
@@ -204,7 +207,8 @@ export const TOOLS = [
           numbers: mine.length ? mine : "all",
           groupChats: Boolean(agent.allow_groups),
           customerPhoneNumbers: agent.share_phones ? "visible" : "hidden",
-          limits: { messagesPerHour: agent.per_hour, messagesPer24Hours: agent.per_day, messagesPerChatPerHour: agent.per_chat_hour },
+          limits: { messagesPerHour: agent.per_hour, messagesPer24Hours: agent.per_day, messagesPerChatPerHour: agent.per_chat_hour, ...(agent.allow_new_chats ? { newChatsPer24Hours: agent.new_chats_per_day } : {}) },
+          mayStartChatsWithNewNumbers: Boolean(agent.allow_new_chats),
           sentLastHour: usage.sentLastHour,
           sentLast24Hours: usage.sentLast24h,
           aiLineAddedToMessages: Boolean(agent.disclose),
@@ -540,6 +544,70 @@ export const TOOLS = [
     describe: () => "Sent a message",
   },
   {
+    name: "message_new_number",
+    title: "Start a chat with a new number",
+    description:
+      "Start a chat with a phone number the company has not messaged yet and send a first message. Only for a number the user gave you: never guess numbers or message a list. The owner must allow it for this agent, and it has a daily cap. One short, honest message.",
+    level: "reply",
+    // only offered to an agent whose owner switched it on
+    requires: (agent) => Boolean(agent.allow_new_chats),
+    annotations: CHANGE({ openWorldHint: true }),
+    input: shape(
+      {
+        phone: str("The person's phone number with the country code, for example +971 50 123 4567. Only a number the user gave you.", { minLength: 6, maxLength: 30 }),
+        text: str(`The first message, up to ${MAX_TEXT} characters. Say who you are writing for and why, plainly.`, { minLength: 1, maxLength: MAX_TEXT }),
+        number: str("The company's WhatsApp number to send from (its name, from list_numbers). Optional when only one is connected.", { maxLength: 128 }),
+        name: str("Their name, if the user told you; it is saved on the new contact.", { maxLength: 100 }),
+        idempotency_key: str("Optional: any text up to 64 characters. Sending again with the same key never sends twice.", { maxLength: 64 }),
+      },
+      ["phone", "text"],
+    ),
+    async run(ctx, a) {
+      const { agent } = ctx;
+      const mine = await numbersOf(agent);
+      let sessionName = a.number;
+      if (sessionName) {
+        if (!mine.some((n) => n.name === sessionName)) throw agentError(403, "number_not_allowed", "This agent may not use that number.", "Use list_numbers to see the numbers you may use.");
+      } else {
+        const live = mine.filter((n) => n.connected);
+        if (live.length === 1) sessionName = live[0].name;
+        else if (!live.length) throw agentError(409, "number_offline", "None of the numbers this agent may use is connected to WhatsApp right now.", "Do not retry. Tell the user a number needs to be reconnected in Scriwo (Numbers).");
+        else throw agentError(400, "invalid_input", `Say which number to send from: ${live.map((n) => n.name).join(", ")}.`, "Pass number with one of those names.");
+      }
+      const phone = normalizePhone(a.phone);
+      if (!phone) throw agentError(400, "invalid_phone", "That is not a phone number with a country code.", PHONE_HELP);
+      if (await isOwnNumber(agent.tenant_id, phone)) throw agentError(400, "own_number", "That is one of the company's own WhatsApp numbers.", "Do not message it.");
+      const optedOut = (await query("SELECT 1 FROM suppressions WHERE tenant_id=$1 AND phone = ANY($2::text[])", [agent.tenant_id, [phone, `+${phone}`]])).rowCount > 0;
+      if (optedOut) throw agentError(403, "recipient_opted_out", "This person has opted out of messages, so nothing can be sent to them.", "Do not try again.");
+      const chatFor = async (digits) => (await query("SELECT * FROM conversations WHERE tenant_id=$1 AND session_name=$2 AND provider_chat_id=$3", [agent.tenant_id, sessionName, `${digits}@c.us`])).rows[0];
+      const reply = (chat) => TOOL_MAP.get("send_message").run(ctx, { conversation_id: chat.id, text: a.text, idempotency_key: a.idempotency_key });
+      const existing = await chatFor(phone);
+      if (existing) return { ...(await reply(existing)), startedNewChat: false, note: "A chat with this number already existed, so this went into it like any reply." };
+
+      const reservation = await reserveNewChat(agent, { via: ctx.via });
+      ctx.logged = true; // the reservation is this call's record; it is settled below
+      const started = Date.now();
+      let conversationId = null;
+      try {
+        const opened = await contactForNumber({ tenantId: agent.tenant_id, sessionName, phone, name: a.name || "", io: ctx.io });
+        const already = await chatFor(opened.real);
+        if (already) {
+          await settleSend(reservation, { ok: false, summary: "A chat with this number already existed", errorCode: "existing_chat", ms: Date.now() - started, conversationId: already.id });
+          return { ...(await reply(already)), startedNewChat: false, note: "A chat with this number already existed, so this went into it like any reply." };
+        }
+        const chat = await chatWithContact({ tenantId: agent.tenant_id, sessionName, contact: opened.contact });
+        conversationId = chat.id;
+        const sent = await reply(chat);
+        await settleSend(reservation, { ok: true, summary: `Started a chat with a new number (${opened.created ? "new contact" : "known contact"})`, ms: Date.now() - started, conversationId });
+        return { ...sent, startedNewChat: true, contactCreated: opened.created, note: "WhatsApp may restrict a number that messages people who have not written first. Send nothing more to this person unless they answer or the user asks." };
+      } catch (error) {
+        await settleSend(reservation, { ok: false, summary: "No chat was started", errorCode: error?.extra?.code || `http_${error?.status || 500}`, ms: Date.now() - started, conversationId });
+        throw error;
+      }
+    },
+    describe: () => "Started a chat with a new number",
+  },
+  {
     name: "add_note",
     title: "Leave a team note",
     description: "Leave an internal note on a chat. Only the team sees it; the customer does not. Use it to hand over, explain what you did, or flag something for a person.",
@@ -704,7 +772,7 @@ export const inputSchemaOf = (tool) => {
   return { type: "object", properties, ...(required.length ? { required } : {}), additionalProperties: false };
 };
 export const toolsFor = (agent) =>
-  TOOLS.filter((t) => levelAllows(agent.level, t.level)).map((t) => ({ name: t.name, title: t.title, description: t.description, inputSchema: inputSchemaOf(t), annotations: t.annotations }));
+  TOOLS.filter((t) => levelAllows(agent.level, t.level) && (!t.requires || t.requires(agent))).map((t) => ({ name: t.name, title: t.title, description: t.description, inputSchema: inputSchemaOf(t), annotations: t.annotations }));
 
 // What a caller is told about an error. Messages written for people are passed on; anything else is only logged.
 export function publicError(error) {
@@ -729,6 +797,8 @@ export async function runTool({ agent, name, args = {}, io = null, via = "mcp" }
     if (!tool) throw agentError(404, "unknown_tool", `There is no tool called "${clip(name, 60)}".`, "List the tools and use one of those names.");
     if (!levelAllows(agent.level, tool.level))
       throw agentError(403, "level_too_low", `This agent's level is "${agent.level}", and ${name} needs "${tool.level}".`, "Do not retry. An owner or admin can change the level under Developers, AI agents.");
+    if (tool.requires && !tool.requires(agent))
+      throw agentError(403, "new_chats_off", `${name} is not allowed for this agent.`, "Do not retry. An owner or admin can allow starting chats with new numbers for this agent under Developers, AI agents.");
     input = validateArgs(tool, args);
     result = await tool.run(ctx, input);
   } catch (error) {

@@ -24,7 +24,8 @@ test("an owner makes an agent: the key is shown once and only its hash is kept",
   assert.equal(agent.name, "Claude helper", "spaces are tidied");
   assert.equal(agent.level, "reply");
   assert.deepEqual(agent.numbers, ["main-line"]);
-  assert.deepEqual(agent.limits, { perHour: 30, perDay: 200, perChatHour: 6 });
+  assert.deepEqual(agent.limits, { perHour: 30, perDay: 200, perChatHour: 6, newChatsPerDay: 10 });
+  assert.equal(agent.allowNewChats, false, "starting chats with new numbers is off unless the owner turns it on");
   assert.equal(agent.state, "active");
   assert.equal(agent.disclose, true, "an AI agent says it is one unless the owner switches that off");
   assert.equal(agent.sharePhones, false);
@@ -66,7 +67,7 @@ test("what the owner may choose is checked", async () => {
   assert.equal(never.status, 201);
   assert.equal(never.body.agent.expiresAt, null, "an owner may choose a key that never expires");
   const custom = await make({ name: "Custom", level: "full", allowGroups: true, sharePhones: true, disclose: false, perHour: 5, perDay: 20, perChatHour: 2, expiresInDays: 7 });
-  assert.deepEqual({ g: custom.body.agent.allowGroups, p: custom.body.agent.sharePhones, d: custom.body.agent.disclose, l: custom.body.agent.limits }, { g: true, p: true, d: false, l: { perHour: 5, perDay: 20, perChatHour: 2 } });
+  assert.deepEqual({ g: custom.body.agent.allowGroups, p: custom.body.agent.sharePhones, d: custom.body.agent.disclose, l: custom.body.agent.limits }, { g: true, p: true, d: false, l: { perHour: 5, perDay: 20, perChatHour: 2, newChatsPerDay: 10 } });
   assert.ok(Math.abs(new Date(custom.body.agent.expiresAt) - (Date.now() + 7 * 86400_000)) < 60_000);
 });
 

@@ -13,9 +13,13 @@ after(async () => {
   io.close();
 });
 
+// what an agent is offered: a tool that needs the owner's permission (message_new_number) is shown only to an agent that has it
 const READ_TOOLS = TOOLS.filter((t) => t.level === "read").map((t) => t.name);
-const REPLY_TOOLS = TOOLS.filter((t) => t.level !== "full").map((t) => t.name);
-const ALL_TOOLS = TOOLS.map((t) => t.name);
+const REPLY_TOOLS = TOOLS.filter((t) => t.level !== "full" && !t.requires).map((t) => t.name);
+const ALL_TOOLS = TOOLS.filter((t) => !t.requires).map((t) => t.name);
+// the OpenAPI description is cut by level only
+const API_ALL = TOOLS.map((t) => t.name);
+const API_REPLY = TOOLS.filter((t) => t.level !== "full").map((t) => t.name);
 
 test("the handshake agrees a protocol version, says who is there, and hands over the rules", async () => {
   const c = await agentCompany("mcp1");
@@ -251,7 +255,7 @@ test("the OpenAPI description is public, complete, and ready for ChatGPT Actions
   assert.equal(spec.servers[0].url, ENV.PUBLIC_API_URL);
   assert.deepEqual(spec.security, [{ bearerAuth: [] }]);
   assert.deepEqual(spec.components.securitySchemes.bearerAuth, { type: "http", scheme: "bearer", description: spec.components.securitySchemes.bearerAuth.description });
-  assert.deepEqual(Object.keys(spec.paths), ALL_TOOLS.map((n) => `/api/agent/v1/tools/${n}`));
+  assert.deepEqual(Object.keys(spec.paths), API_ALL.map((n) => `/api/agent/v1/tools/${n}`));
   const ids = new Set();
   for (const [path, item] of Object.entries(spec.paths)) {
     const op = item.post;
@@ -267,8 +271,8 @@ test("the OpenAPI description is public, complete, and ready for ChatGPT Actions
   assert.equal(spec.paths["/api/agent/v1/tools/list_conversations"].post["x-openai-isConsequential"], false);
   const read = (await request(app).get("/api/agent/v1/openapi.json?level=read")).body;
   assert.deepEqual(Object.keys(read.paths).map((p) => p.split("/").pop()), READ_TOOLS);
-  assert.equal(Object.keys((await request(app).get("/api/agent/v1/openapi.json?level=reply")).body.paths).length, REPLY_TOOLS.length);
-  assert.equal(Object.keys((await request(app).get("/api/agent/v1/openapi.json?level=whatever")).body.paths).length, ALL_TOOLS.length, "an unknown level means everything");
+  assert.equal(Object.keys((await request(app).get("/api/agent/v1/openapi.json?level=reply")).body.paths).length, API_REPLY.length);
+  assert.equal(Object.keys((await request(app).get("/api/agent/v1/openapi.json?level=whatever")).body.paths).length, API_ALL.length, "an unknown level means everything");
 });
 
 test("the prompt to copy tells any agent who it is, the rules, and how to reach Scriwo", async () => {
@@ -300,7 +304,8 @@ test("the prompt to copy tells any agent who it is, the rules, and how to reach 
   const mcp = (await request(app).get(`/api/agents/${full.id}/prompt`).set(c.owner)).body;
   assert.equal(mcp.mode, "mcp");
   assert.match(mcp.prompt, new RegExp(`Scriwo MCP server \\(${ENV.PUBLIC_API_URL.replace(/[.]/g, "\\.")}/mcp\\)`));
-  for (const t of TOOLS) assert.ok(mcp.prompt.includes(`- ${t.name}(`), `${t.name} is listed for a full agent`);
+  for (const t of TOOLS.filter((x) => !x.requires)) assert.ok(mcp.prompt.includes(`- ${t.name}(`), `${t.name} is listed for a full agent`);
+  assert.ok(!mcp.prompt.includes("message_new_number("), "a tool the owner has not allowed is not listed");
   assert.match(mcp.prompt, /- send_message\(conversation_id, text, reply_to_message_id\?, idempotency_key\?\)/);
   const restPrompt = (await request(app).get(`/api/agents/${reader.id}/prompt?mode=rest`).set(c.owner)).body;
   assert.equal(restPrompt.mode, "rest");

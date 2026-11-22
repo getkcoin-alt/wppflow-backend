@@ -54,6 +54,8 @@ export async function cleanSettings(tenantId, body = {}, { partial = false } = {
   if (!partial || sent("allowGroups")) out.allow_groups = sent("allowGroups") ? flag(body.allowGroups, "Group chats") : false;
   if (!partial || sent("sharePhones")) out.share_phones = sent("sharePhones") ? flag(body.sharePhones, "Phone numbers") : false;
   if (!partial || sent("disclose")) out.disclose = sent("disclose") ? flag(body.disclose, "The AI line") : true;
+  if (!partial || sent("allowNewChats")) out.allow_new_chats = sent("allowNewChats") ? flag(body.allowNewChats, "Starting chats with new numbers") : false;
+  if (!partial || sent("newChatsPerDay")) out.new_chats_per_day = sent("newChatsPerDay") ? whole(body.newChatsPerDay, BOUNDS.newChatsPerDay, "New chats a day") : DEFAULTS.newChatsPerDay;
   if (!partial || sent("perHour")) out.per_hour = sent("perHour") ? whole(body.perHour, BOUNDS.perHour, "Messages an hour") : DEFAULTS.perHour;
   if (!partial || sent("perDay")) out.per_day = sent("perDay") ? whole(body.perDay, BOUNDS.perDay, "Messages a day") : DEFAULTS.perDay;
   if (!partial || sent("perChatHour")) out.per_chat_hour = sent("perChatHour") ? whole(body.perChatHour, BOUNDS.perChatHour, "Messages to one chat an hour") : DEFAULTS.perChatHour;
@@ -76,7 +78,8 @@ export const agentView = (r, usage = null) => ({
   allowGroups: Boolean(r.allow_groups),
   sharePhones: Boolean(r.share_phones),
   disclose: Boolean(r.disclose),
-  limits: { perHour: r.per_hour, perDay: r.per_day, perChatHour: r.per_chat_hour },
+  allowNewChats: Boolean(r.allow_new_chats),
+  limits: { perHour: r.per_hour, perDay: r.per_day, perChatHour: r.per_chat_hour, newChatsPerDay: r.new_chats_per_day },
   expiresAt: r.expires_at,
   createdAt: r.created_at,
   updatedAt: r.updated_at,
@@ -93,9 +96,9 @@ export async function createAgentKey({ tenantId, userId = null, ...body }) {
   const key = newKeyText();
   const id = `agk_${crypto.randomBytes(9).toString("hex")}`;
   const { rows } = await query(
-    `INSERT INTO agent_keys(id,tenant_id,name,level,key_hash,prefix,sessions,allow_groups,share_phones,disclose,per_hour,per_day,per_chat_hour,expires_at,created_by)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,CASE WHEN $14::int IS NULL THEN NULL ELSE now() + $14::int * interval '1 day' END,$15) RETURNING *`,
-    [id, tenantId, s.name, s.level, hash(key), key.slice(0, 14), JSON.stringify(s.sessions), s.allow_groups, s.share_phones, s.disclose, s.per_hour, s.per_day, s.per_chat_hour, s.expires_in_days, userId],
+    `INSERT INTO agent_keys(id,tenant_id,name,level,key_hash,prefix,sessions,allow_groups,share_phones,disclose,per_hour,per_day,per_chat_hour,expires_at,created_by,allow_new_chats,new_chats_per_day)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,CASE WHEN $14::int IS NULL THEN NULL ELSE now() + $14::int * interval '1 day' END,$15,$16,$17) RETURNING *`,
+    [id, tenantId, s.name, s.level, hash(key), key.slice(0, 14), JSON.stringify(s.sessions), s.allow_groups, s.share_phones, s.disclose, s.per_hour, s.per_day, s.per_chat_hour, s.expires_in_days, userId, s.allow_new_chats, s.new_chats_per_day],
   );
   return { ...agentView(rows[0]), key };
 }
@@ -138,7 +141,7 @@ export async function updateAgentKey(tenantId, id, body = {}) {
     params.push(value);
     sets.push(`${col}=$${params.length}`);
   };
-  for (const col of ["name", "level", "allow_groups", "share_phones", "disclose", "per_hour", "per_day", "per_chat_hour"]) if (s[col] !== undefined) put(col, s[col]);
+  for (const col of ["name", "level", "allow_groups", "share_phones", "disclose", "allow_new_chats", "new_chats_per_day", "per_hour", "per_day", "per_chat_hour"]) if (s[col] !== undefined) put(col, s[col]);
   if (s.sessions !== undefined) put("sessions", JSON.stringify(s.sessions));
   if ("expires_in_days" in s) {
     params.push(s.expires_in_days);

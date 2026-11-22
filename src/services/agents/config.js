@@ -20,8 +20,8 @@ export const MAX_TEXT = 4000; // longest message an agent may send
 export const MAX_NOTE = 2000;
 
 // What a new agent may do until the owner says otherwise
-export const DEFAULTS = { perHour: 30, perDay: 200, perChatHour: 6, expiresInDays: 90 };
-export const BOUNDS = { perHour: [1, 1000], perDay: [1, 10000], perChatHour: [1, 100], expiresInDays: [1, 730] };
+export const DEFAULTS = { perHour: 30, perDay: 200, perChatHour: 6, expiresInDays: 90, newChatsPerDay: 10 };
+export const BOUNDS = { perHour: [1, 1000], perDay: [1, 10000], perChatHour: [1, 100], expiresInDays: [1, 730], newChatsPerDay: [1, 200] };
 
 // A call is counted for the minute limit per key; a stolen or looping key cannot flood the server
 export const CALLS_PER_MINUTE = 120;
