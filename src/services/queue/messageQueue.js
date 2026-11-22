@@ -207,7 +207,7 @@ export async function dispatchMessage(payload, io) {
     );
     await query(
       "UPDATE outbox_events SET status=$1,last_error=$2,retry_at=now()+interval '10 seconds' WHERE aggregate_id=$3 AND tenant_id=$4",
-      [offline ? "pending" : "uncertain", error.message, messageId, tenantId],
+      [offline ? "pending" : "uncertain", error.cause?.message ? `${error.message} (${String(error.cause.message).slice(0, 300)})` : error.message, messageId, tenantId],
     );
     if (campaignId) {
       try {

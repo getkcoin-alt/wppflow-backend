@@ -402,11 +402,15 @@ export class WhatsAppProvider {
           );
         }),
       ]);
-    } catch {
+    } catch (cause) {
+      // The reason (a timeout waiting for WhatsApp, a closed page, a rejected number) used to be thrown away, which left an "uncertain"
+      // message with nothing to explain it. It is kept on the error and written to the log.
+      console.warn(`WhatsApp ${sessionName}: send did not complete (${cause?.message || cause})`);
       const error = new Error(
         "WhatsApp delivery outcome is uncertain. Reconcile before retrying.",
       );
       error.code = "DELIVERY_UNCERTAIN";
+      error.cause = cause;
       throw error;
     } finally {
       clearTimeout(timer);
