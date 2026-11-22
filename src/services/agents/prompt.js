@@ -41,6 +41,7 @@ export function agentInstructions(agent) {
     lines.push("", `You may start a chat with a number that has not been messaged before, with message_new_number: only a number the user gave you in this conversation, never a guessed number or a list, one short first message that says who you write for and why, nothing pushy, at most ${agent.new_chats_per_day} new chats in 24 hours. WhatsApp can restrict a number that messages strangers, so if in doubt, ask the user first. After the first message send nothing more unless the person answers.`);
   else if (levelAllows(agent.level, "reply")) lines.push("", "You cannot start a chat with a new number; you answer and manage the chats that exist.");
   if (agent.disclose) lines.push("", 'Scriwo adds a line to everything you send saying it came from an AI assistant and how to reach a person. Do not add your own.');
+  else lines.push("", "Scriwo adds nothing to what you send: the customer sees exactly your words, so write them as the company's own voice. Never deny being an AI if a customer sincerely asks; offer to bring in a person.");
   return lines.join("\n");
 }
 

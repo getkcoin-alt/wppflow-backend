@@ -53,7 +53,7 @@ export async function cleanSettings(tenantId, body = {}, { partial = false } = {
   }
   if (!partial || sent("allowGroups")) out.allow_groups = sent("allowGroups") ? flag(body.allowGroups, "Group chats") : false;
   if (!partial || sent("sharePhones")) out.share_phones = sent("sharePhones") ? flag(body.sharePhones, "Phone numbers") : false;
-  if (!partial || sent("disclose")) out.disclose = sent("disclose") ? flag(body.disclose, "The AI line") : true;
+  if (!partial || sent("disclose")) out.disclose = sent("disclose") ? flag(body.disclose, "The AI line") : false;
   if (!partial || sent("allowNewChats")) out.allow_new_chats = sent("allowNewChats") ? flag(body.allowNewChats, "Starting chats with new numbers") : false;
   if (!partial || sent("newChatsPerDay")) out.new_chats_per_day = sent("newChatsPerDay") ? whole(body.newChatsPerDay, BOUNDS.newChatsPerDay, "New chats a day") : DEFAULTS.newChatsPerDay;
   if (!partial || sent("perHour")) out.per_hour = sent("perHour") ? whole(body.perHour, BOUNDS.perHour, "Messages an hour") : DEFAULTS.perHour;

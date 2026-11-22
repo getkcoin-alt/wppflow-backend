@@ -35,7 +35,7 @@ const WITH_LINE = (text) => `${text}\n\n${DISCLOSURE}`;
 test("an agent answers a customer: it goes out as the agent, labelled as an AI, and is on every record", async () => {
   const c = await agentCompany("send1");
   const maria = await c.customer("971500020001", "Maria Lopez", { text: "Do you deliver on Friday?" });
-  const agent = await c.makeAgent({ name: "Claude helper", level: "reply" });
+  const agent = await c.makeAgent({ name: "Claude helper", level: "reply", disclose: true });
   assert.notEqual((await chatRow(maria.chat)).awaiting_since, null, "the customer is waiting");
 
   const sent = await mcpTool(agent.key, "send_message", { conversation_id: maria.chat, text: "Yes, we deliver on Fridays." });
@@ -46,7 +46,7 @@ test("an agent answers a customer: it goes out as the agent, labelled as an AI, 
   assert.equal(m.sent_via, "ai_agent");
   assert.equal(m.sent_by_user_id, null, "no teammate is blamed for it");
   assert.equal(m.status, "sending");
-  assert.equal(m.text, WITH_LINE("Yes, we deliver on Fridays."), "the AI line is added, so the customer knows");
+  assert.equal(m.text, WITH_LINE("Yes, we deliver on Fridays."), "with the AI line switched on, it is added so the customer knows");
   assert.match(m.text, /Reply "human" to talk to a person\.$/);
 
   // queued for the number the chat is on, to the customer, as the team's own messages are
@@ -105,14 +105,15 @@ test("sending the same thing twice sends it once; a key makes a retry safe", asy
   assert.notEqual(theirs.messageId, k1.messageId);
 });
 
-test("the owner can switch the AI line off, and then the words go out as written", async () => {
+test("nothing is added to an agent's words unless the owner switches the AI line on", async () => {
   const c = await agentCompany("send3");
   const maria = await c.customer("971500020003", "Maria Lopez");
-  const on = await c.makeAgent({ name: "With line", level: "reply" });
-  const off = await c.makeAgent({ name: "Without line", level: "reply", disclose: false });
+  const on = await c.makeAgent({ name: "With line", level: "reply", disclose: true });
+  const off = await c.makeAgent({ name: "Without line", level: "reply" });
   assert.equal((await mcpTool(off.key, "get_overview")).you.aiLineAddedToMessages, false);
   const sent = await mcpTool(off.key, "send_message", { conversation_id: maria.chat, text: "Plain words." });
-  assert.equal((await msg(sent.messageId)).text, "Plain words.");
+  assert.equal((await msg(sent.messageId)).text, "Plain words.", "the customer sees exactly what the agent wrote");
+  assert.equal((await msg(sent.messageId)).sent_via, "ai_agent", "the team still sees it was an agent");
   const sent2 = await mcpTool(on.key, "send_message", { conversation_id: maria.chat, text: "Plain words again." });
   assert.equal((await msg(sent2.messageId)).text, WITH_LINE("Plain words again."));
 });

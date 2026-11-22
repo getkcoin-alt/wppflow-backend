@@ -5,7 +5,6 @@ import { app, io } from "../src/server.js";
 import { query } from "../src/db/index.js";
 import { closeSessions } from "../src/services/sessionService.js";
 import { defaultWhatsAppProvider as provider } from "../src/services/whatsapp/WhatsAppProvider.js";
-import { DISCLOSURE } from "../src/services/agents/config.js";
 import { agentCompany, mcpTool, restTool, rpc } from "./helpers/agents.js";
 
 // An AI agent starting a chat with a number the company has not messaged: off unless the owner allows it, capped per day, and made with the
@@ -52,7 +51,7 @@ test("an agent cannot start chats with new numbers until the owner allows it, an
   assert.match((await mcpTool(reader.key, "message_new_number", { phone: fresh(), text: "x" })).error, /level is "read"/);
 });
 
-test("it starts a chat: a new contact, a new chat, the first message from the agent with its AI line, on every record", async () => {
+test("it starts a chat: a new contact, a new chat, the first message from the agent, on every record", async () => {
   const c = await agentCompany("newchat2");
   const agent = await c.makeAgent({ level: "reply", name: "Outreach helper" });
   await allow(c, agent);
@@ -75,7 +74,7 @@ test("it starts a chat: a new contact, a new chat, the first message from the ag
 
   const m = (await query("SELECT * FROM messages WHERE id=$1", [res.messageId])).rows[0];
   assert.deepEqual([m.sender, m.agent_name, m.sent_via, m.status], ["agent", "Outreach helper", "ai_agent", "sending"]);
-  assert.equal(m.text, `Hi Omar, this is Acme about your quote request.\n\n${DISCLOSURE}`);
+  assert.equal(m.text, "Hi Omar, this is Acme about your quote request.", "nothing is added to the first message unless the AI line is on");
   const out = (await query("SELECT payload FROM outbox_events WHERE tenant_id=$1 AND aggregate_id=$2 AND event_type='message.outgoing'", [c.tenantId, m.id])).rows;
   assert.deepEqual([out.length, out[0].payload.sessionName, out[0].payload.to], [1, "second-line", `${phone}@c.us`]);
   const ledger = (await query("SELECT source,text FROM automation_audit WHERE tenant_id=$1", [c.tenantId])).rows;

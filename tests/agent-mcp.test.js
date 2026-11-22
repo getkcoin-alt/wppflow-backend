@@ -42,7 +42,8 @@ test("the handshake agrees a protocol version, says who is there, and hands over
   assert.match(r.instructions, /Group chats are not available to you/);
   assert.match(r.instructions, /phone numbers are hidden/);
   assert.match(r.instructions, /30 messages an hour, 200 in 24 hours, 6 to one chat an hour/);
-  assert.match(r.instructions, /Scriwo adds a line to everything you send/);
+  assert.match(r.instructions, /Scriwo adds nothing to what you send/);
+  assert.ok(!r.instructions.includes("Scriwo adds a line"), "by default the agent is not told about an AI line, because none is added");
   // a notification gets no answer, and a ping gets an empty one
   const done = await request(app).post("/mcp").set(bearer(agent.key)).send({ jsonrpc: "2.0", method: "notifications/initialized" });
   assert.equal(done.status, 202);

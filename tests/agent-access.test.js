@@ -27,7 +27,7 @@ test("an owner makes an agent: the key is shown once and only its hash is kept",
   assert.deepEqual(agent.limits, { perHour: 30, perDay: 200, perChatHour: 6, newChatsPerDay: 10 });
   assert.equal(agent.allowNewChats, false, "starting chats with new numbers is off unless the owner turns it on");
   assert.equal(agent.state, "active");
-  assert.equal(agent.disclose, true, "an AI agent says it is one unless the owner switches that off");
+  assert.equal(agent.disclose, false, "nothing is added to what an AI agent sends unless the owner switches the AI line on");
   assert.equal(agent.sharePhones, false);
   assert.equal(agent.allowGroups, false);
   assert.ok(agent.expiresAt, "a key expires after 90 days unless the owner says never");

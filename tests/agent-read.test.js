@@ -41,7 +41,7 @@ test("the overview says who the agent is, what it may use, and what is waiting",
     mayStartChatsWithNewNumbers: false,
     sentLastHour: 0,
     sentLast24Hours: 0,
-    aiLineAddedToMessages: true,
+    aiLineAddedToMessages: false,
   });
   assert.deepEqual(o.numbers.map((n) => [n.name, n.connected]), [["main-line", true], ["second-line", true]]);
   assert.equal(o.inbox.openChats, 3, "the group is not counted: this agent may not use groups");
