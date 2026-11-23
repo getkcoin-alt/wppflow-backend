@@ -54,9 +54,10 @@ import * as m052 from "./migrations/052_session_events.js";
 import * as m053 from "./migrations/053_agent_access.js";
 import * as m054 from "./migrations/054_agent_new_chats.js";
 import * as m055 from "./migrations/055_agent_no_ai_line.js";
+import * as m056 from "./migrations/056_agent_new_number_limits.js";
 
 const MIGRATION_ADVISORY_LOCK_ID = 88992211;
-const MIGRATIONS = [m001, m002, m003, m004, m005, m006, m007, m008, m009, m010, m011, m012, m013, m014, m015, m016, m017, m018, m019, m020, m021, m022, m023, m024, m025, m026, m027, m028, m029, m030, m031, m032, m033, m034, m035, m036, m037, m038, m039, m040, m041, m042, m043, m044, m045, m046, m047, m048, m049, m050, m051, m052, m053, m054, m055];
+const MIGRATIONS = [m001, m002, m003, m004, m005, m006, m007, m008, m009, m010, m011, m012, m013, m014, m015, m016, m017, m018, m019, m020, m021, m022, m023, m024, m025, m026, m027, m028, m029, m030, m031, m032, m033, m034, m035, m036, m037, m038, m039, m040, m041, m042, m043, m044, m045, m046, m047, m048, m049, m050, m051, m052, m053, m054, m055, m056];
 
 // A migration that cannot get its table lock (someone holds a long transaction) must fail
 // fast. Waiting forever would hang the deploy and queue every other query on that table

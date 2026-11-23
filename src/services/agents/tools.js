@@ -207,7 +207,7 @@ export const TOOLS = [
           numbers: mine.length ? mine : "all",
           groupChats: Boolean(agent.allow_groups),
           customerPhoneNumbers: agent.share_phones ? "visible" : "hidden",
-          limits: { messagesPerHour: agent.per_hour, messagesPer24Hours: agent.per_day, messagesPerChatPerHour: agent.per_chat_hour, ...(agent.allow_new_chats ? { newChatsPer24Hours: agent.new_chats_per_day } : {}) },
+          limits: { messagesPerHour: agent.per_hour, messagesPer24Hours: agent.per_day, messagesPerChatPerHour: agent.per_chat_hour, ...(agent.allow_new_chats ? { newChatsPerHour: agent.new_chats_per_hour, newChatsPer24Hours: agent.new_chats_per_day } : {}) },
           mayStartChatsWithNewNumbers: Boolean(agent.allow_new_chats),
           sentLastHour: usage.sentLastHour,
           sentLast24Hours: usage.sentLast24h,
@@ -513,7 +513,7 @@ export const TOOLS = [
         const own = await query("SELECT 1 FROM messages WHERE id=$1 AND tenant_id=$2 AND conversation_id=$3", [a.reply_to_message_id, agent.tenant_id, chat.id]);
         if (!own.rowCount) throw agentError(400, "invalid_input", "reply_to_message_id is not a message of this chat.", "Use a message id from get_conversation for this chat, or leave it out.");
       }
-      const reservation = await reserveSend(agent, chat.id, { via: ctx.via });
+      const reservation = await reserveSend(agent, chat.id, { via: ctx.via, firstMessage: Boolean(ctx.firstMessage) });
       ctx.logged = true; // the reservation is this call's record; it is settled below
       const started = Date.now();
       try {
@@ -597,7 +597,7 @@ export const TOOLS = [
         }
         const chat = await chatWithContact({ tenantId: agent.tenant_id, sessionName, contact: opened.contact });
         conversationId = chat.id;
-        const sent = await reply(chat);
+        const sent = await TOOL_MAP.get("send_message").run({ ...ctx, firstMessage: true }, { conversation_id: chat.id, text: a.text, idempotency_key: a.idempotency_key });
         await settleSend(reservation, { ok: true, summary: `Started a chat with a new number (${opened.created ? "new contact" : "known contact"})`, ms: Date.now() - started, conversationId });
         return { ...sent, startedNewChat: true, contactCreated: opened.created, note: "WhatsApp may restrict a number that messages people who have not written first. Send nothing more to this person unless they answer or the user asks." };
       } catch (error) {

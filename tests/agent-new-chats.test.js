@@ -161,11 +161,43 @@ test("the daily cap holds, also for a rush at once, and failed tries do not coun
   // a day later it may start more
   await query("UPDATE agent_events SET created_at=now() - interval '25 hours' WHERE agent_id=$1", [agent.id]);
   assert.equal((await start(agent, { phone: fresh(), text: "Next day", number: "main-line" })).startedNewChat, true);
-  // the ordinary message limits still apply to these messages
-  const tight = await c.makeAgent({ name: "Tight", level: "reply", perHour: 1 });
-  await allow(c, tight, { newChatsPerDay: 50 });
-  assert.equal((await start(tight, { phone: fresh(), text: "a", number: "main-line" })).sent, true);
-  assert.match((await start(tight, { phone: fresh(), text: "b", number: "main-line" })).error, /limit of 1 messages an hour/);
+});
+
+test("the limits for new numbers and for existing customers are separate: neither uses up the other", async () => {
+  const c = await agentCompany("newchat10");
+  const maria = await c.customer("971500090001", "Maria Lopez");
+  const agent = await c.makeAgent({ level: "reply", disclose: false, perHour: 1, perDay: 100, perChatHour: 50 });
+  await allow(c, agent, { newChatsPerHour: 2, newChatsPerDay: 50 });
+  assert.equal((await mcpTool(agent.key, "get_overview")).you.limits.newChatsPerHour, 2);
+  // one reply to an existing customer uses the whole existing-customer hour (the limit is 1) ...
+  assert.equal((await mcpTool(agent.key, "send_message", { conversation_id: maria.chat, text: "Hello Maria" })).sent, true);
+  assert.match((await mcpTool(agent.key, "send_message", { conversation_id: maria.chat, text: "Hello again" })).error, /limit of 1 messages an hour/);
+  // ... and the new-number limit is still all there: two chats with new numbers go out, the third is refused
+  assert.equal((await start(agent, { phone: fresh(), text: "a", number: "main-line" })).startedNewChat, true);
+  assert.equal((await start(agent, { phone: fresh(), text: "b", number: "main-line" })).startedNewChat, true);
+  const third = await restTool(agent.key, "message_new_number", { phone: fresh(), text: "c", number: "main-line" });
+  assert.deepEqual([third.status, third.body.code], [429, "limit_reached"]);
+  assert.match(third.body.message, /2 chats with new numbers in the last hour \(its limit is 2 an hour\)/);
+  assert.ok(third.body.retryAfter > 0 && third.body.retryAfter <= 3600);
+  // using up the new-number limit does not stop replies to existing customers: a fresh hour for them, the new-number cap still full
+  await query("UPDATE agent_events SET created_at=now() - interval '61 minutes' WHERE agent_id=$1 AND conversation_id=$2", [agent.id, maria.chat]);
+  assert.equal((await mcpTool(agent.key, "send_message", { conversation_id: maria.chat, text: "Hello once more" })).sent, true);
+  assert.equal((await restTool(agent.key, "message_new_number", { phone: fresh(), text: "d", number: "main-line" })).status, 429);
+  // the first messages did not count against the existing-customer limits; the reply did
+  assert.equal((await query("SELECT count(*)::int AS n FROM agent_events WHERE agent_id=$1 AND tool='send_message' AND first_message", [agent.id])).rows[0].n, 2);
+  // an hour later the new-number hour is free again
+  await query("UPDATE agent_events SET created_at=now() - interval '61 minutes' WHERE agent_id=$1 AND tool='message_new_number'", [agent.id]);
+  assert.equal((await start(agent, { phone: fresh(), text: "e", number: "main-line" })).startedNewChat, true);
+});
+
+test("a chat that already exists is an existing customer: the message uses the existing-customer limits, not the new-number ones", async () => {
+  const c = await agentCompany("newchat11");
+  const maria = await c.customer("971500090002", "Maria Lopez");
+  const agent = await c.makeAgent({ level: "reply", disclose: false, perHour: 50, perDay: 100, perChatHour: 50 });
+  await allow(c, agent, { newChatsPerHour: 1, newChatsPerDay: 1 });
+  for (const text of ["one", "two", "three"]) assert.equal((await start(agent, { phone: "971500090002", text, number: "main-line" })).startedNewChat, false, text);
+  assert.equal((await query("SELECT count(*)::int AS n FROM agent_events WHERE agent_id=$1 AND tool='message_new_number'", [agent.id])).rows[0].n, 0, "no new-chat allowance used");
+  assert.equal((await start(agent, { phone: fresh(), text: "new", number: "main-line" })).startedNewChat, true, "and the new-number limit is untouched");
 });
 
 test("trying again with the same number and words sends once, and uses one new-chat allowance", async () => {
@@ -191,7 +223,7 @@ test("the rules the agent is given say whether it may start chats, and the copie
   await allow(c, agent, { newChatsPerDay: 4 });
   const on = await rules();
   assert.match(on, /You may start a chat with a number that has not been messaged before, with message_new_number: only a number the user gave you/);
-  assert.match(on, /at most 4 new chats in 24 hours/);
+  assert.match(on, /at most 5 new chats in an hour and 4 in 24 hours/);
   assert.match(on, /send nothing more unless the person answers/);
   assert.match(await prompt(), /- message_new_number\(phone, text, number\?, name\?, idempotency_key\?\)/);
   const reader = await c.makeAgent({ name: "Reader", level: "read" });
@@ -199,12 +231,16 @@ test("the rules the agent is given say whether it may start chats, and the copie
   assert.ok(!/new number/.test(readerRules), "a read-only agent is told nothing about it");
 });
 
-test("the settings are checked: the cap is a whole number from 1 to 200, and the switch is true or false", async () => {
+test("the settings are checked: the caps are whole numbers (1 to 200 a day, 1 to 100 an hour), and the switch is true or false", async () => {
   const c = await agentCompany("newchat9");
   const make = (body) => request(app).post("/api/agents").set(c.owner).send({ name: "A", level: "reply", ...body });
   assert.equal((await make({ newChatsPerDay: 0 })).body.code, "invalid_setting");
   assert.equal((await make({ newChatsPerDay: 201 })).body.code, "invalid_setting");
+  assert.equal((await make({ newChatsPerHour: 0 })).body.code, "invalid_setting");
+  assert.equal((await make({ newChatsPerHour: 101 })).body.code, "invalid_setting");
   assert.equal((await make({ allowNewChats: "yes" })).body.code, "invalid_setting");
-  const ok = await make({ allowNewChats: true, newChatsPerDay: 25 });
-  assert.deepEqual([ok.status, ok.body.agent.allowNewChats, ok.body.agent.limits.newChatsPerDay], [201, true, 25]);
+  const ok = await make({ allowNewChats: true, newChatsPerDay: 25, newChatsPerHour: 7 });
+  assert.deepEqual([ok.status, ok.body.agent.allowNewChats, ok.body.agent.limits.newChatsPerDay, ok.body.agent.limits.newChatsPerHour], [201, true, 25, 7]);
+  const edited = await request(app).patch(`/api/agents/${ok.body.agent.id}`).set(c.owner).send({ newChatsPerHour: 3 });
+  assert.deepEqual([edited.body.agent.limits.newChatsPerHour, edited.body.agent.limits.newChatsPerDay], [3, 25], "changing one leaves the other");
 });

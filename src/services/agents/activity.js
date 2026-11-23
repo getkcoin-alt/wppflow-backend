@@ -23,7 +23,7 @@ export async function recordEvent({ tenantId, agentId, tool, ok, conversationId 
 // never finished stops counting after a couple of minutes.
 // (a send that turned out to be the same message again is on the record, but nothing was sent, so it does not count)
 export const SENT = "tool='send_message' AND ok IS TRUE AND error_code IS DISTINCT FROM 'duplicate'";
-const COUNTED = `tool='send_message' AND error_code IS DISTINCT FROM 'duplicate' AND (ok IS TRUE OR (ok IS NULL AND created_at > now() - $2::int * interval '1 second'))`;
+const COUNTED = `tool='send_message' AND NOT first_message AND error_code IS DISTINCT FROM 'duplicate' AND (ok IS TRUE OR (ok IS NULL AND created_at > now() - $2::int * interval '1 second'))`;
 
 const wait = (seconds) => {
   const s = Math.max(1, Math.ceil(Number(seconds) || 1));
@@ -32,9 +32,15 @@ const wait = (seconds) => {
 
 // Checks the agent's limits and, if it may send, writes a reservation (counted at once, so two calls at the same moment cannot both pass).
 // Returns the event id to settle after the send.
-export async function reserveSend(agent, conversationId, { via = "mcp" } = {}) {
+export async function reserveSend(agent, conversationId, { via = "mcp", firstMessage = false } = {}) {
   return withTransaction(async (c) => {
     await c.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`agent-send:${agent.id}`]);
+    // The first message of a chat with a new number was already allowed by the new-number limits (reserveNewChat), and does not use up the
+    // limits for existing customers.
+    if (firstMessage) {
+      const first = await c.query("INSERT INTO agent_events(tenant_id,agent_id,tool,ok,conversation_id,summary,via,first_message) VALUES($1,$2,'send_message',NULL,$3,'Sending a message',$4,true) RETURNING id", [agent.tenant_id, agent.id, conversationId, ["rest", "test"].includes(via) ? via : "mcp"]);
+      return first.rows[0].id;
+    }
     const { rows } = await c.query(
       `SELECT
          count(*) FILTER (WHERE created_at > now() - interval '1 hour')::int AS hour,
@@ -68,12 +74,18 @@ export async function reserveNewChat(agent, { via = "mcp" } = {}) {
   return withTransaction(async (c) => {
     await c.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`agent-newchat:${agent.id}`]);
     const { rows } = await c.query(
-      `SELECT count(*)::int AS n, ceil(extract(epoch FROM (min(created_at) + interval '24 hours' - now())))::int AS wait
+      `SELECT count(*)::int AS day,
+              count(*) FILTER (WHERE created_at > now() - interval '1 hour')::int AS hour,
+              ceil(extract(epoch FROM (min(created_at) + interval '24 hours' - now())))::int AS day_wait,
+              ceil(extract(epoch FROM (min(created_at) FILTER (WHERE created_at > now() - interval '1 hour') + interval '1 hour' - now())))::int AS hour_wait
          FROM agent_events WHERE agent_id=$1 AND tool='message_new_number' AND (ok IS TRUE OR (ok IS NULL AND created_at > now() - $2::int * interval '1 second')) AND created_at > now() - interval '24 hours'`,
       [agent.id, RESERVATION_SECONDS],
     );
-    if (rows[0].n >= agent.new_chats_per_day)
-      throw agentError(429, "limit_reached", `This agent has already started ${rows[0].n} chats with new numbers in 24 hours (its limit is ${agent.new_chats_per_day}).`, `Wait ${wait(rows[0].wait)}, or ask an owner or admin to raise the limit under Developers, AI agents. Do not look for another way to reach new people.`, { retryAfter: Math.max(1, rows[0].wait) });
+    const n = rows[0];
+    if (n.hour >= agent.new_chats_per_hour)
+      throw agentError(429, "limit_reached", `This agent has already started ${n.hour} chats with new numbers in the last hour (its limit is ${agent.new_chats_per_hour} an hour).`, `Wait ${wait(n.hour_wait)}, or ask an owner or admin to raise the limit under Developers, AI agents. Do not look for another way to reach new people.`, { retryAfter: Math.max(1, n.hour_wait) });
+    if (n.day >= agent.new_chats_per_day)
+      throw agentError(429, "limit_reached", `This agent has already started ${n.day} chats with new numbers in 24 hours (its limit is ${agent.new_chats_per_day}).`, `Wait ${wait(n.day_wait)}, or ask an owner or admin to raise the limit under Developers, AI agents. Do not look for another way to reach new people.`, { retryAfter: Math.max(1, n.day_wait) });
     const made = await c.query("INSERT INTO agent_events(tenant_id,agent_id,tool,ok,summary,via) VALUES($1,$2,'message_new_number',NULL,'Starting a chat with a new number',$3) RETURNING id", [agent.tenant_id, agent.id, ["rest", "test"].includes(via) ? via : "mcp"]);
     return made.rows[0].id;
   });
